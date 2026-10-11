@@ -1,9 +1,22 @@
 import type { DhanClient } from '@nemesis-oss/dhanhq-sdk';
 import type { InstrumentRef, Tick } from '../domain/types.js';
 import { instrumentKey } from '../domain/types.js';
+import type { Logger } from '../ops/logger.js';
 import { dhanEpochSecondsToMs } from '../time/ist.js';
 
 type FeedClient = Pick<DhanClient, 'ws'>;
+
+export interface DhanFeedOptions {
+  readonly istShiftedTimestamps: boolean;
+  readonly now?: () => number;
+  /** Where socket errors are logged. Errors are handled either way, so a missing logger never crashes the process. */
+  readonly logger?: Logger;
+  /**
+   * Opens the order-update socket as well as the market socket. Live mode needs it for fills. Sandbox and paper
+   * never use it, and the Dhan sandbox serves no WebSocket, so it stays closed there. Defaults to false.
+   */
+  readonly connectOrderUpdates?: boolean;
+}
 
 interface PriceEvent {
   readonly type: 'ticker' | 'quote' | 'full';
@@ -48,7 +61,7 @@ export class DhanFeed {
 
   constructor(
     private readonly client: FeedClient,
-    private readonly options: { istShiftedTimestamps: boolean; now?: () => number },
+    private readonly options: DhanFeedOptions,
   ) {}
 
   private get now(): () => number {
@@ -60,8 +73,29 @@ export class DhanFeed {
       return;
     }
     this.started = true;
-    this.client.ws.market.on('tick', (value: unknown) => this.handlePacket(value));
-    await this.client.ws.connect();
+    const { market, orders } = this.client.ws;
+    market.on('tick', (value: unknown) => this.handlePacket(value));
+    // The SDK re-emits a socket's connection errors as `error` events. With no listener, Node throws and the process
+    // dies, so every socket this feed opens gets one before it connects.
+    market.on('error', (error: unknown) => this.reportSocketError('market feed', error));
+    if (this.options.connectOrderUpdates === true) {
+      orders.on('error', (error: unknown) => this.reportSocketError('order update', error));
+      await this.client.ws.connect();
+      return;
+    }
+    await market.connect();
+  }
+
+  /**
+   * Logs a socket error by its name and code only. The SDK's socket URLs carry the access token, so the message
+   * is not logged. Ticks stop while the socket is down, and the stale-feed check refuses entries until they resume.
+   */
+  private reportSocketError(socket: string, error: unknown): void {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    this.options.logger?.error(`${socket} socket error; entries are refused while ticks are stale`, {
+      error: error instanceof Error ? error.name : 'unknown',
+      code: typeof code === 'string' ? code : undefined,
+    });
   }
 
   subscribe(refs: readonly InstrumentRef[]): void {

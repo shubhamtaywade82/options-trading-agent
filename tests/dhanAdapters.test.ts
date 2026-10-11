@@ -190,9 +190,12 @@ describe('feed', () => {
     const client = {
       ws: {
         market: {
-          on: (_event: string, listener: (value: unknown) => void) => {
-            handler = listener;
+          on: (event: string, listener: (value: unknown) => void) => {
+            if (event === 'tick') {
+              handler = listener;
+            }
           },
+          connect: async () => undefined,
           subscribe: (instruments: unknown[]) => subscribed.push(...instruments),
           unsubscribe: () => undefined,
         },

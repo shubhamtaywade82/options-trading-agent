@@ -97,7 +97,12 @@ async function compose(
     rateGate: session.rateGate,
     accountKey: clientId,
   });
-  const feed = new DhanFeed(dataClient, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
+  const feed = new DhanFeed(dataClient, {
+    istShiftedTimestamps: config.feed.istShiftedTimestamps,
+    now,
+    logger,
+    connectOrderUpdates: config.mode === 'live',
+  });
 
   const paperExchange = config.mode === 'paper' && config.paper.backend === 'exchange' ? buildPaperExchangeClient(config) : undefined;
   if (paperExchange !== undefined) {
