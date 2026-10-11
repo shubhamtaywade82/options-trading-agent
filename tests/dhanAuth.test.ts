@@ -1,6 +1,9 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { AuthenticationError, DhanAuth, TokenResponse } from '@nemesis-oss/dhanhq-sdk';
+import { AuthenticationError, DhanAuth, FileTokenStore, TokenResponse } from '@nemesis-oss/dhanhq-sdk';
 import {
   assertUsableToken,
   clarifyDhanLoginFailure,
@@ -172,6 +175,7 @@ describe('createDhanClient', () => {
     clientId: '1100000001',
     auth: { kind: 'otp', pin: '4321', totpSecret: RFC_SECRET },
     baseUrl: undefined,
+    tokenCacheDir: undefined,
   } as const;
 
   interface SdkStubs {
@@ -205,11 +209,32 @@ describe('createDhanClient', () => {
     return { logger: { info: write('info'), warn: write('warn'), error: write('error') }, lines };
   }
 
+  it('reuses a cached OTP token across separate client builds', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dhan-token-'));
+    const store = new FileTokenStore({ directory });
+    let logins = 0;
+    await withSdkStubs(
+      {
+        login: async () => {
+          logins += 1;
+          return new TokenResponse({ accessToken: 'cached-token', expiryTime: FUTURE });
+        },
+      },
+      async () => {
+        await createDhanClient(OTP_DHAN, { tokenStore: store });
+        assert.equal(logins, 1);
+        await createDhanClient(OTP_DHAN, { tokenStore: store });
+        assert.equal(logins, 1);
+      },
+    );
+  });
+
   it('builds a plain client from a static token without any network call', async () => {
     const client = await createDhanClient({
       clientId: '1100000001',
       auth: { kind: 'static', accessToken: 'static-token' },
       baseUrl: undefined,
+      tokenCacheDir: undefined,
     });
     assert.equal(client.getConfig().token, 'static-token');
   });

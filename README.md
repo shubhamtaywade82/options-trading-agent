@@ -195,11 +195,14 @@ and `TARGET_RR` per index and per regime. None of them has been calibrated again
 
 Set one source. Setting both is a startup error.
 
-- **OTP login (preferred).** `DHAN_PIN` and `DHAN_TOTP_SECRET`. At startup the agent sends the
-  client id, the PIN and a fresh TOTP code to `auth.dhan.co` and holds the returned token. The
-  token renews itself shortly before expiry. If a request gets a 401, one renewal runs and all
-  calls waiting on it share the result. A TOTP code with under 5 s left in its 30 s window is
-  not sent. The agent waits for the next window instead, because the code could expire in transit.
+- **OTP login (preferred).** `DHAN_PIN` and `DHAN_TOTP_SECRET`. On first login (or after expiry)
+  the agent sends the client id, PIN and a fresh TOTP code to `auth.dhan.co`. Valid tokens are
+  cached on disk (`~/.dhanhq` by default, or `DHAN_TOKEN_CACHE_DIR`) so `smoke:live` and
+  `dev:paper` in the same user account reuse one token instead of each starting a new PIN+TOTP
+  login. Dhan rate-limits repeated logins. The token renews via `RenewToken` before expiry. If a
+  request gets a 401, one renewal runs and all calls waiting on it share the result. A TOTP code
+  with under 5 s left in its 30 s window is not sent. The agent waits for the next window
+  instead, because the code could expire in transit.
 - **Static token.** `DHAN_ACCESS_TOKEN`, copied from the Dhan portal. It expires and is not
   renewed. Used only when neither OTP variable is set.
 

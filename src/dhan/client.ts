@@ -1,4 +1,4 @@
-import { DhanClient, TokenManager } from '@nemesis-oss/dhanhq-sdk';
+import { DhanClient, FileTokenStore, TokenManager, type TokenStore } from '@nemesis-oss/dhanhq-sdk';
 import type { AgentConfig, SandboxConfig } from '../config.js';
 import type { Logger } from '../ops/logger.js';
 import {
@@ -13,6 +13,8 @@ import {
 export interface DhanClientOptions {
   readonly logger?: Logger;
   readonly now?: () => number;
+  /** Overrides the on-disk OTP cache (tests). Production uses {@link AgentConfig.dhan.tokenCacheDir}. */
+  readonly tokenStore?: TokenStore;
   /**
    * Present in sandbox mode. The SDK's `hybrid` mode then serves market data from production on the production
    * credentials, and sends orders, positions, funds and controls to the sandbox on these credentials.
@@ -41,10 +43,9 @@ function sandboxOptions(sandbox: SandboxConfig | undefined): {
 /**
  * Builds the SDK client. Credentials come only from validated config.
  *
- * Static-token mode returns a plain client. OTP mode (PIN + TOTP) logs in before
- * returning, so a wrong PIN or secret stops startup instead of the first market-data
- * call. Renewal is automatic: each request asks the token manager for a valid token,
- * which renews shortly before expiry.
+ * Static-token mode returns a plain client. OTP mode (PIN + TOTP) reuses a cached token
+ * on disk when it is still valid, otherwise logs in once. Renewal uses the broker
+ * renew endpoint before expiry so each CLI start does not consume a PIN+TOTP slot.
  *
  * The OTP token provider is set in the constructor, not installed afterwards, because
  * the SDK copies `tokenProvider` into its WebSocket clients when the client is built.
@@ -108,10 +109,19 @@ export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanC
   });
   // Built directly, not through client.auth.enableAutoTokenManagement, because that call replaces
   // the provider in the client config. REST and both WebSocket feeds must share `provide`.
+  const tokenStore =
+    options.tokenStore ??
+    new FileTokenStore(dhan.tokenCacheDir === undefined ? {} : { directory: dhan.tokenCacheDir });
   manager = new TokenManager(client.getConfig(), {
     clientId: dhan.clientId,
     pin,
     totpProvider: createTotpProvider(totpSecret, { now }),
+    store: tokenStore,
+    onStoreError: (error) => {
+      options.logger?.warn('dhan token cache error', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
     onToken: (token) => {
       // Logs the expiry only. The token, PIN and TOTP secret never reach a log line.
       options.logger?.info('dhan access token issued', { expiresAt: formatExpiry(token.expiresAt) });

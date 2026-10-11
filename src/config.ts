@@ -52,6 +52,8 @@ export interface AgentConfig {
     readonly clientId: string;
     readonly auth: DhanAuthConfig;
     readonly baseUrl: string | undefined;
+    /** OTP tokens are cached here between process runs. Defaults to the SDK directory (~/.dhanhq). */
+    readonly tokenCacheDir: string | undefined;
   };
   /** Present only in sandbox mode. */
   readonly sandbox: SandboxConfig | undefined;
@@ -262,6 +264,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       clientId: text(env, 'DHAN_CLIENT_ID'),
       auth: parseDhanAuth(env),
       baseUrl: dhanBaseUrl,
+      tokenCacheDir: optionalText(env, 'DHAN_TOKEN_CACHE_DIR'),
     },
     sandbox: mode === 'sandbox' ? parseSandbox(env, dhanBaseUrl) : undefined,
     underlyings: parseUnderlyings(env),
