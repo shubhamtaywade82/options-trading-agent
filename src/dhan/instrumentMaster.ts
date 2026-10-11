@@ -1,5 +1,8 @@
 import type { Instrument } from '@nemesis-oss/dhanhq-sdk';
+import { z } from 'zod';
 import type { InstrumentRef, OptionContract, OptionSegment, OptionType } from '../domain/types.js';
+import type { CacheStore } from '../persistence/cache.js';
+import { msUntilNextIstMidnight } from '../persistence/cache.js';
 
 /** The slice of the SDK's `client.instruments` this module needs. */
 export interface InstrumentSource {
@@ -7,6 +10,19 @@ export interface InstrumentSource {
 }
 
 const ISO_DATE_PREFIX = /^(\d{4}-\d{2}-\d{2})/;
+
+const CONTRACT = z.object({
+  underlying: z.string().min(1),
+  securityId: z.string().min(1),
+  exchangeSegment: z.enum(['NSE_FNO', 'BSE_FNO']),
+  symbol: z.string().min(1),
+  optionType: z.enum(['CE', 'PE']),
+  strike: z.number().positive(),
+  expiry: z.string().regex(ISO_DATE_PREFIX),
+  lotSize: z.number().int().positive(),
+  tickSize: z.number().positive(),
+});
+const CONTRACT_LIST = z.array(CONTRACT);
 
 /** Scrip-master expiries arrive as `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS`; both reduce to the date. */
 export function normalizeExpiry(raw: string | undefined): string | undefined {
@@ -69,6 +85,11 @@ export class InstrumentMaster {
   constructor(
     private readonly source: InstrumentSource,
     private readonly istDay: () => string,
+    private readonly options: {
+      /** Shared across processes and restarts. Entries expire at the next IST midnight. */
+      readonly cache?: CacheStore;
+      readonly now?: () => number;
+    } = {},
   ) {}
 
   async resolveSpot(symbol: string, spotSegment: 'IDX_I' = 'IDX_I'): Promise<InstrumentRef> {
@@ -96,6 +117,11 @@ export class InstrumentMaster {
     if (cached !== undefined && cached.day === day) {
       return cached.contracts;
     }
+    const shared = await this.sharedContracts(key, day);
+    if (shared !== undefined) {
+      this.contractCache.set(key, { day, contracts: shared });
+      return shared;
+    }
     const wanted = underlying.toUpperCase();
     const rows = await this.source.bySegment(optionSegment);
     const contracts = rows
@@ -105,6 +131,21 @@ export class InstrumentMaster {
       throw new Error(`no ${optionSegment} index option contracts found for ${underlying}`);
     }
     this.contractCache.set(key, { day, contracts });
+    await this.options.cache?.set(this.cacheKey(key, day), contracts, msUntilNextIstMidnight((this.options.now ?? Date.now)()));
     return contracts;
+  }
+
+  /** A shared entry is trusted only after it passes the same shape check as a fresh read. A bad entry is a miss. */
+  private async sharedContracts(key: string, day: string): Promise<readonly OptionContract[] | undefined> {
+    if (this.options.cache === undefined) {
+      return undefined;
+    }
+    const raw = await this.options.cache.get<unknown>(this.cacheKey(key, day));
+    const parsed = CONTRACT_LIST.safeParse(raw);
+    return parsed.success && parsed.data.length > 0 ? parsed.data : undefined;
+  }
+
+  private cacheKey(key: string, day: string): string {
+    return `contracts:${key}:${day}`;
   }
 }

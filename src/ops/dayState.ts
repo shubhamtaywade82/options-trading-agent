@@ -17,7 +17,7 @@ export interface RestoreResult {
  * interrupted write is the usual cause, and the operator must inspect it first.
  */
 export function restoreDayBook(book: DayBook, journalLines: readonly string[], dayKey: string): RestoreResult {
-  const open = new Map<string, number>();
+  const open = new Map<string, { index: number; at: number }>();
   let applied = 0;
   journalLines.forEach((line, index) => {
     if (line.trim() === '') {
@@ -41,7 +41,7 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
       case 'entry_submitted':
         if (underlying !== undefined) {
           book.recordEntry(underlying);
-          open.set(underlying, index);
+          open.set(underlying, { index, at });
           applied += 1;
         }
         break;
@@ -64,7 +64,16 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
         applied += 1;
         break;
       case 'daily_loss_breach':
-        book.activateKillSwitch('daily loss limit breached earlier today');
+        book.recordDailyLossBreach('daily loss limit breached earlier today');
+        applied += 1;
+        break;
+      // Replayed in journal order, so a clear that followed a breach clears it here too, as it did at runtime.
+      case 'operator_entry_block':
+        book.activateKillSwitch(typeof event.reason === 'string' ? event.reason : 'operator entry block (restored)');
+        applied += 1;
+        break;
+      case 'operator_entry_clear':
+        book.clearKillSwitch();
         applied += 1;
         break;
       default:
@@ -73,7 +82,8 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
   });
   const released = [...open.keys()].sort();
   for (const underlying of released) {
-    book.releaseUnfilled(underlying);
+    // An intent with no outcome may have reached the broker. It still starts a cooldown, so a restart cannot re-enter at once.
+    book.recordClose({ underlying, pnlInr: 0, closedAtMs: open.get(underlying)?.at ?? 0 });
   }
   return { eventsApplied: applied, releasedUnresolved: released };
 }

@@ -16,20 +16,45 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 | Long CE / long PE on index options (buy-to-open only) | Any option selling, spreads that sell premium, or short options |
 | NSE_FNO and BSE_FNO index options | Equities, futures, commodities, crypto |
 | DhanHQ REST + WebSocket market data and super-order execution | Other brokers |
-| Paper venue on live market data, and live venue | Historical option backtesting (not yet, see Known limits) |
+| Three modes on live market data: `paper`, `sandbox`, `live` | Historical option backtesting (not yet, see Known limits) |
 
 ## Quick start
 
 ```bash
-npm ci                       # installs @nemesis-oss/dhanhq-sdk pinned to a git commit (builds on prepare)
-                             # CI rewrites github ssh URLs to https first; see .github/workflows/ci.yml
-cp .env.example .env         # fill DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
+npm ci                       # installs @nemesis-oss/dhanhq-sdk 1.3.0 from npm (exact pin)
+cp .env.example .env         # fill DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (see Dhan authentication)
 npm run typecheck && npm test
 npm run dev:paper            # paper venue, live market data, simulated fills
 ```
 
+There are three modes. Market data is always the live Dhan feed in every mode.
+
+| Mode | Market data | Orders go to | Persistence |
+| --- | --- | --- | --- |
+| `paper` | live Dhan feed | `PAPER_BACKEND=postgres`: simulated venue in PostgreSQL. `PAPER_BACKEND=exchange`: a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server | PostgreSQL (required) |
+| `sandbox` | live Dhan feed | Dhan sandbox account via the SDK's `hybrid` mode (`DHAN_SANDBOX_*`) | PostgreSQL and Redis (required) |
+| `live` | live Dhan feed | Dhan production account | PostgreSQL and Redis (required) |
+
 Live trading needs `MODE=live` **and** `LIVE_TRADING_ACK=I_ACCEPT_LIVE_ORDER_RISK`. Without
-both, the process exits before opening a socket.
+both, the process exits before opening a socket. `npm run dev:sandbox` starts sandbox mode.
+Each mode holds its own trading lease, keyed `mode:clientId`, so a paper run never blocks a live run.
+
+### Running paper against paper_exchange
+
+`PAPER_BACKEND=exchange` sends paper orders to a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server, which keeps the account, margin and ledger. Set `PAPER_EXCHANGE_URL` (https, or http on loopback), `PAPER_EXCHANGE_API_KEY` and optionally `PAPER_EXCHANGE_ACCOUNT_ID`.
+
+The account must be INR. The server's reset endpoint creates USD accounts, so after a reset set the currency to INR on the server. The agent refuses to start otherwise.
+
+To run the end-to-end suite against a server (it places real paper orders on that account and leaves no position open):
+
+```bash
+PAPER_EXCHANGE_E2E_URL=http://127.0.0.1:3100 \
+PAPER_EXCHANGE_E2E_API_KEY=... \
+PAPER_EXCHANGE_E2E_ACCOUNT=<inr-account-id> \
+npx tsx --test tests/paperExchange.e2e.test.ts
+```
+
+Without those variables the suite is skipped.
 
 Node 22 or newer is required.
 
@@ -64,6 +89,34 @@ Node 22 or newer is required.
 
 Details, the full transition table, and the failure-mode matrix are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Operator cockpit
+
+On an interactive terminal, `npm run dev:paper` (and `dev:live`) opens a full-screen cockpit in the same
+layout family as the crypto dashboard: header, four framed columns, a detail row, the event log, and a
+footer. Set `UI=off`, or pipe the output, for plain log lines under a process supervisor.
+
+```
+UNDERLYINGS     SIGNAL & CONTRACT           POSITION          RISK & DAY
+▸ NIFTY IDLE    SELECTED NIFTY               flat             P&L +₹83.75
+  spot, age     LAST SIGNAL / REJECTION      LAST EXIT        loss ░░░░ 0% of ₹3,000
+  ST, ORB       LAST CANDIDATE (contract,    (or the open     trades 2/3, open 1/1
+  EMA           ask, spread, OI, SL, TP)     position: mark,  kill switch off
+                                             P&L, held time)
+```
+
+| Key | Action | Notes |
+| --- | --- | --- |
+| `↑` `↓` | select underlying | The columns and detail follow the selection. |
+| `c` | close the selected position | Goes through the normal exit path (reason `MANUAL`). Press twice within 5 s. |
+| `k` | toggle the entry block | Blocks new entries. Clearing is refused while any underlying is halted or the day has breached its loss limit. Press twice. |
+| `s` or `ctrl+c` | stop | Flattens open positions, then exits. Press twice. |
+| `?` | help line | |
+
+The cockpit only reads state, except for these three actions, and every action needs a second press.
+Its data comes from `Orchestrator.snapshot()`, a read-only view built from the agents and the day
+book. Rendering it never changes trading state. Its log is an in-memory ring of the last 200 records;
+the durable record is still the journal.
 
 ## Strategy and contract selection
 
@@ -102,7 +155,7 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Kill switch | `DayBook`, `engageBrokerKillSwitch` | Local block on entries; broker kill switch on halts and on daily-loss breach once flat. |
 | Clock alignment | `assertWarmupClock` | Startup refuses if bar timestamps are inconsistent with the wall clock (wrong epoch convention). |
 | Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. |
-| Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal. A malformed journal line refuses startup. |
+| Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal file (`data/journal/events-YYYY-MM-DD.jsonl`). A malformed line in that file refuses startup. |
 
 ## Execution invariants (live)
 
@@ -137,6 +190,37 @@ All keys, defaults, and bounds are in [`.env.example`](.env.example) and `src/co
 Invalid or unsafe values stop startup with a message that names the key. Defaults are
 starting points. Tune `MIN_OPEN_INTEREST`, `MIN_VOLUME`, `MAX_SPREAD_PCT`, `STOP_LOSS_PCT`,
 and `TARGET_RR` per index and per regime. None of them has been calibrated against data here.
+
+## Dhan authentication
+
+Set one source. Setting both is a startup error.
+
+- **OTP login (preferred).** `DHAN_PIN` and `DHAN_TOTP_SECRET`. At startup the agent sends the
+  client id, the PIN and a fresh TOTP code to `auth.dhan.co` and holds the returned token. The
+  token renews itself shortly before expiry. If a request gets a 401, one renewal runs and all
+  calls waiting on it share the result. A TOTP code with under 5 s left in its 30 s window is
+  not sent. The agent waits for the next window instead, because the code could expire in transit.
+- **Static token.** `DHAN_ACCESS_TOKEN`, copied from the Dhan portal. It expires and is not
+  renewed. Used only when neither OTP variable is set.
+
+The PIN and the TOTP secret together let anyone mint tokens for the account indefinitely.
+Keep both in `.env` (gitignored) or your secret store. Never commit them, paste them into an
+issue, or put them in a log. The agent logs the token expiry time. It never logs the token,
+the PIN or the secret.
+
+The login path is covered by tests that replace the SDK's HTTP call with a stub. The real broker
+exchange has not been run from this environment. Run `npm run smoke:live` with real credentials
+before relying on it. The first check it runs is the login.
+
+## Tools
+
+| Command | What it does | Credentials |
+| --- | --- | --- |
+| `npm run cockpit:demo` | Opens the operator cockpit on fakes, to see the screen. | none |
+| `npm run smoke:live` | Read-only check of the open assumptions against live Dhan data: scrip master, expiries, option-chain fields, warmup bars and clock, funds, open broker positions. Places no orders. | Dhan |
+| `npm run journal:summary [YYYY-MM-DD]` | Summarises a day's journal: trades, wins and losses, realised P&L, exit reasons, dropped-signal reasons, halts. | none |
+
+Run `smoke:live` before a live session, and `journal:summary` after every paper session.
 
 ## Testing
 
@@ -196,7 +280,6 @@ These are assumptions the code depends on that the SDK docs do not settle:
 - Paper fills model neither queue position nor partial fills, and slippage is a flat bps
   parameter. Paper P&L is an approximation.
 - The strategy's indicator parameters are not optimised. Treat paper results as a smoke test.
-- The journal is read in full at startup. It grows with the audit trail and is not rotated yet.
 - The feed runs in the SDK's default `full` packet mode. The agent reads only LTP and last-traded time, so live bar volume is zero and no rule uses volume.
 
 ## What was removed
@@ -207,13 +290,14 @@ From `crypto-trading-agent` main (the full tree is in the baseline commit):
 - `src/strategies/smc-ml`, `src/minicpm`, `src/research`, `src/learning`, `src/backtesting`
 - perpetual, funding, carry, crowding, and open-interest logic in `src/market`, `src/agents`,
   `src/decision`, `src/position`, `src/risk`
-- the Ink crypto dashboard and its panels (`src/ui`)
 - crypto docs, improvement notes, scripts, and tests
+
+The Ink dashboard was rebuilt for options rather than removed. See [Operator cockpit](#operator-cockpit).
 
 `npm test` is a fresh suite for the index-options system. The dependency on
 `@nemesis-oss/ollama-sdk` is kept and upgraded to the 1.13 line. The DhanHQ dependency is
-`@nemesis-oss/dhanhq-sdk` pinned to commit `353901e` (v1.2.0 on `main`), which includes the
-trading-write replay-safety fix. The npm registry's latest release is 1.1.0.
+`@nemesis-oss/dhanhq-sdk` is pinned exactly to 1.3.0 from npm. It replaces the earlier git pin
+to commit `353901e` (v1.2.0).
 
 ## Layout
 
@@ -230,6 +314,8 @@ src/
   execution/           ExecutionPort contract, paper venue
   llm/                 Ollama advisor
   ops/                 event log, console logger
-  runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring
+  runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring, read-only views
+  ui/                  operator cockpit: pure renderer (cockpit.ts) and Ink app (App.tsx)
+  index.tsx            entry point: cockpit on a terminal, plain logs otherwise
 tests/                 offline suite (node:test via tsx)
 ```

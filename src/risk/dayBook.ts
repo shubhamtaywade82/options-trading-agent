@@ -8,6 +8,8 @@ export interface DaySnapshot {
   readonly tradesToday: number;
   readonly openUnderlyings: readonly string[];
   readonly killSwitchReason: string | undefined;
+  /** Set once the day has breached its loss limit. Latched separately from killSwitchReason, which an operator block can occupy first. */
+  readonly dailyLossBreach: string | undefined;
 }
 
 /**
@@ -24,6 +26,7 @@ export class DayBook {
   private readonly openUnderlyings = new Set<string>();
   private readonly cooldownUntil = new Map<string, number>();
   private killSwitchReason: string | undefined;
+  private dailyLossBreach: string | undefined;
 
   constructor(
     nowMs: number,
@@ -77,9 +80,19 @@ export class DayBook {
     this.killSwitchReason ??= reason;
   }
 
-  /** Operator action only. Clears the kill switch after the cause has been dealt with. */
+  /**
+   * Records a daily-loss breach. The first breach reason is kept. The kill switch is set only if
+   * nothing else holds it, so an operator block keeps its own reason and the breach is still latched.
+   */
+  recordDailyLossBreach(reason: string): void {
+    this.dailyLossBreach ??= reason;
+    this.activateKillSwitch(reason);
+  }
+
+  /** Operator action only. Clears the kill switch and the breach latch after the cause has been dealt with. */
   clearKillSwitch(): void {
     this.killSwitchReason = undefined;
+    this.dailyLossBreach = undefined;
   }
 
   cooldownUntilFor(underlying: string): number | undefined {
@@ -99,6 +112,7 @@ export class DayBook {
       tradesToday: this.trades,
       openUnderlyings: [...this.openUnderlyings].sort(),
       killSwitchReason: this.killSwitchReason,
+      dailyLossBreach: this.dailyLossBreach,
     };
   }
 }

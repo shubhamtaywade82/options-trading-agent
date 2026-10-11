@@ -16,6 +16,25 @@ export interface OrbSupertrendParams {
   readonly sessionOpenMinute: number;
 }
 
+/** High and low of the bars on one IST date that open within [fromMinute, toMinute). Undefined when there are none. */
+export function sessionRange(
+  bars: readonly Candle[],
+  dateKey: string,
+  fromMinute: number,
+  toMinute: number,
+): { high: number; low: number } | undefined {
+  let high = Number.NEGATIVE_INFINITY;
+  let low = Number.POSITIVE_INFINITY;
+  for (const bar of bars) {
+    const parts = istParts(bar.time);
+    if (parts.date === dateKey && parts.minuteOfDay >= fromMinute && parts.minuteOfDay < toMinute) {
+      high = Math.max(high, bar.high);
+      low = Math.min(low, bar.low);
+    }
+  }
+  return Number.isFinite(high) && Number.isFinite(low) ? { high, low } : undefined;
+}
+
 /**
  * Opening-range breakout confirmed by SuperTrend direction and EMA alignment,
  * evaluated only on closed bars. A signal fires on the bar that crosses the
@@ -44,15 +63,11 @@ export function evaluateOrbSupertrend(bars: readonly Candle[], params: OrbSupert
     return undefined;
   }
 
-  const sessionBars = bars.filter((bar) => {
-    const parts = istParts(bar.time);
-    return parts.date === signalParts.date && parts.minuteOfDay >= params.sessionOpenMinute && parts.minuteOfDay < orbEndMinute;
-  });
-  if (sessionBars.length === 0) {
+  const range = sessionRange(bars, signalParts.date, params.sessionOpenMinute, orbEndMinute);
+  if (range === undefined) {
     return undefined;
   }
-  const orbHigh = Math.max(...sessionBars.map((bar) => bar.high));
-  const orbLow = Math.min(...sessionBars.map((bar) => bar.low));
+  const { high: orbHigh, low: orbLow } = range;
 
   const closes = bars.map((bar) => bar.close);
   const fast = ema(closes, params.emaFast);

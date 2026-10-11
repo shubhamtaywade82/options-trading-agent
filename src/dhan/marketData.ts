@@ -1,6 +1,7 @@
 import type { DhanClient } from '@nemesis-oss/dhanhq-sdk';
 import type { Candle, InstrumentRef } from '../domain/types.js';
 import type { ChainLeg, ChainSnapshot, ChainStrike } from '../options/selector.js';
+import { MemoryRateGate, type RateGate } from '../persistence/rateGate.js';
 import { dhanEpochSecondsToMs } from '../time/ist.js';
 
 /** Dhan rate-limits `/optionchain` to one call every three seconds. */
@@ -70,8 +71,8 @@ type MarketDataClient = Pick<DhanClient, 'charts' | 'optionChain' | 'funds'>;
 export class DhanMarketData {
   private readonly chains = new Map<string, { fetchedAt: number; snapshot: ChainSnapshot }>();
   private readonly inFlight = new Map<string, Promise<ChainSnapshot>>();
-  private lastChainCallAt = Number.NEGATIVE_INFINITY;
   private chainTail: Promise<void> = Promise.resolve();
+  private readonly gate: RateGate;
 
   constructor(
     private readonly client: MarketDataClient,
@@ -79,8 +80,19 @@ export class DhanMarketData {
       istShiftedTimestamps: boolean;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
+      /** Account-wide spacing for chain calls. Redis-backed when two processes share an account. */
+      rateGate?: RateGate;
+      /** Names the account the rate gate counts against. */
+      accountKey?: string;
     },
-  ) {}
+  ) {
+    this.gate =
+      options.rateGate ??
+      new MemoryRateGate({
+        now: options.now ?? Date.now,
+        ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+      });
+  }
 
   private get now(): () => number {
     return this.options.now ?? Date.now;
@@ -141,11 +153,7 @@ export class DhanMarketData {
   /** Serialises chain calls account-wide so consecutive requests are never closer than the rate limit. */
   private throttledFetch(spot: InstrumentRef, expiry: string, key: string): Promise<ChainSnapshot> {
     const turn = this.chainTail.then(async () => {
-      const wait = this.lastChainCallAt + OPTION_CHAIN_MIN_INTERVAL_MS - this.now();
-      if (wait > 0) {
-        await (this.options.sleep ?? defaultSleep)(wait);
-      }
-      this.lastChainCallAt = this.now();
+      await this.gate.acquire(this.options.accountKey ?? 'default', OPTION_CHAIN_MIN_INTERVAL_MS);
       return this.fetchChain(spot, expiry, key);
     });
     this.chainTail = turn.then(
@@ -171,10 +179,6 @@ export class DhanMarketData {
     this.chains.set(key, { fetchedAt, snapshot });
     return snapshot;
   }
-}
-
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function optionalNumber(value: unknown): number | undefined {

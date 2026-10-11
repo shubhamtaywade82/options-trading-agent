@@ -9,6 +9,7 @@ import {
 import type { InstrumentRef, Tick } from '../domain/types.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { Logger } from '../ops/logger.js';
+import { fitsBrokerLimit } from '../execution/brokerIds.js';
 
 export type LiveClient = Pick<DhanClient, 'orders' | 'superOrders' | 'positions' | 'traderControls'> & {
   readonly ws: Pick<DhanClient['ws'], 'orders'>;
@@ -17,11 +18,15 @@ export type LiveClient = Pick<DhanClient, 'orders' | 'superOrders' | 'positions'
 type PositionRow = Awaited<ReturnType<DhanClient['positions']['list']>>[number];
 
 export interface LiveExecutionOptions {
+  /** Which Dhan account the orders reach. Stamped on every event through the port's mode, so a sandbox order is never journalled as live. */
+  readonly mode: 'live' | 'sandbox';
   readonly orderTimeoutMs: number;
   readonly reconcileIntervalMs: number;
   readonly logger: Logger;
   readonly now?: () => number;
 }
+
+type BracketLeg = 'STOP_LOSS_LEG' | 'TARGET_LEG';
 
 interface TrackedPosition {
   readonly positionId: string;
@@ -33,7 +38,12 @@ interface TrackedPosition {
   confirmed: boolean;
   exitInFlight: boolean;
   mismatchReported: boolean;
+  /** Legs the broker has confirmed cancelled. A retry cancels only the rest, so it never re-cancels a leg. */
+  cancelledLegs: Set<BracketLeg>;
 }
+
+const LEG_CANCEL_ATTEMPTS = 3;
+const LEG_CANCEL_BACKOFF_MS = 250;
 
 /** Abandon an entry that never confirmed and never showed up at the broker after this long. */
 const UNCONFIRMED_ENTRY_RETENTION_MS = 10 * 60_000;
@@ -73,7 +83,7 @@ function describeError(error: unknown): string {
  * be validated in a sandbox before live use.
  */
 export class LiveExecutionPort implements ExecutionPort {
-  readonly mode = 'live' as const;
+  readonly mode: 'live' | 'sandbox';
   private readonly listeners = new Set<ExecutionListener>();
   private readonly tracker = new OrderTracker();
   private readonly tracked = new Map<string, TrackedPosition>();
@@ -85,6 +95,7 @@ export class LiveExecutionPort implements ExecutionPort {
     private readonly client: LiveClient,
     private readonly options: LiveExecutionOptions,
   ) {
+    this.mode = options.mode;
     this.now = options.now ?? Date.now;
     client.ws.orders.on('order', (state: OrderState) => this.tracker.onOrderUpdate(state));
   }
@@ -113,6 +124,10 @@ export class LiveExecutionPort implements ExecutionPort {
 
   async submitEntry(order: EntryOrder): Promise<void> {
     const cid = order.correlationId;
+    if (!fitsBrokerLimit(cid)) {
+      this.emit({ kind: 'ENTRY_REJECTED', correlationId: cid, underlying: order.underlying, reason: `correlation id of ${cid.length} characters exceeds the broker limit; not sent` });
+      return;
+    }
     const waiter = this.tracker.waitFor(cid, { timeoutMs: this.options.orderTimeoutMs });
     waiter.catch(() => undefined);
 
@@ -148,6 +163,16 @@ export class LiveExecutionPort implements ExecutionPort {
   }
 
   async submitExit(order: ExitOrder): Promise<void> {
+    if (!fitsBrokerLimit(order.correlationId)) {
+      this.emit({
+        kind: 'EXIT_REJECTED',
+        correlationId: order.correlationId,
+        underlying: order.underlying,
+        positionId: order.positionId,
+        reason: `correlation id of ${order.correlationId.length} characters exceeds the broker limit; not sent`,
+      });
+      return;
+    }
     const tracked = this.tracked.get(order.positionId);
     if (tracked === undefined) {
       this.emit({
@@ -163,7 +188,40 @@ export class LiveExecutionPort implements ExecutionPort {
     tracked.exitInFlight = true;
     let handedOff = false;
     try {
-      const legsCancelled = await this.cancelBracketLegs(tracked);
+      // Order matters. Read first: if the position cannot be read, nothing is cancelled and the stop keeps protecting it.
+      const first = await this.brokerPosition(tracked.ref);
+      if (first === undefined) {
+        this.emit({
+          kind: 'EXIT_UNCONFIRMED',
+          correlationId: order.correlationId,
+          underlying: order.underlying,
+          positionId: order.positionId,
+          reason: 'broker positions unavailable; nothing cancelled, the position keeps its protective legs',
+        });
+        return;
+      }
+      if (first.netQty < 0) {
+        this.reportMismatch(tracked, `broker shows net short ${first.netQty}; refusing to send exit`);
+        return;
+      }
+      if (first.netQty === 0) {
+        this.reportFlatAtBroker(tracked, order, first);
+        return;
+      }
+
+      // Cancel the legs that are still active, retrying the ones that failed. A SELL is never sent while a leg could still fire.
+      if (!(await this.cancelBracketLegsWithRetry(tracked))) {
+        this.emit({
+          kind: 'EXIT_UNCONFIRMED',
+          correlationId: order.correlationId,
+          underlying: order.underlying,
+          positionId: order.positionId,
+          reason: 'protective legs not confirmed cancelled after retries; exit not sent',
+        });
+        return;
+      }
+
+      // A leg may have filled while it was being cancelled. The position is read again, and the SELL is sized to what is still held.
       const broker = await this.brokerPosition(tracked.ref);
       if (broker === undefined) {
         this.emit({
@@ -171,35 +229,16 @@ export class LiveExecutionPort implements ExecutionPort {
           correlationId: order.correlationId,
           underlying: order.underlying,
           positionId: order.positionId,
-          reason: 'broker positions unavailable; exit not sent',
+          reason: 'broker positions unavailable after cancelling the legs; exit not sent',
         });
         return;
       }
       if (broker.netQty < 0) {
-        this.reportMismatch(tracked, `broker shows net short ${broker.netQty}; refusing to send exit`);
+        this.reportMismatch(tracked, `broker shows net short ${broker.netQty} after cancelling the legs; refusing to send exit`);
         return;
       }
       if (broker.netQty === 0) {
-        this.tracked.delete(order.positionId);
-        this.emitTerminal(`protective:${order.positionId}`, {
-          kind: 'PROTECTIVE_EXIT_FILLED',
-          underlying: order.underlying,
-          positionId: order.positionId,
-          quantity: broker.sellQty ?? tracked.quantity,
-          averagePrice: broker.sellAvg ?? order.referencePrice,
-          reason: 'EXTERNAL',
-          at: this.now(),
-        });
-        return;
-      }
-      if (!legsCancelled) {
-        this.emit({
-          kind: 'EXIT_UNCONFIRMED',
-          correlationId: order.correlationId,
-          underlying: order.underlying,
-          positionId: order.positionId,
-          reason: 'protective legs not confirmed cancelled while position is still long; exit not sent',
-        });
+        this.reportFlatAtBroker(tracked, order, broker);
         return;
       }
 
@@ -268,6 +307,7 @@ export class LiveExecutionPort implements ExecutionPort {
       confirmed: false,
       exitInFlight: false,
       mismatchReported: false,
+      cancelledLegs: new Set(),
     });
   }
 
@@ -362,14 +402,19 @@ export class LiveExecutionPort implements ExecutionPort {
   }
 
   /** Returns true when no protective leg remains active. Failures are logged; a false result blocks the exit. */
+  /** Cancels every leg not yet confirmed cancelled. Returns true only when all of them are. */
   private async cancelBracketLegs(tracked: TrackedPosition): Promise<boolean> {
     if (tracked.orderId === undefined) {
       return false;
     }
     let allCancelled = true;
     for (const orderLeg of ['STOP_LOSS_LEG', 'TARGET_LEG'] as const) {
+      if (tracked.cancelledLegs.has(orderLeg)) {
+        continue;
+      }
       try {
         await this.client.superOrders.cancel({ orderId: tracked.orderId, orderLeg });
+        tracked.cancelledLegs.add(orderLeg);
       } catch (error) {
         allCancelled = false;
         this.options.logger.warn('protective leg cancel did not succeed', {
@@ -380,6 +425,36 @@ export class LiveExecutionPort implements ExecutionPort {
       }
     }
     return allCancelled;
+  }
+
+  private async cancelBracketLegsWithRetry(tracked: TrackedPosition): Promise<boolean> {
+    for (let attempt = 1; attempt <= LEG_CANCEL_ATTEMPTS; attempt += 1) {
+      if (await this.cancelBracketLegs(tracked)) {
+        return true;
+      }
+      if (attempt < LEG_CANCEL_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, LEG_CANCEL_BACKOFF_MS * attempt));
+      }
+    }
+    return false;
+  }
+
+  /** The broker shows no position: the bracket or an earlier exit closed it. Reported as a protective exit. */
+  private reportFlatAtBroker(
+    tracked: TrackedPosition,
+    order: ExitOrder,
+    broker: { readonly sellAvg: number | undefined; readonly sellQty: number | undefined },
+  ): void {
+    this.tracked.delete(order.positionId);
+    this.emitTerminal(`protective:${order.positionId}`, {
+      kind: 'PROTECTIVE_EXIT_FILLED',
+      underlying: order.underlying,
+      positionId: order.positionId,
+      quantity: broker.sellQty ?? tracked.quantity,
+      averagePrice: broker.sellAvg ?? order.referencePrice,
+      reason: 'EXTERNAL',
+      at: this.now(),
+    });
   }
 
   /** Broker's view of one instrument. Undefined when the read fails or the row is incomplete. */

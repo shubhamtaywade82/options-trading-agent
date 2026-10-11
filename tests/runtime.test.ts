@@ -8,6 +8,7 @@ import type { AdvisoryVerdict, TradeAdvisor } from '../src/llm/advisor.js';
 import type { EventLog } from '../src/ops/eventLog.js';
 import type { Logger } from '../src/ops/logger.js';
 import { Orchestrator, type OrchestratorFeed } from '../src/runtime/orchestrator.js';
+import { ledgerAndLeaseGate, type TradingGate } from '../src/runtime/tradingGate.js';
 import type { ChainSnapshot } from '../src/options/selector.js';
 import { bar, contract, istEpoch, SESSION_DAY } from './support/fixtures.js';
 
@@ -41,15 +42,19 @@ interface Harness {
   readonly feed: FakeFeed;
   readonly events: { type: string; payload: Record<string, unknown> }[];
   readonly setClock: (hhmmValue: string, day?: string) => void;
+  readonly now: () => number;
   readonly paperCloses: ExitOrder[];
 }
 
 class FakeFeed implements OrchestratorFeed {
   readonly subscribed = new Set<string>();
   age: number | undefined = 100;
+  startCalled = false;
   private readonly listeners = new Set<(tick: Tick) => void>();
+  constructor(private readonly startGate?: Promise<void>) {}
   async start(): Promise<void> {
-    return;
+    this.startCalled = true;
+    await this.startGate;
   }
   stop(): void {
     this.listeners.clear();
@@ -100,7 +105,19 @@ function chain(now: () => number): ChainSnapshot {
 
 function build(
   env: Record<string, string> = {},
-  options: { advisor?: TradeAdvisor; execution?: ExecutionPort; brokerOpen?: number } = {},
+  options: {
+    advisor?: TradeAdvisor;
+    execution?: ExecutionPort;
+    brokerOpen?: number;
+    expiriesGate?: Promise<void>;
+    feedGate?: Promise<void>;
+    /** When set, the paper venue records each broker kill-switch engagement here. */
+    killSwitch?: string[];
+    /** Controls durable writes. Each call is recorded, and the returned promise decides whether it succeeds. */
+    durable?: (type: string) => Promise<void>;
+    gate?: TradingGate;
+    brokerLiveOrders?: number;
+  } = {},
 ): Harness {
   // Start after the warmup's last bar has closed; the clock guard refuses bars stamped in the future.
   let clock = istEpoch(SESSION_DAY, '09:50');
@@ -108,31 +125,46 @@ function build(
   const config: AgentConfig = loadConfig({
     DHAN_CLIENT_ID: '1',
     DHAN_ACCESS_TOKEN: 't',
+    DATABASE_URL: 'postgres://paper.test.invalid/agent',
     CAPITAL_INR: '300000',
     MAX_RISK_PER_TRADE_PCT: '1',
     MAX_DAILY_LOSS_PCT: '1',
     ...env,
   });
-  const feed = new FakeFeed();
+  const feed = new FakeFeed(options.feedGate);
   const events: Harness['events'] = [];
   const paperCloses: ExitOrder[] = [];
   const paper = new PaperExecutionPort({ slippageBps: 0, now });
   const execution = options.execution ?? paper;
   if (execution === paper) {
     paper.onEvent(() => undefined);
+    if (options.killSwitch !== undefined) {
+      const engaged = options.killSwitch;
+      Object.assign(paper, { engageBrokerKillSwitch: async (reason: string) => void engaged.push(reason) });
+    }
   }
   const market = {
     intradayCandles: async () => [...previousDay(), ...todayHistory()],
-    listExpiries: async () => ['2026-10-15'],
+    listExpiries: async () => {
+      await options.expiriesGate;
+      return ['2026-10-15'];
+    },
     optionChain: async () => chain(now),
     optionContracts: async () => [CE, PE],
     availableFunds: async () => 300_000,
     brokerOpenOptionCount: async () => options.brokerOpen ?? 0,
+    brokerLiveOrderCount: async () => options.brokerLiveOrders ?? 0,
   };
   const eventLog = {
     record: (type: string, payload: Record<string, unknown>) => {
       events.push({ type, payload });
     },
+    // Durable writes land in the same list. The harness has no journal file or ledger to fail.
+    durable: async (type: string, payload: Record<string, unknown>) => {
+      events.push({ type, payload });
+      await (options.durable ?? (async () => undefined))(type);
+    },
+    unconfirmedEvents: () => 0,
     flush: async () => undefined,
   } as unknown as EventLog;
   const orchestrator = new Orchestrator(config, [SPEC], {
@@ -145,6 +177,7 @@ function build(
     now,
     clockIntervalMs: 1e9,
     shutdownTimeoutMs: 2_000,
+    ...(options.gate === undefined ? {} : { gate: options.gate }),
   });
   return {
     orchestrator,
@@ -154,6 +187,7 @@ function build(
     setClock: (value, day = SESSION_DAY) => {
       clock = istEpoch(day, value);
     },
+    now,
   };
 }
 
@@ -334,3 +368,395 @@ describe('runtime: halts', () => {
     assert.equal(harness.orchestrator.agent('NIFTY')?.isFlat(), true);
   });
 });
+
+describe('runtime: operator actions and cockpit snapshot', () => {
+  it('reports the phase as RUNNING once started and FAILED with the reason when the start is refused', async () => {
+    const running = build();
+    await running.orchestrator.start();
+    assert.equal(running.orchestrator.snapshot().phase, 'RUNNING');
+    assert.equal(running.orchestrator.snapshot().underlyings[0]?.symbol, 'NIFTY');
+
+    const refused = build({}, { brokerOpen: 1 });
+    await assert.rejects(refused.orchestrator.start(), /open option position/);
+    const failed = refused.orchestrator.snapshot();
+    assert.equal(failed.phase, 'FAILED');
+    assert.match(failed.phaseDetail ?? '', /open option position/);
+  });
+
+  it('closes the selected position through the normal exit path with reason MANUAL', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position?.quantity, 75);
+
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /close requested/);
+    await settle(harness.orchestrator);
+
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL');
+    const view = harness.orchestrator.snapshot().underlyings[0];
+    assert.equal(view?.position, undefined);
+    assert.equal(view?.lastExit?.reason, 'MANUAL');
+    assert.equal(view?.state, 'IDLE');
+  });
+
+  it('says why there is nothing to close instead of acting', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /no open position/);
+    assert.match(harness.orchestrator.requestManualExit('SENSEX'), /not traded by this agent/);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), false);
+  });
+
+  it('blocks new entries on request and clears the block only when nothing forbids it', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('operator entry block'));
+    assert.match(harness.orchestrator.toggleEntryBlock(), /entry block cleared/);
+    assert.equal(harness.orchestrator.snapshot().day.killSwitchReason, undefined);
+  });
+
+  it('refuses to clear the block while the day has breached its loss limit', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    harness.setClock('10:05:00');
+    optionTick(harness, '48001', 15);
+    await settle(harness.orchestrator);
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('daily loss'));
+    assert.match(harness.orchestrator.toggleEntryBlock(), /daily loss limit is breached/);
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('daily loss'));
+  });
+});
+
+/** Lets queued microtasks and immediates run, without waiting for the serial queue to drain. */
+async function yieldToEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+function gate(): { wait: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { wait, release };
+}
+
+describe('runtime: shutdown exits', () => {
+  it('keeps retrying a rejected shutdown exit until it fills', async () => {
+    const exits: ExitOrder[] = [];
+    let listener: ((event: ExecutionEvent) => void) | undefined;
+    let rejectNext = 1;
+    let harness: Harness | undefined;
+    const at = () => harness?.now() ?? 0;
+    const execution: ExecutionPort = {
+      mode: 'live',
+      submitEntry: async (order) => {
+        listener?.({ kind: 'ENTRY_FILLED', correlationId: order.correlationId, underlying: 'NIFTY', quantity: order.quantity, averagePrice: order.entryReference, at: at() });
+      },
+      submitExit: async (order) => {
+        exits.push(order);
+        if (rejectNext > 0) {
+          rejectNext -= 1;
+          listener?.({ kind: 'EXIT_REJECTED', correlationId: order.correlationId, underlying: 'NIFTY', positionId: order.positionId, reason: 'venue rejected' });
+          return;
+        }
+        listener?.({ kind: 'EXIT_FILLED', correlationId: order.correlationId, underlying: 'NIFTY', positionId: order.positionId, quantity: order.quantity, averagePrice: order.referencePrice, reason: order.reason, at: at() });
+      },
+      onOptionTick: () => undefined,
+      onEvent: (fn) => {
+        listener = fn;
+        return () => undefined;
+      },
+      close: async () => undefined,
+    };
+    harness = build({}, { execution });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.ok(harness.orchestrator.agent('NIFTY')?.openPosition, 'a position is open before the stop');
+
+    // The venue rejects the first SELL. The 10 s backoff runs on the injected clock, so move it past
+    // the backoff while stop is polling. No option tick arrives during the stop.
+    const stopping = harness.orchestrator.stop();
+    setTimeout(() => harness?.setClock('10:05:00'), 300);
+    await stopping;
+
+    assert.deepEqual(exits.map((order) => order.reason), ['SHUTDOWN', 'SHUTDOWN']);
+    assert.equal(types(harness).filter((type) => type === 'exit_rejected').length, 1);
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'SHUTDOWN');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.isFlat(), true);
+  });
+});
+
+describe('runtime: entries signalled before a stop, a block or a halt', () => {
+  it('does not submit an entry that was signalled before a stop, and stop waits for the signal to settle', async () => {
+    const expiries = gate();
+    const harness = build({}, { expiriesGate: expiries.wait });
+    await harness.orchestrator.start();
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    await yieldToEventLoop();
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'SIGNAL_DETECTED');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.isFlat(), false, 'a signal in preparation is not flat');
+
+    const stopping = harness.orchestrator.stop();
+    expiries.release();
+    await stopping;
+
+    assert.equal(types(harness).includes('entry_submitted'), false);
+    assert.equal(harness.events.find((event) => event.type === 'signal_dropped')?.payload['code'], 'ENTRY_BLOCKED');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.isFlat(), true);
+    assert.equal(harness.orchestrator.snapshot().phase, 'STOPPED');
+  });
+
+  it('does not submit an entry when an operator block lands during the advisor review', async () => {
+    const verdict = gate();
+    const advisor: TradeAdvisor = {
+      review: async () => {
+        await verdict.wait;
+        return { decision: 'ENTER', confidence: 0.9, reason: 'trend holds', source: 'llm' } as AdvisoryVerdict;
+      },
+    };
+    const harness = build({}, { advisor });
+    await harness.orchestrator.start();
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    await yieldToEventLoop();
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'SIGNAL_DETECTED');
+
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+    verdict.release();
+    await settle(harness.orchestrator);
+
+    assert.equal(types(harness).includes('entry_submitted'), false);
+    const dropped = harness.events.find((event) => event.type === 'signal_dropped');
+    assert.equal(dropped?.payload['code'], 'ENTRY_BLOCKED');
+    assert.match(String(dropped?.payload['detail'] ?? ''), /operator entry block/);
+  });
+});
+
+describe('runtime: daily-loss breach under an operator block', () => {
+  it('still records the breach and arms the broker kill switch once flat, even when an operator block holds the switch', async () => {
+    const killSwitch: string[] = [];
+    const harness = build({ BROKER_KILL_SWITCH_ON_BREACH: 'true' }, { killSwitch });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+
+    harness.setClock('10:05:00');
+    optionTick(harness, '48001', 15);
+    await settle(harness.orchestrator);
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+
+    assert.equal(types(harness).filter((type) => type === 'daily_loss_breach').length, 1);
+    // The paper bracket stop fills first at 15, so the close reason is STOP_LOSS. The breach is still recorded.
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'STOP_LOSS');
+    assert.equal(killSwitch.length, 1, 'the broker kill switch is engaged exactly once');
+    assert.match(killSwitch[0] ?? '', /daily loss/);
+    assert.match(harness.orchestrator.snapshot().day.killSwitchReason ?? '', /operator entry block/, 'the operator reason is kept');
+    assert.match(harness.orchestrator.dayBook.snapshot().dailyLossBreach ?? '', /daily loss/, 'the breach stays latched');
+  });
+});
+
+describe('runtime: stop during start', () => {
+  it('a stop during the feed start leaves no subscriptions or clock running, and ends STOPPED', async () => {
+    const feedStart = gate();
+    const harness = build({}, { feedGate: feedStart.wait });
+    const starting = harness.orchestrator.start();
+    for (let i = 0; i < 100 && !harness.feed.startCalled; i += 1) {
+      await yieldToEventLoop();
+    }
+    assert.equal(harness.feed.startCalled, true, 'start reached the feed');
+    assert.equal(harness.orchestrator.snapshot().phase, 'STARTING');
+
+    const stopping = harness.orchestrator.stop();
+    feedStart.release();
+    await Promise.all([starting, stopping]);
+
+    assert.equal(harness.feed.subscribed.size, 0, 'nothing is subscribed after the stop');
+    assert.equal(harness.orchestrator.snapshot().phase, 'STOPPED');
+  });
+
+  it('does not let a feed connect that never completes hang the stop', async () => {
+    const feedStart = gate();
+    const harness = build({}, { feedGate: feedStart.wait });
+    const starting = harness.orchestrator.start();
+    for (let i = 0; i < 100 && !harness.feed.startCalled; i += 1) {
+      await yieldToEventLoop();
+    }
+
+    // The feed never finishes connecting. Stop must return within its shutdown timeout anyway.
+    await harness.orchestrator.stop();
+    assert.equal(harness.orchestrator.snapshot().phase, 'STOPPED');
+
+    // When the connect finally completes, nothing is subscribed and the start resolves quietly.
+    feedStart.release();
+    await starting;
+    assert.equal(harness.feed.subscribed.size, 0);
+  });
+});
+
+describe('runtime: durable intents and the trading gate', () => {
+  /** Ticks to the 09:45 breakout without settling, so a test can act while the entry is still being prepared. */
+  async function breakoutWithoutSettling(harness: Harness): Promise<void> {
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    for (let i = 0; i < 20; i += 1) {
+      await yieldToEventLoop();
+    }
+  }
+
+  it('sends no entry when its intent is not durable, and reports why', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        throw new Error('ledger unavailable');
+      }
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.code, 'INTENT_NOT_DURABLE');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'IDLE');
+  });
+
+  it('drops an entry whose intent is still being written when a block lands, and records it as rejected, not sent', async () => {
+    const release = gate();
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        await release.wait;
+      }
+    } });
+    await harness.orchestrator.start();
+    await breakoutWithoutSettling(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'SIGNAL_DETECTED', 'the intent is being written');
+
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+    release.release();
+    await settle(harness.orchestrator);
+
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined, 'the order was not sent');
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.code, 'ENTRY_BLOCKED');
+    const rejected = harness.events.find((event) => event.type === 'entry_rejected');
+    assert.match(String(rejected?.payload['reason'] ?? ''), /^ABORTED_AFTER_INTENT: operator entry block/);
+  });
+
+  it('gives up on an intent that is not durable within the deadline, so a stalled database cannot hold the queue', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        await new Promise<void>(() => undefined);
+      }
+    } });
+    await harness.orchestrator.start();
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    const started = Date.now();
+    await settle(harness.orchestrator);
+    assert.ok(Date.now() - started >= 1_900, 'the wait ends at the deadline, not earlier');
+    const dropped = harness.orchestrator.snapshot().underlyings[0]?.lastDrop;
+    assert.equal(dropped?.code, 'INTENT_NOT_DURABLE');
+    assert.match(dropped?.detail ?? '', /not durable within 2000 ms/);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined);
+  });
+
+  it('still sends an exit when its intent is not durable, and records the gap', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'exit_submitted') {
+        throw new Error('ledger unavailable');
+      }
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /close requested/);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL', 'the exit went out');
+    assert.ok(harness.events.some((event) => event.type === 'audit_gap'), 'the missing intent is recorded as an audit gap');
+  });
+
+  it('honours a gate exit block when one is reported, and keeps the position open', async () => {
+    let exitBlock: string | undefined;
+    const tradingGate: TradingGate = { entryBlock: () => undefined, exitBlock: () => exitBlock };
+    const harness = build({}, { gate: tradingGate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    exitBlock = 'broker exit path is fail-stopped';
+    requestManual(harness);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), false, 'no SELL is sent');
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position?.quantity, 75, 'the position is still open');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'RISK_MANAGEMENT_ACTIVE');
+  });
+
+  it('sends the exit after the trading lease is lost: a protective exit must not wait on the lease', async () => {
+    const leaseHolds = { value: true };
+    const gate = ledgerAndLeaseGate({ unconfirmedEvents: () => 0, leaseHolds: () => leaseHolds.value });
+    const harness = build({}, { gate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    leaseHolds.value = false;
+    requestManual(harness);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), true, 'the SELL goes out');
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL');
+    assert.equal(gate.entryBlock(), 'trading lease lost; another run may be trading this account', 'entries stay blocked');
+  });
+
+  it('holds new entries while events are not yet confirmed, and sends none', async () => {
+    const tradingGate: TradingGate = {
+      entryBlock: () => '2 event(s) are not yet confirmed in the journal and ledger; entries wait',
+      exitBlock: () => undefined,
+    };
+    const harness = build({}, { gate: tradingGate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), false);
+    assert.match(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.detail ?? '', /not yet confirmed/);
+  });
+
+  it('refuses to start while the broker reports live orders, even with no position yet', async () => {
+    const harness = build({}, { brokerLiveOrders: 1 });
+    await assert.rejects(harness.orchestrator.start(), /not in a terminal status/);
+    assert.equal(harness.orchestrator.snapshot().phase, 'FAILED');
+  });
+
+  it('writes halts and kill-switch activations durably', async () => {
+    const durableTypes: string[] = [];
+    const execution: ExecutionPort = {
+      mode: 'live',
+      submitEntry: async (order) => {
+        listener?.({ kind: 'ENTRY_UNCONFIRMED', correlationId: order.correlationId, underlying: 'NIFTY', reason: 'timeout' });
+      },
+      submitExit: async () => undefined,
+      onOptionTick: () => undefined,
+      onEvent: (fn) => {
+        listener = fn;
+        return () => undefined;
+      },
+      close: async () => undefined,
+    };
+    let listener: ((event: ExecutionEvent) => void) | undefined;
+    const harness = build({}, { execution, durable: async (type) => {
+      durableTypes.push(type);
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.ok(durableTypes.includes('halted'), 'the halt is durable');
+    assert.ok(durableTypes.includes('book_kill_switch'), 'the kill switch it set is durable');
+  });
+});
+
+/** Requests a manual close of the selected underlying, as the operator's key does. */
+function requestManual(harness: Harness): void {
+  harness.orchestrator.requestManualExit('NIFTY');
+}

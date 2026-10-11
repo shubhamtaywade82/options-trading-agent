@@ -112,7 +112,7 @@ function exit(quantity = 75): ExitOrder {
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
 
 function port(broker: ReturnType<typeof fakeBroker>, orderTimeoutMs = 200, reconcileIntervalMs = 60_000) {
-  const live = new LiveExecutionPort(broker.client, { orderTimeoutMs, reconcileIntervalMs, logger: SILENT });
+  const live = new LiveExecutionPort(broker.client, { mode: 'live', orderTimeoutMs, reconcileIntervalMs, logger: SILENT });
   const events: ExecutionEvent[] = [];
   live.onEvent((event) => events.push(event));
   return { live, events };
@@ -133,6 +133,28 @@ describe('classifyPlacementError', () => {
     assert.equal(classifyPlacementError(new ApiResponseError('token expired', 401)), 'UNCONFIRMED');
     assert.equal(classifyPlacementError(new ApiResponseError('too many requests', 429)), 'UNCONFIRMED');
     assert.equal(classifyPlacementError(new Error('socket hang up')), 'UNCONFIRMED');
+  });
+});
+
+describe('LiveExecutionPort broker id limit', () => {
+  it('refuses an entry whose correlation id is over 30 characters, and never sends it', async () => {
+    const broker = fakeBroker();
+    const { live, events } = port(broker);
+    await live.submitEntry(entry('ENT-LONG-ID-THAT-THE-BROKER-WOULD-REFUSE'));
+    await settle();
+    assert.equal(events[0]?.kind, 'ENTRY_REJECTED');
+    assert.equal(broker.calls.superPlace.length, 0, 'the oversize id never reached Dhan');
+  });
+
+  it('refuses an exit whose correlation id is over 30 characters, and never sends the sell', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    await settle();
+    await live.submitExit({ ...exit(), correlationId: 'EXT-ENT-NIFTY-LONG-ID-THAT-OVERRUNS-THE-LIMIT' });
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
+    assert.equal(broker.calls.place.length, 0, 'no sell went to Dhan');
   });
 });
 

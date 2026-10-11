@@ -10,6 +10,9 @@ import { istParts, shiftDateKey } from '../time/ist.js';
 import { assertWarmupClock } from './clockGuard.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
+import type { CockpitSnapshot } from './views.js';
+import type { TradingGate } from './tradingGate.js';
+import { withDeadline } from './deadline.js';
 
 /** The live feed as the orchestrator sees it: routing, lifecycle and freshness. */
 export interface OrchestratorFeed extends FeedPort {
@@ -30,6 +33,13 @@ export interface OrchestratorServices {
   readonly now?: () => number;
   readonly clockIntervalMs?: number;
   readonly shutdownTimeoutMs?: number;
+  /** Conditions beyond the book that stop orders: the leader lock and unconfirmed events. Open when omitted. */
+  readonly gate?: TradingGate;
+  /**
+   * Runs once, after the final event flush. Ends the run record, releases the leader lock and closes the
+   * database and Redis connections. It must not throw, and it must be safe to call twice.
+   */
+  readonly closeSession?: () => Promise<void>;
 }
 
 const DEFAULT_CLOCK_INTERVAL_MS = 1_000;
@@ -56,6 +66,10 @@ export class Orchestrator {
   private unsubscribeEvents: (() => void) | undefined;
   private brokerKillPending: string | undefined;
   private started = false;
+  private stopRequested = false;
+  private starting: Promise<void> | undefined;
+  private phase: CockpitSnapshot['phase'] = 'IDLE';
+  private phaseDetail: string | undefined;
 
   constructor(
     private readonly config: AgentConfig,
@@ -79,7 +93,28 @@ export class Orchestrator {
     return this.agents.get(symbol);
   }
 
+  /** Starts the agent. A failed start is recorded in the snapshot so the cockpit can show why. */
   async start(): Promise<void> {
+    this.phase = 'STARTING';
+    this.starting = this.startInternal();
+    try {
+      await this.starting;
+      if (!this.stopRequested) {
+        this.phase = 'RUNNING';
+      }
+    } catch (error) {
+      if (this.stopRequested) {
+        // stop() was called mid-start and owns the teardown and the final phase.
+        return;
+      }
+      this.phase = 'FAILED';
+      this.phaseDetail = error instanceof Error ? error.message : String(error);
+      this.services.logger.error('start failed', { reason: this.phaseDetail });
+      throw error;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
     if (this.started) {
       throw new Error('orchestrator already started');
     }
@@ -91,11 +126,19 @@ export class Orchestrator {
         `broker reports ${openLegs} open option position(s) before start; close or adopt them before starting the agent`,
       );
     }
+    // An order accepted just before a crash has no position yet, so only the order book can show it.
+    const liveOrders = await this.services.market.brokerLiveOrderCount();
+    if (liveOrders > 0) {
+      throw new Error(
+        `broker reports ${liveOrders} order(s) that are not in a terminal status; wait for them to settle or cancel them before starting`,
+      );
+    }
 
     const today = istParts(this.now()).date;
     const from = shiftDateKey(today, -(this.config.strategy.warmupDays * 2 + 2));
     const barMs = this.config.strategy.barMinutes * 60_000;
     for (const spec of this.specs) {
+      this.assertNotStopping();
       const history = await this.services.market.intradayCandles(spec.spot, this.config.strategy.barMinutes, from, today);
       assertWarmupClock(history[history.length - 1], this.now(), this.config.strategy.barMinutes);
       // The newest warmup bar may still be forming on the exchange; only fully closed bars are seeded.
@@ -104,12 +147,20 @@ export class Orchestrator {
       this.services.logger.info('warmup loaded', { underlying: spec.symbol, bars: complete.length });
     }
 
+    // Each step that arms I/O or a timer is preceded by a stop check, so a stop during warmup
+    // leaves nothing running. The feed check comes after its await, for the same reason.
+    this.assertNotStopping();
     this.unsubscribeTicks = this.services.feed.onTick((tick) => this.route(tick));
     this.unsubscribeEvents = this.services.execution.onEvent((event) => {
       this.agents.get(event.underlying)?.onExecutionEvent(event);
     });
     this.services.execution.start?.();
     await this.services.feed.start();
+    if (this.stopRequested) {
+      // stop() may already have torn the feed down while this connect was in flight. Tear it down again.
+      this.services.feed.stop();
+      throw new Error('stop requested while the agent was starting');
+    }
     this.services.feed.subscribe(this.specs.map((spec) => spec.spot));
 
     this.timer = setInterval(() => this.onClock(), this.services.clockIntervalMs ?? DEFAULT_CLOCK_INTERVAL_MS);
@@ -122,6 +173,9 @@ export class Orchestrator {
 
   /** Stops new entries, flattens through the normal exit path, then waits (bounded) for flat before closing I/O. */
   async stop(): Promise<void> {
+    this.stopRequested = true;
+    this.phase = 'STOPPING';
+    await this.settleStart();
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -133,17 +187,107 @@ export class Orchestrator {
     const flat = await this.waitUntil(
       () => [...this.agents.values()].every((agent) => agent.isFlat()),
       this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+      // A rejected exit is retried on each poll, within its backoff, so a quiet option feed cannot stall shutdown.
+      () => {
+        for (const agent of this.agents.values()) {
+          agent.retryExit();
+        }
+      },
     );
     if (!flat) {
       this.services.logger.error('shutdown timed out with open positions; live brackets remain at the broker', {});
     }
     this.unsubscribeTicks?.();
     this.unsubscribeEvents?.();
-    await Promise.all([...this.agents.values()].map((agent) => agent.drain()));
+    const timeoutMs = this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    const drained = await withDeadline(Promise.all([...this.agents.values()].map((agent) => agent.drain())), timeoutMs, 'drain timed out').then(
+      () => true,
+      () => false,
+    );
+    if (!drained) {
+      this.services.logger.error('agent queues did not drain in time; work still queued may not be recorded', {});
+    }
     this.services.feed.stop();
     await this.services.execution.close();
     await this.services.events.flush();
+    await this.services.closeSession?.();
+    this.phase = 'STOPPED';
     this.services.logger.info('agent stopped', { flat });
+  }
+
+  /** Read-only state for the operator cockpit. Building it never changes trading state. */
+  snapshot(nowMs: number = this.now()): CockpitSnapshot {
+    const day = this.book.snapshot();
+    return {
+      at: nowMs,
+      mode: this.config.mode,
+      phase: this.phase,
+      phaseDetail: this.phaseDetail,
+      capitalInr: this.config.capital.inr,
+      riskBudgetInr: (this.config.capital.inr * this.config.capital.maxRiskPerTradePct) / 100,
+      dailyLossLimitInr: this.dailyLossLimitInr,
+      maxTradesPerDay: this.config.capital.maxTradesPerDay,
+      maxOpenPositions: this.config.capital.maxOpenPositions,
+      maxHoldMinutes: this.config.exits.maxHoldMinutes,
+      staleMs: this.config.feed.staleMs,
+      day: {
+        dayKey: day.dayKey,
+        realizedPnlInr: day.realizedPnlInr,
+        unrealizedPnlInr: day.unrealizedPnlInr,
+        dayPnlInr: day.dayPnlInr,
+        tradesToday: day.tradesToday,
+        openUnderlyings: day.openUnderlyings,
+        killSwitchReason: day.killSwitchReason,
+      },
+      underlyings: this.specs.flatMap((spec) => {
+        const agent = this.agents.get(spec.symbol);
+        return agent === undefined ? [] : [agent.view(nowMs)];
+      }),
+    };
+  }
+
+  /** Operator request to close one underlying's position. Returns a message for the operator. */
+  requestManualExit(symbol: string): string {
+    const agent = this.agents.get(symbol);
+    if (agent === undefined) {
+      return `${symbol}: not traded by this agent`;
+    }
+    const outcome = agent.requestManualExit();
+    const message = {
+      ACCEPTED: `${symbol}: close requested; the normal exit checks apply`,
+      NO_OPEN_POSITION: `${symbol}: no open position to close`,
+      NOT_MANAGEABLE: `${symbol}: position is not in a state that accepts a close right now`,
+    }[outcome];
+    this.services.logger.warn('operator close request', { underlying: symbol, outcome });
+    return message;
+  }
+
+  /**
+   * Operator toggle for the entry block. Blocking is always allowed. Clearing is refused while
+   * any underlying is halted or the day has breached its loss limit, because those need a
+   * restart and a review, not a keypress.
+   */
+  toggleEntryBlock(): string {
+    const day = this.book.snapshot();
+    if (day.killSwitchReason === undefined) {
+      const reason = `operator entry block (${new Date(this.now()).toISOString()})`;
+      this.book.activateKillSwitch(reason);
+      // Durable, so a restart keeps the block. It is not in the broker kill switch, which does not apply to an operator block.
+      this.durableEvent('operator_entry_block', { reason });
+      this.services.logger.warn('operator blocked new entries');
+      return 'new entries blocked; press k again to clear';
+    }
+    const halted = [...this.agents.values()].find((agent) => agent.haltedBecause !== undefined);
+    if (halted !== undefined) {
+      return `cannot clear: ${halted.symbol} is halted (${halted.haltedBecause}); restart after review`;
+    }
+    if (day.dayPnlInr <= -this.dailyLossLimitInr) {
+      return 'cannot clear: the daily loss limit is breached for today';
+    }
+    this.book.clearKillSwitch();
+    this.durableEvent('operator_entry_clear', {});
+    this.services.logger.warn('operator cleared the entry block');
+    return 'entry block cleared; new entries may resume';
   }
 
   private createAgent(spec: UnderlyingSpec): UnderlyingAgent {
@@ -174,6 +318,7 @@ export class Orchestrator {
       logger: this.services.logger,
       onHalt: (underlying, reason) => this.onHalt(underlying, reason),
       now: this.now,
+      ...(this.services.gate === undefined ? {} : { gate: this.services.gate }),
     });
   }
 
@@ -203,13 +348,15 @@ export class Orchestrator {
 
   private enforceDailyLoss(): void {
     const snapshot = this.book.snapshot();
-    if (snapshot.dayPnlInr > -this.dailyLossLimitInr || snapshot.killSwitchReason !== undefined) {
+    // Keyed on the breach latch, not the kill switch. An operator block may already hold the switch,
+    // and that must not stop the breach being journaled or the broker switch being armed.
+    if (snapshot.dayPnlInr > -this.dailyLossLimitInr || snapshot.dailyLossBreach !== undefined) {
       return;
     }
     const reason = `daily loss ${snapshot.dayPnlInr.toFixed(2)} breached -${this.dailyLossLimitInr.toFixed(2)}`;
-    this.book.activateKillSwitch(reason);
+    this.book.recordDailyLossBreach(reason);
     this.services.logger.error('daily loss limit breached; flattening', { reason });
-    this.services.events.record('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
+    this.durableEvent('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
     this.brokerKillPending = reason;
   }
 
@@ -220,7 +367,7 @@ export class Orchestrator {
   private onHalt(underlying: string, reason: string): void {
     const fullReason = `${underlying}: ${reason}`;
     this.book.activateKillSwitch(fullReason);
-    this.services.events.record('book_kill_switch', { reason: fullReason });
+    this.durableEvent('book_kill_switch', { reason: fullReason });
     this.engageBrokerKillSwitch(fullReason);
   }
 
@@ -247,12 +394,52 @@ export class Orchestrator {
     });
   }
 
-  private async waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  /**
+   * A state change that restart cannot re-derive. It is written durably in the background: the in-memory
+   * decision applies at once, and until the write is confirmed the event counts as unconfirmed, which holds entries.
+   */
+  private durableEvent(type: string, payload: Readonly<Record<string, unknown>>): void {
+    this.services.events.durable(type, payload).catch((error: unknown) => {
+      this.services.logger.error('event is not durable yet; entries wait until it is recorded', {
+        type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  private assertNotStopping(): void {
+    if (this.stopRequested) {
+      throw new Error('stop requested while the agent was starting');
+    }
+  }
+
+  /**
+   * Waits for an in-flight start so teardown never runs under it. The wait is bounded by the shutdown
+   * timeout: a hung connect must not make the operator's stop hang with it.
+   */
+  private async settleStart(): Promise<void> {
+    if (this.starting === undefined) {
+      return;
+    }
+    // Not unref'd: shutdown must still complete if nothing else is holding the process open.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([this.starting.then(() => 'settled' as const, () => 'settled' as const), timeout]);
+    clearTimeout(timer);
+    if (outcome === 'timeout') {
+      this.services.logger.warn('start still in progress at stop; continuing shutdown', {});
+    }
+  }
+
+  private async waitUntil(predicate: () => boolean, timeoutMs: number, onPoll: () => void = () => undefined): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
       if (Date.now() >= deadline) {
         return false;
       }
+      onPoll();
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
     return true;

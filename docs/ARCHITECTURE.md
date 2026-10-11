@@ -8,6 +8,7 @@ modes the design is built around. The README covers operation and configuration.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Config | `src/config.ts` | Validated env. Live needs an explicit acknowledgement. Cross-field rules (session order, risk ≤ daily loss). |
+| Auth | `src/dhan/auth.ts`, `src/dhan/client.ts` | OTP login (PIN + TOTP) or a static token, never both. One token manager serves REST and both WebSocket feeds. Renewal is single-flight. |
 | Time | `src/time/ist.ts`, `calendar.ts` | All session logic on IST minutes. Epoch conversion is explicit (`DHAN_EPOCH_IST_SHIFTED`). |
 | Market data | `src/dhan/marketData.ts`, `instrumentMaster.ts`, `feed.ts` | Charts, expiries, option chain (account-wide 3 s throttle), scrip master (exact symbol lookup, fail-closed), WS feed with receipt-time freshness. |
 | Signal | `src/market/*`, `src/strategy/orbSupertrend.ts` | Bar aggregation from ticks; closed-bar indicators; ORB + SuperTrend signal. |
@@ -16,7 +17,8 @@ modes the design is built around. The README covers operation and configuration.
 | Advice | `src/llm/advisor.ts` | Ollama structured output, veto only, fail-closed. |
 | Venue | `src/execution/paper.ts`, `src/dhan/liveExecution.ts` | Same `ExecutionPort` contract. Paper simulates; live places super orders. |
 | Orchestration | `src/runtime/*` | Serial per-underlying agent; orchestrator with routing, clock, breach handling, shutdown. |
-| Audit | `src/ops/*` | JSONL event log (serialised writes), IST console logger. |
+| Audit | `src/ops/*` | JSONL journal, one file per IST day (serialised writes), IST console logger, bounded in-memory log for the cockpit, journal summary. |
+| Cockpit | `src/ui/*`, `src/runtime/views.ts` | Read-only snapshot (`Orchestrator.snapshot`) rendered by a pure renderer and an Ink app. Three operator actions (close, entry block, stop), each behind a second press. |
 
 ## 2. Trade lifecycle (per underlying)
 
@@ -92,9 +94,17 @@ Two states the diagram does not show are legal and matter in operation:
 | Broker shows position that was closed by bracket | reconciliation (`netQty = 0`) | PROTECTIVE_EXIT_FILLED with reason EXTERNAL. P&L recorded. |
 | Broker shows net short | reconciliation or exit guard | BROKER_MISMATCH → HALTED → broker kill switch. |
 | Gap through the stop (paper) | `onOptionTick` with `ltp ≤ stop` | Fill at the LTP, not at the stop. Daily-loss check may trip. |
-| Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. |
+| Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. The breach is latched separately, so it is still recorded and armed when an operator block already holds the switch. |
+| Operator block, halt, breach or stop during market data or advisor review | `entryBlockReason` before `ENTRY_SUBMITTED` | Signal dropped with `ENTRY_BLOCKED`. Nothing is submitted. |
+| Stop while a signal is being prepared | `isFlat()` is false in `SIGNAL_DETECTED` | Stop waits for the signal to settle. It is then dropped, so no entry can fill after the stop reports flat. |
+| Shutdown exit rejected by the venue | `onExitRejected` during shutdown | Retried on option ticks and on each shutdown poll, within the 10 s backoff, until flat or the shutdown timeout. |
+| Stop during start | `stopRequested` checkpoints in `startInternal` | The start arms no feed, subscription or clock. Stop waits for an in-flight start, bounded by the shutdown timeout. |
+| Operator entry block or clear | `operator_entry_block` / `operator_entry_clear` journal events | Replayed in order on restart, so a block survives a restart and a clear is not undone by replay. |
 | Process restart with open broker position | `brokerOpenOptionCount` at start | Refuses to start. Operator reconciles. |
-| Process restart with day state | `restoreDayBook` from the journal | P&L, trade count, cooldown, and today's breach are restored. A malformed journal line refuses startup. |
+| Dhan login rejected (wrong PIN, wrong or stale TOTP) | `AuthenticationError` from `createDhanClient` | Startup stops and prints the broker reason. Nothing is traded. |
+| Login returns no usable expiry, or an already-expired token | `assertUsableToken` at startup | Startup refused. Without an expiry the SDK would log in again on every request. |
+| Access token rejected mid-session (401) | HTTP 401 → `onTokenExpired` | One renewal shared by all in-flight calls: renew while valid, otherwise PIN + TOTP. Trading writes that got a 401 are not resent. The next call uses the renewed token. |
+| Process restart with day state | `restoreDayBook` from today's journal file | P&L, trade count, cooldown, and today's breach are restored. Only the current IST day's file is read. A malformed line in it refuses startup. |
 | Event log write fails | `EventLog` error callback | Logged to console. Trading is not blocked. |
 | Advisor down or slow | timeout / exception in `review` | SKIP (fail-closed). |
 | Wrong epoch convention | `assertWarmupClock` at start | Refuses to start. |
