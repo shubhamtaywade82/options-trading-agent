@@ -3,8 +3,10 @@ import { describe, it } from 'node:test';
 import { AuthenticationError, DhanAuth, TokenResponse } from '@nemesis-oss/dhanhq-sdk';
 import {
   assertUsableToken,
+  clarifyDhanLoginFailure,
   createTotpProvider,
   formatExpiry,
+  loginErrorFromBody,
   singleFlight,
   TOTP_MIN_VALID_SECONDS,
 } from '../src/dhan/auth.js';
@@ -67,6 +69,36 @@ describe('createTotpProvider', () => {
     await provider();
     assert.equal(TOTP_MIN_VALID_SECONDS, 5);
     assert.deepEqual(waits, []);
+  });
+});
+
+describe('loginErrorFromBody', () => {
+  it('returns undefined when the body carries an access token', () => {
+    assert.equal(loginErrorFromBody({ accessToken: 'abc' }), undefined);
+    assert.equal(loginErrorFromBody({ access_token: 'abc' }), undefined);
+  });
+
+  it('surfaces broker error messages when HTTP succeeded but no token was issued', () => {
+    assert.equal(loginErrorFromBody({ status: 'error', message: 'Invalid TOTP' }), 'Dhan login failed: Invalid TOTP');
+  });
+
+  it('reports a non-success status when there is no token and no message field', () => {
+    assert.equal(loginErrorFromBody({ status: 'error' }), 'Dhan login failed (status=error)');
+  });
+});
+
+describe('clarifyDhanLoginFailure', () => {
+  it('replaces the SDK generic message with a probed broker detail', async () => {
+    const error = await clarifyDhanLoginFailure(new Error('Token response did not contain an accessToken'), async () =>
+      'Dhan login failed: Invalid TOTP',
+    );
+    assert.equal(error.message, 'Dhan login failed: Invalid TOTP');
+    assert.equal((error.cause as Error | undefined)?.message, 'Token response did not contain an accessToken');
+  });
+
+  it('passes through AuthenticationError from the SDK', async () => {
+    const error = await clarifyDhanLoginFailure(new AuthenticationError('GenerateAccessToken', 'bad PIN'), async () => undefined);
+    assert.match(error.message, /bad PIN/);
   });
 });
 

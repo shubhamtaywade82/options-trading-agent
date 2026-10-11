@@ -1,7 +1,14 @@
 import { DhanClient, TokenManager } from '@nemesis-oss/dhanhq-sdk';
 import type { AgentConfig, SandboxConfig } from '../config.js';
 import type { Logger } from '../ops/logger.js';
-import { assertUsableToken, createTotpProvider, formatExpiry, singleFlight } from './auth.js';
+import {
+  assertUsableToken,
+  clarifyDhanLoginFailure,
+  createTotpProvider,
+  formatExpiry,
+  probeDhanLogin,
+  singleFlight,
+} from './auth.js';
 
 export interface DhanClientOptions {
   readonly logger?: Logger;
@@ -111,7 +118,17 @@ export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanC
     },
   });
 
-  await current().ensureValidToken();
+  try {
+    await current().ensureValidToken();
+  } catch (error) {
+    throw await clarifyDhanLoginFailure(error, async () =>
+      probeDhanLogin({
+        clientId: dhan.clientId,
+        pin,
+        totp: await createTotpProvider(totpSecret, { now })(),
+      }),
+    );
+  }
   assertUsableToken(current().getToken(), now());
   return client;
 }
