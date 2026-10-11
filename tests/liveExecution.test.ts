@@ -136,6 +136,28 @@ describe('classifyPlacementError', () => {
   });
 });
 
+describe('LiveExecutionPort broker id limit', () => {
+  it('refuses an entry whose correlation id is over 30 characters, and never sends it', async () => {
+    const broker = fakeBroker();
+    const { live, events } = port(broker);
+    await live.submitEntry(entry('ENT-LONG-ID-THAT-THE-BROKER-WOULD-REFUSE'));
+    await settle();
+    assert.equal(events[0]?.kind, 'ENTRY_REJECTED');
+    assert.equal(broker.calls.superPlace.length, 0, 'the oversize id never reached Dhan');
+  });
+
+  it('refuses an exit whose correlation id is over 30 characters, and never sends the sell', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    await settle();
+    await live.submitExit({ ...exit(), correlationId: 'EXT-ENT-NIFTY-LONG-ID-THAT-OVERRUNS-THE-LIMIT' });
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
+    assert.equal(broker.calls.place.length, 0, 'no sell went to Dhan');
+  });
+});
+
 describe('LiveExecutionPort entries', () => {
   it('confirms a fill only from the order-update stream and reports its average price', async () => {
     const broker = fakeBroker();
