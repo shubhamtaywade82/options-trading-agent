@@ -1,0 +1,101 @@
+import type { ExitReason, OptionContract, Tick } from '../domain/types.js';
+
+/** Entry is always a BUY of a long option. There is deliberately no SELL-to-open shape. */
+export interface EntryOrder {
+  readonly side: 'BUY';
+  /** Unique per attempt, at most 128 characters. Doubles as the position id. */
+  readonly correlationId: string;
+  readonly underlying: string;
+  readonly contract: OptionContract;
+  readonly quantity: number;
+  readonly entryReference: number;
+  readonly stopLossPrice: number;
+  readonly targetPrice: number;
+}
+
+/** Exit closes a long position the agent already holds. It never opens a short. */
+export interface ExitOrder {
+  readonly side: 'SELL';
+  readonly correlationId: string;
+  readonly underlying: string;
+  readonly positionId: string;
+  readonly contract: OptionContract;
+  readonly quantity: number;
+  readonly reason: ExitReason;
+  readonly referencePrice: number;
+}
+
+export type ExecutionEvent =
+  | {
+      readonly kind: 'ENTRY_FILLED';
+      readonly correlationId: string;
+      readonly underlying: string;
+      readonly quantity: number;
+      readonly averagePrice: number;
+      readonly at: number;
+    }
+  | { readonly kind: 'ENTRY_REJECTED'; readonly correlationId: string; readonly underlying: string; readonly reason: string }
+  | { readonly kind: 'ENTRY_UNCONFIRMED'; readonly correlationId: string; readonly underlying: string; readonly reason: string }
+  | {
+      readonly kind: 'EXIT_FILLED';
+      readonly correlationId: string;
+      readonly underlying: string;
+      readonly positionId: string;
+      readonly quantity: number;
+      readonly averagePrice: number;
+      readonly reason: ExitReason;
+      readonly at: number;
+    }
+  | {
+      readonly kind: 'EXIT_REJECTED';
+      readonly correlationId: string;
+      readonly underlying: string;
+      readonly positionId: string;
+      readonly reason: string;
+    }
+  | {
+      readonly kind: 'EXIT_UNCONFIRMED';
+      readonly correlationId: string;
+      readonly underlying: string;
+      readonly positionId: string;
+      readonly reason: string;
+    }
+  | {
+      /** The position closed without an agent exit order: a broker bracket leg or a paper SL/TP fill. */
+      readonly kind: 'PROTECTIVE_EXIT_FILLED';
+      readonly underlying: string;
+      readonly positionId: string;
+      readonly quantity: number;
+      readonly averagePrice: number;
+      readonly reason: ExitReason;
+      readonly at: number;
+    }
+  | {
+      /** Broker state contradicts local state (e.g. net short an option). Trading must stop. */
+      readonly kind: 'BROKER_MISMATCH';
+      readonly underlying: string;
+      readonly positionId: string;
+      readonly reason: string;
+    };
+
+export type ExecutionListener = (event: ExecutionEvent) => void;
+
+/**
+ * Single execution contract for paper and live. Entry and exit results arrive
+ * as events, never as return values, so the state machine is driven by one
+ * source of truth regardless of venue. `submit*` never throws for a venue
+ * outcome; it reports rejected or unconfirmed states through events.
+ */
+export interface ExecutionPort {
+  readonly mode: 'paper' | 'live';
+  /** Starts background work such as broker reconciliation. Optional: paper has none. */
+  start?(): void;
+  submitEntry(order: EntryOrder): Promise<void>;
+  submitExit(order: ExitOrder): Promise<void>;
+  /** Option LTP feed. Paper simulates protective stop and target fills from it; live ignores it. */
+  onOptionTick(tick: Tick): void;
+  onEvent(listener: ExecutionListener): () => void;
+  /** Live only: disengages trading at the broker. Paper has no broker-side switch. */
+  engageBrokerKillSwitch?(reason: string): Promise<void>;
+  close(): Promise<void>;
+}
