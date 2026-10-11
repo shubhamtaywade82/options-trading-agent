@@ -22,6 +22,7 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 
 ```bash
 npm ci                       # installs @nemesis-oss/dhanhq-sdk pinned to a git commit (builds on prepare)
+                             # CI rewrites github ssh URLs to https first; see .github/workflows/ci.yml
 cp .env.example .env         # fill DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
 npm run typecheck && npm test
 npm run dev:paper            # paper venue, live market data, simulated fills

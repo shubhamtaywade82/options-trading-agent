@@ -19,7 +19,7 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
-    "@nemesis-oss/dhanhq-sdk": "github:shubhamtaywade82/dhanhq-sdk#353901eca3d894ba75e008b9449ab7afc8368a72",
+    "@nemesis-oss/dhanhq-sdk": "git+https://github.com/shubhamtaywade82/dhanhq-sdk.git#353901eca3d894ba75e008b9449ab7afc8368a72",
     "@nemesis-oss/ollama-sdk": "^1.13.0",
     "dotenv": "^16.4.5",
     "zod": "^4.3.6"
