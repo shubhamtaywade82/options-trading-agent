@@ -6,7 +6,7 @@ import {
   type OrderOutcome,
   type OrderState,
 } from '@nemesis-oss/dhanhq-sdk';
-import type { ExitReason, InstrumentRef, Tick } from '../domain/types.js';
+import type { InstrumentRef, Tick } from '../domain/types.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { Logger } from '../ops/logger.js';
 
