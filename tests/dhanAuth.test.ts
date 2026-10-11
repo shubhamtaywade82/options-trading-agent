@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
+import { beforeEach, describe, it } from 'node:test';
 import { AuthenticationError, DhanAuth, FileTokenStore, TokenResponse } from '@nemesis-oss/dhanhq-sdk';
 import {
   assertUsableToken,
@@ -13,7 +13,7 @@ import {
   singleFlight,
   TOTP_MIN_VALID_SECONDS,
 } from '../src/dhan/auth.js';
-import { createDhanClient } from '../src/dhan/client.js';
+import { createDhanClient, type DhanClientOptions } from '../src/dhan/client.js';
 import type { Logger } from '../src/ops/logger.js';
 
 /** RFC 4648 base32 of an ASCII seed, without padding. */
@@ -178,6 +178,16 @@ describe('createDhanClient', () => {
     tokenCacheDir: undefined,
   } as const;
 
+  let isolatedStore: FileTokenStore;
+
+  beforeEach(async () => {
+    isolatedStore = new FileTokenStore({ directory: await mkdtemp(join(tmpdir(), 'dhan-token-')) });
+  });
+
+  function otpOptions(extra: DhanClientOptions = {}): DhanClientOptions {
+    return { tokenStore: isolatedStore, ...extra };
+  }
+
   interface SdkStubs {
     readonly login?: typeof DhanAuth.generateAccessToken;
     readonly renew?: typeof DhanAuth.renewWebToken;
@@ -210,8 +220,6 @@ describe('createDhanClient', () => {
   }
 
   it('reuses a cached OTP token across separate client builds', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dhan-token-'));
-    const store = new FileTokenStore({ directory });
     let logins = 0;
     await withSdkStubs(
       {
@@ -221,9 +229,9 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        await createDhanClient(OTP_DHAN, { tokenStore: store });
+        await createDhanClient(OTP_DHAN, otpOptions());
         assert.equal(logins, 1);
-        await createDhanClient(OTP_DHAN, { tokenStore: store });
+        await createDhanClient(OTP_DHAN, otpOptions());
         assert.equal(logins, 1);
       },
     );
@@ -252,7 +260,7 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        const client = await createDhanClient(OTP_DHAN, { logger });
+        const client = await createDhanClient(OTP_DHAN, otpOptions({ logger }));
         assert.equal(logins, 1);
         assert.equal(seen.pin, '4321');
         assert.match(seen.totp ?? '', /^\d{6}$/);
@@ -288,7 +296,7 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        const client = await createDhanClient(OTP_DHAN);
+        const client = await createDhanClient(OTP_DHAN, otpOptions());
         const provider = client.getConfig().tokenProvider;
         assert.ok(provider !== undefined);
         assert.equal(await provider(), 'renewed-token');
@@ -309,7 +317,7 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        const client = await createDhanClient(OTP_DHAN, { logger });
+        const client = await createDhanClient(OTP_DHAN, otpOptions({ logger }));
         const provider = client.getConfig().tokenProvider;
         assert.ok(provider !== undefined);
         assert.equal(await provider(), 'held-token');
@@ -330,7 +338,7 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        const client = await createDhanClient(OTP_DHAN, { now: () => clock });
+        const client = await createDhanClient(OTP_DHAN, otpOptions({ now: () => clock }));
         const provider = client.getConfig().tokenProvider;
         assert.ok(provider !== undefined);
         clock = Date.now() + 10 * 60_000;
@@ -347,7 +355,10 @@ describe('createDhanClient', () => {
         },
       },
       async () => {
-        await assert.rejects(createDhanClient({ ...OTP_DHAN, auth: { kind: 'otp', pin: '0000', totpSecret: RFC_SECRET } }), /Invalid PIN/);
+        await assert.rejects(
+          createDhanClient({ ...OTP_DHAN, auth: { kind: 'otp', pin: '0000', totpSecret: RFC_SECRET } }, otpOptions()),
+          /Invalid PIN/,
+        );
       },
     );
   });
@@ -356,7 +367,7 @@ describe('createDhanClient', () => {
     await withSdkStubs(
       { login: async () => new TokenResponse({ accessToken: 'no-expiry-token' }) },
       async () => {
-        await assert.rejects(createDhanClient(OTP_DHAN), /without an expiry/);
+        await assert.rejects(createDhanClient(OTP_DHAN, otpOptions()), /without an expiry/);
       },
     );
   });
