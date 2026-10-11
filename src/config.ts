@@ -72,7 +72,8 @@ export interface AgentConfig {
     readonly timeoutMs: number;
   };
   readonly ops: {
-    readonly eventLogPath: string;
+    /** Directory holding one `events-YYYY-MM-DD.jsonl` file per IST trading day. */
+    readonly eventLogDir: string;
     readonly brokerKillSwitchOnBreach: boolean;
     readonly reconcileIntervalMs: number;
     readonly orderTimeoutMs: number;
@@ -160,6 +161,10 @@ function parseUnderlyings(env: Env): AgentConfig['underlyings'] {
  * explicit acknowledgement phrase.
  */
 export function loadConfig(env: Env = process.env): AgentConfig {
+  if (optionalText(env, 'EVENT_LOG_PATH') !== undefined) {
+    // A single file grew without bound and was read in full at every start. Refuse rather than ignore it.
+    throw new Error('EVENT_LOG_PATH was replaced by EVENT_LOG_DIR (daily journal files); unset EVENT_LOG_PATH');
+  }
   const mode = text(env, 'MODE', 'paper').toLowerCase();
   if (mode !== 'paper' && mode !== 'live') {
     throw new Error(`MODE must be "paper" or "live", got "${mode}"`);
@@ -227,7 +232,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       timeoutMs: number(env, 'LLM_TIMEOUT_MS', 8_000, { min: 500, max: 60_000, integer: true }),
     },
     ops: {
-      eventLogPath: text(env, 'EVENT_LOG_PATH', 'data/events.jsonl'),
+      eventLogDir: text(env, 'EVENT_LOG_DIR', 'data/journal'),
       brokerKillSwitchOnBreach: flag(env, 'BROKER_KILL_SWITCH_ON_BREACH', true),
       reconcileIntervalMs: number(env, 'RECONCILE_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000, integer: true }),
       orderTimeoutMs: number(env, 'ORDER_TIMEOUT_MS', 30_000, { min: 1_000, max: 300_000, integer: true }),

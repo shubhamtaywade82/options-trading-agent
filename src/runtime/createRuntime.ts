@@ -9,7 +9,8 @@ import { PaperExecutionPort } from '../execution/paper.js';
 import { OllamaTradeAdvisor, type TradeAdvisor } from '../llm/advisor.js';
 import type { UnderlyingSpec } from '../domain/types.js';
 import { readFile } from 'node:fs/promises';
-import { EventLog } from '../ops/eventLog.js';
+import { join } from 'node:path';
+import { EventLog, journalFileName } from '../ops/eventLog.js';
 import { restoreDayBook } from '../ops/dayState.js';
 import { DayBook } from '../risk/dayBook.js';
 import { createConsoleLogger, type Logger } from '../ops/logger.js';
@@ -31,7 +32,7 @@ export interface Runtime {
 export async function buildRuntime(config: AgentConfig, now: () => number = Date.now): Promise<Runtime> {
   const logger = createConsoleLogger(undefined, now);
   const events = new EventLog(
-    config.ops.eventLogPath,
+    config.ops.eventLogDir,
     (error) => logger.error('event log write failed', { error: String(error) }),
     now,
   );
@@ -69,7 +70,8 @@ export async function buildRuntime(config: AgentConfig, now: () => number = Date
   }
 
   const dayBook = new DayBook(now(), config.exits.cooldownSeconds * 1000);
-  const restored = restoreDayBook(dayBook, await readJournal(config.ops.eventLogPath), istParts(now()).date);
+  const dayKey = istParts(now()).date;
+  const restored = restoreDayBook(dayBook, await readJournal(config.ops.eventLogDir, dayKey), dayKey);
   logger.info('day state restored from journal', {
     eventsApplied: restored.eventsApplied,
     releasedUnresolved: restored.releasedUnresolved,
@@ -103,10 +105,13 @@ function buildAdvisor(config: AgentConfig, logger: Logger): TradeAdvisor | undef
   return new OllamaTradeAdvisor(client, config.llm.model, config.llm.timeoutMs);
 }
 
-/** A missing journal means a fresh installation or a new host, so there is nothing to restore. Other errors propagate. */
-async function readJournal(path: string): Promise<string[]> {
+/**
+ * Lines of today's journal file. A missing file means no trading has been
+ * journalled today, so there is nothing to restore. Other errors propagate.
+ */
+async function readJournal(directory: string, dayKey: string): Promise<string[]> {
   try {
-    return (await readFile(path, 'utf8')).split('\n');
+    return (await readFile(join(directory, journalFileName(dayKey)), 'utf8')).split('\n');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return [];

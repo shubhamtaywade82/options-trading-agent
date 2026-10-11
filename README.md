@@ -102,7 +102,7 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Kill switch | `DayBook`, `engageBrokerKillSwitch` | Local block on entries; broker kill switch on halts and on daily-loss breach once flat. |
 | Clock alignment | `assertWarmupClock` | Startup refuses if bar timestamps are inconsistent with the wall clock (wrong epoch convention). |
 | Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. |
-| Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal. A malformed journal line refuses startup. |
+| Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal file (`data/journal/events-YYYY-MM-DD.jsonl`). A malformed line in that file refuses startup. |
 
 ## Execution invariants (live)
 
@@ -196,7 +196,6 @@ These are assumptions the code depends on that the SDK docs do not settle:
 - Paper fills model neither queue position nor partial fills, and slippage is a flat bps
   parameter. Paper P&L is an approximation.
 - The strategy's indicator parameters are not optimised. Treat paper results as a smoke test.
-- The journal is read in full at startup. It grows with the audit trail and is not rotated yet.
 - The feed runs in the SDK's default `full` packet mode. The agent reads only LTP and last-traded time, so live bar volume is zero and no rule uses volume.
 
 ## What was removed

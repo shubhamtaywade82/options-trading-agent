@@ -94,7 +94,7 @@ Two states the diagram does not show are legal and matter in operation:
 | Gap through the stop (paper) | `onOptionTick` with `ltp ≤ stop` | Fill at the LTP, not at the stop. Daily-loss check may trip. |
 | Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. |
 | Process restart with open broker position | `brokerOpenOptionCount` at start | Refuses to start. Operator reconciles. |
-| Process restart with day state | `restoreDayBook` from the journal | P&L, trade count, cooldown, and today's breach are restored. A malformed journal line refuses startup. |
+| Process restart with day state | `restoreDayBook` from today's journal file | P&L, trade count, cooldown, and today's breach are restored. Only the current IST day's file is read. A malformed line in it refuses startup. |
 | Event log write fails | `EventLog` error callback | Logged to console. Trading is not blocked. |
 | Advisor down or slow | timeout / exception in `review` | SKIP (fail-closed). |
 | Wrong epoch convention | `assertWarmupClock` at start | Refuses to start. |

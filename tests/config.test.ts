@@ -66,3 +66,13 @@ describe('loadConfig', () => {
     );
   });
 });
+
+describe('loadConfig journal location', () => {
+  it('defaults to a directory of daily journal files', () => {
+    assert.equal(loadConfig(BASE).ops.eventLogDir, 'data/journal');
+  });
+
+  it('refuses the removed single-file EVENT_LOG_PATH instead of ignoring it', () => {
+    assert.throws(() => loadConfig({ ...BASE, EVENT_LOG_PATH: 'data/events.jsonl' }), /replaced by EVENT_LOG_DIR/);
+  });
+});
