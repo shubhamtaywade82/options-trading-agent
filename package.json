@@ -1,0 +1,32 @@
+{
+  "name": "options-trading-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NSE index options-buying agent on DhanHQ, with LLM advisory via @nemesis-oss/ollama-sdk",
+  "type": "module",
+  "engines": {
+    "node": ">=22",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:paper": "MODE=paper tsx src/index.ts",
+    "dev:live": "MODE=live tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit --project tsconfig.typecheck.json",
+    "check": "npm run typecheck && npm run build && npm test",
+    "start": "node dist/index.js",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@nemesis-oss/dhanhq-sdk": "github:shubhamtaywade82/dhanhq-sdk#353901eca3d894ba75e008b9449ab7afc8368a72",
+    "@nemesis-oss/ollama-sdk": "^1.13.0",
+    "dotenv": "^16.4.5",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3"
+  }
+}

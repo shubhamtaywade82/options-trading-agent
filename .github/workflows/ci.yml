@@ -7,6 +7,7 @@ on:
       - develop
       - "feat/**"
       - "feature/**"
+      - "ccr-**"
   pull_request:
 
 jobs:
@@ -17,18 +18,18 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck (application, scripts, and tests)
+      - name: Typecheck (application and tests)
         run: npm run typecheck
 
-      - name: Build modern JavaScript
+      - name: Build
         run: npm run build
 
-      - name: Test (full suite)
+      - name: Test
         run: npm test
