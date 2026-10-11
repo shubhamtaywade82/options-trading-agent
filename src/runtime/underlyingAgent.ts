@@ -17,7 +17,9 @@ import { BarSeries, CandleBuilder } from '../market/barSeries.js';
 import { bracketLevels } from '../options/pricing.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
-import { evaluateOrbSupertrend, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
+import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
+import { ema, superTrend } from '../market/indicators.js';
+import type { AgentView, CandidateView, DropView, ExitView, PositionView, SignalView } from './views.js';
 import type { EventLog } from '../ops/eventLog.js';
 import type { Logger } from '../ops/logger.js';
 import { dayDifference } from '../time/calendar.js';
@@ -75,7 +77,13 @@ export class UnderlyingAgent {
   private exitRetryAfterMs = 0;
   private haltReason: string | undefined;
   private shuttingDown = false;
+  private manualExit = false;
   private sequence = 0;
+  private lastSpot: { price: number; receivedAt: number } | undefined;
+  private lastSignal: SignalView | undefined;
+  private lastDrop: DropView | undefined;
+  private lastCandidate: CandidateView | undefined;
+  private lastExit: ExitView | undefined;
 
   constructor(private readonly deps: AgentDependencies) {
     this.symbol = deps.spec.symbol;
@@ -128,6 +136,7 @@ export class UnderlyingAgent {
   }
 
   onSpotTick(tick: Tick): void {
+    this.lastSpot = { price: tick.ltp, receivedAt: this.now() };
     const closed = this.candles.onTick(tick);
     if (closed !== undefined) {
       this.acceptClosedBar(closed);
@@ -168,6 +177,63 @@ export class UnderlyingAgent {
     return this.queue.drain();
   }
 
+  /**
+   * Operator request to close the open position. It goes through the normal exit path, so
+   * the same order checks apply. Returns why it was not accepted, if it was not.
+   */
+  requestManualExit(): 'ACCEPTED' | 'NO_OPEN_POSITION' | 'NOT_MANAGEABLE' {
+    if (this.position === undefined) {
+      return 'NO_OPEN_POSITION';
+    }
+    if (this.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
+      return 'NOT_MANAGEABLE';
+    }
+    this.manualExit = true;
+    this.queue.run(() => this.checkExits(false));
+    return 'ACCEPTED';
+  }
+
+  /** Read-only snapshot for the cockpit. Computed from state; never changes it. */
+  view(nowMs: number): AgentView {
+    const bars = this.bars.all();
+    const closes = bars.map((bar) => bar.close);
+    const { strategy } = this.deps.config;
+    const last = this.bars.last;
+    const trend = superTrend(bars, strategy.supertrendPeriod, strategy.supertrendMultiplier);
+    const lastParts = last === undefined ? undefined : istParts(last.time);
+    const orb =
+      lastParts === undefined
+        ? undefined
+        : sessionRange(bars, lastParts.date, NSE_SESSION_OPEN_MINUTE, NSE_SESSION_OPEN_MINUTE + strategy.orbMinutes);
+    const position = this.position;
+    const mark = position === undefined ? undefined : this.lastMark;
+    const cooldownUntil = this.deps.book.cooldownUntilFor(this.symbol);
+    return {
+      symbol: this.symbol,
+      state: this.fsm.state,
+      halted: this.haltReason,
+      spot: this.lastSpot?.price,
+      spotAgeMs: this.lastSpot === undefined ? this.deps.feed.ageMs(this.deps.spec.spot) : nowMs - this.lastSpot.receivedAt,
+      bars: bars.length,
+      lastBarTime: last?.time,
+      indicators: {
+        emaFast: ema(closes, strategy.emaFast),
+        emaSlow: ema(closes, strategy.emaSlow),
+        supertrend: trend?.trend,
+        supertrendLine: trend?.line,
+        orbHigh: orb?.high,
+        orbLow: orb?.low,
+        orbFormed: lastParts !== undefined && lastParts.minuteOfDay >= NSE_SESSION_OPEN_MINUTE + strategy.orbMinutes && orb !== undefined,
+      },
+      lastSignal: this.lastSignal,
+      lastDrop: this.lastDrop,
+      lastCandidate: this.lastCandidate,
+      lastExit: this.lastExit,
+      position: position === undefined ? undefined : positionView(position, mark, nowMs, this.manualExit),
+      cooldownUntil,
+    };
+  }
+
   private acceptClosedBar(bar: Candle): void {
     if (this.bars.upsert(bar)) {
       this.queue.run(() => this.evaluateSignal());
@@ -189,6 +255,7 @@ export class UnderlyingAgent {
     }
 
     this.fsm.dispatch('SIGNAL_FOUND');
+    this.lastSignal = { direction: signal.direction, barTime: signal.barTime, spot: signal.spot, reasons: signal.reasons, at: this.now() };
     this.record('signal_detected', { direction: signal.direction, spot: signal.spot, reasons: signal.reasons });
     this.deps.logger.info('signal detected', { underlying: this.symbol, direction: signal.direction, spot: signal.spot });
 
@@ -199,6 +266,7 @@ export class UnderlyingAgent {
       prepared = { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
     }
     if (!prepared.ok) {
+      this.lastDrop = { code: prepared.code, detail: prepared.detail, at: this.now() };
       this.fsm.dispatch('SIGNAL_DROPPED');
       this.record('signal_dropped', { code: prepared.code, detail: prepared.detail });
       this.deps.logger.info('signal dropped', { underlying: this.symbol, code: prepared.code, detail: prepared.detail });
@@ -356,6 +424,23 @@ export class UnderlyingAgent {
       signalReasons: signal.reasons,
     };
 
+    this.lastCandidate = {
+      contractSymbol: contract.symbol,
+      optionType: contract.optionType,
+      strike: contract.strike,
+      expiry,
+      entryReference: bracket.entryReference,
+      bid: quote.bid,
+      spreadPct: entrySnapshot.spreadPct,
+      openInterest: entrySnapshot.openInterest,
+      lots: sizing.lots,
+      quantity: sizing.quantity,
+      stopLossPrice: bracket.stopLossPrice,
+      targetPrice: bracket.targetPrice,
+      riskInr: verdict.riskInr,
+      at: now,
+    };
+
     if (this.deps.advisor !== undefined) {
       const advice = await this.deps.advisor.review(entrySnapshot);
       this.record('advisor_verdict', { decision: advice.decision, confidence: advice.confidence, source: advice.source, reason: advice.reason });
@@ -510,6 +595,8 @@ export class UnderlyingAgent {
       return;
     }
     const pnlInr = (averagePrice - position.averagePrice) * quantity;
+    this.lastExit = { reason, pnlInr: Number(pnlInr.toFixed(2)), at };
+    this.manualExit = false;
     this.deps.book.recordClose({ underlying: this.symbol, pnlInr, closedAtMs: at });
     this.deps.feed.unsubscribe([instrumentRefOf(position.contract)]);
     this.position = undefined;
@@ -565,6 +652,9 @@ export class UnderlyingAgent {
     if (shutdown) {
       return 'SHUTDOWN';
     }
+    if (this.manualExit) {
+      return 'MANUAL';
+    }
     if (this.deps.book.snapshot().dayPnlInr <= -this.dailyLossLimitInr) {
       return 'DAILY_LOSS';
     }
@@ -597,4 +687,22 @@ export class UnderlyingAgent {
 
 function instrumentRefOf(contract: OptionContract): InstrumentRef {
   return { exchangeSegment: contract.exchangeSegment, securityId: contract.securityId };
+}
+
+function positionView(position: OpenPosition, mark: number | undefined, nowMs: number, exitRequested: boolean): PositionView {
+  return {
+    contractSymbol: position.contract.symbol,
+    optionType: position.contract.optionType,
+    strike: position.contract.strike,
+    expiry: position.contract.expiry,
+    quantity: position.quantity,
+    averagePrice: position.averagePrice,
+    stopLossPrice: position.stopLossPrice,
+    targetPrice: position.targetPrice,
+    mark,
+    unrealizedInr: mark === undefined ? undefined : Number(((mark - position.averagePrice) * position.quantity).toFixed(2)),
+    openedAt: position.openedAt,
+    heldMinutes: Math.max(0, Math.floor((nowMs - position.openedAt) / 60_000)),
+    exitRequested,
+  };
 }

@@ -10,6 +10,7 @@ import { istParts, shiftDateKey } from '../time/ist.js';
 import { assertWarmupClock } from './clockGuard.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
+import type { CockpitSnapshot } from './views.js';
 
 /** The live feed as the orchestrator sees it: routing, lifecycle and freshness. */
 export interface OrchestratorFeed extends FeedPort {
@@ -56,6 +57,8 @@ export class Orchestrator {
   private unsubscribeEvents: (() => void) | undefined;
   private brokerKillPending: string | undefined;
   private started = false;
+  private phase: CockpitSnapshot['phase'] = 'IDLE';
+  private phaseDetail: string | undefined;
 
   constructor(
     private readonly config: AgentConfig,
@@ -79,7 +82,21 @@ export class Orchestrator {
     return this.agents.get(symbol);
   }
 
+  /** Starts the agent. A failed start is recorded in the snapshot so the cockpit can show why. */
   async start(): Promise<void> {
+    this.phase = 'STARTING';
+    try {
+      await this.startInternal();
+      this.phase = 'RUNNING';
+    } catch (error) {
+      this.phase = 'FAILED';
+      this.phaseDetail = error instanceof Error ? error.message : String(error);
+      this.services.logger.error('start failed', { reason: this.phaseDetail });
+      throw error;
+    }
+  }
+
+  private async startInternal(): Promise<void> {
     if (this.started) {
       throw new Error('orchestrator already started');
     }
@@ -122,6 +139,7 @@ export class Orchestrator {
 
   /** Stops new entries, flattens through the normal exit path, then waits (bounded) for flat before closing I/O. */
   async stop(): Promise<void> {
+    this.phase = 'STOPPING';
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -143,7 +161,79 @@ export class Orchestrator {
     this.services.feed.stop();
     await this.services.execution.close();
     await this.services.events.flush();
+    this.phase = 'STOPPED';
     this.services.logger.info('agent stopped', { flat });
+  }
+
+  /** Read-only state for the operator cockpit. Building it never changes trading state. */
+  snapshot(nowMs: number = this.now()): CockpitSnapshot {
+    const day = this.book.snapshot();
+    return {
+      at: nowMs,
+      mode: this.config.mode,
+      phase: this.phase,
+      phaseDetail: this.phaseDetail,
+      capitalInr: this.config.capital.inr,
+      riskBudgetInr: (this.config.capital.inr * this.config.capital.maxRiskPerTradePct) / 100,
+      dailyLossLimitInr: this.dailyLossLimitInr,
+      maxTradesPerDay: this.config.capital.maxTradesPerDay,
+      maxOpenPositions: this.config.capital.maxOpenPositions,
+      maxHoldMinutes: this.config.exits.maxHoldMinutes,
+      staleMs: this.config.feed.staleMs,
+      day: {
+        dayKey: day.dayKey,
+        realizedPnlInr: day.realizedPnlInr,
+        unrealizedPnlInr: day.unrealizedPnlInr,
+        dayPnlInr: day.dayPnlInr,
+        tradesToday: day.tradesToday,
+        openUnderlyings: day.openUnderlyings,
+        killSwitchReason: day.killSwitchReason,
+      },
+      underlyings: this.specs.flatMap((spec) => {
+        const agent = this.agents.get(spec.symbol);
+        return agent === undefined ? [] : [agent.view(nowMs)];
+      }),
+    };
+  }
+
+  /** Operator request to close one underlying's position. Returns a message for the operator. */
+  requestManualExit(symbol: string): string {
+    const agent = this.agents.get(symbol);
+    if (agent === undefined) {
+      return `${symbol}: not traded by this agent`;
+    }
+    const outcome = agent.requestManualExit();
+    const message = {
+      ACCEPTED: `${symbol}: close requested; the normal exit checks apply`,
+      NO_OPEN_POSITION: `${symbol}: no open position to close`,
+      NOT_MANAGEABLE: `${symbol}: position is not in a state that accepts a close right now`,
+    }[outcome];
+    this.services.logger.warn('operator close request', { underlying: symbol, outcome });
+    return message;
+  }
+
+  /**
+   * Operator toggle for the entry block. Blocking is always allowed. Clearing is refused while
+   * any underlying is halted or the day has breached its loss limit, because those need a
+   * restart and a review, not a keypress.
+   */
+  toggleEntryBlock(): string {
+    const day = this.book.snapshot();
+    if (day.killSwitchReason === undefined) {
+      this.book.activateKillSwitch(`operator entry block (${new Date(this.now()).toISOString()})`);
+      this.services.logger.warn('operator blocked new entries');
+      return 'new entries blocked; press k again to clear';
+    }
+    const halted = [...this.agents.values()].find((agent) => agent.haltedBecause !== undefined);
+    if (halted !== undefined) {
+      return `cannot clear: ${halted.symbol} is halted (${halted.haltedBecause}); restart after review`;
+    }
+    if (day.dayPnlInr <= -this.dailyLossLimitInr) {
+      return 'cannot clear: the daily loss limit is breached for today';
+    }
+    this.book.clearKillSwitch();
+    this.services.logger.warn('operator cleared the entry block');
+    return 'entry block cleared; new entries may resume';
   }
 
   private createAgent(spec: UnderlyingSpec): UnderlyingAgent {

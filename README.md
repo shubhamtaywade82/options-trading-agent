@@ -65,6 +65,34 @@ Node 22 or newer is required.
 Details, the full transition table, and the failure-mode matrix are in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Operator cockpit
+
+On an interactive terminal, `npm run dev:paper` (and `dev:live`) opens a full-screen cockpit in the same
+layout family as the crypto dashboard: header, four framed columns, a detail row, the event log, and a
+footer. Set `UI=off`, or pipe the output, for plain log lines under a process supervisor.
+
+```
+UNDERLYINGS     SIGNAL & CONTRACT           POSITION          RISK & DAY
+▸ NIFTY IDLE    SELECTED NIFTY               flat             P&L +₹83.75
+  spot, age     LAST SIGNAL / REJECTION      LAST EXIT        loss ░░░░ 0% of ₹3,000
+  ST, ORB       LAST CANDIDATE (contract,    (or the open     trades 2/3, open 1/1
+  EMA           ask, spread, OI, SL, TP)     position: mark,  kill switch off
+                                             P&L, held time)
+```
+
+| Key | Action | Notes |
+| --- | --- | --- |
+| `↑` `↓` | select underlying | The columns and detail follow the selection. |
+| `c` | close the selected position | Goes through the normal exit path (reason `MANUAL`). Press twice within 5 s. |
+| `k` | toggle the entry block | Blocks new entries. Clearing is refused while any underlying is halted or the day has breached its loss limit. Press twice. |
+| `s` or `ctrl+c` | stop | Flattens open positions, then exits. Press twice. |
+| `?` | help line | |
+
+The cockpit only reads state, except for these three actions, and every action needs a second press.
+Its data comes from `Orchestrator.snapshot()`, a read-only view built from the agents and the day
+book. Rendering it never changes trading state. Its log is an in-memory ring of the last 200 records;
+the durable record is still the journal.
+
 ## Strategy and contract selection
 
 **Signal** (evaluated only on closed bars, IST session):
@@ -138,6 +166,16 @@ Invalid or unsafe values stop startup with a message that names the key. Default
 starting points. Tune `MIN_OPEN_INTEREST`, `MIN_VOLUME`, `MAX_SPREAD_PCT`, `STOP_LOSS_PCT`,
 and `TARGET_RR` per index and per regime. None of them has been calibrated against data here.
 
+## Tools
+
+| Command | What it does | Credentials |
+| --- | --- | --- |
+| `npm run cockpit:demo` | Opens the operator cockpit on fakes, to see the screen. | none |
+| `npm run smoke:live` | Read-only check of the open assumptions against live Dhan data: scrip master, expiries, option-chain fields, warmup bars and clock, funds, open broker positions. Places no orders. | Dhan |
+| `npm run journal:summary [YYYY-MM-DD]` | Summarises a day's journal: trades, wins and losses, realised P&L, exit reasons, dropped-signal reasons, halts. | none |
+
+Run `smoke:live` before a live session, and `journal:summary` after every paper session.
+
 ## Testing
 
 ```bash
@@ -206,8 +244,9 @@ From `crypto-trading-agent` main (the full tree is in the baseline commit):
 - `src/strategies/smc-ml`, `src/minicpm`, `src/research`, `src/learning`, `src/backtesting`
 - perpetual, funding, carry, crowding, and open-interest logic in `src/market`, `src/agents`,
   `src/decision`, `src/position`, `src/risk`
-- the Ink crypto dashboard and its panels (`src/ui`)
 - crypto docs, improvement notes, scripts, and tests
+
+The Ink dashboard was rebuilt for options rather than removed. See [Operator cockpit](#operator-cockpit).
 
 `npm test` is a fresh suite for the index-options system. The dependency on
 `@nemesis-oss/ollama-sdk` is kept and upgraded to the 1.13 line. The DhanHQ dependency is
@@ -229,6 +268,8 @@ src/
   execution/           ExecutionPort contract, paper venue
   llm/                 Ollama advisor
   ops/                 event log, console logger
-  runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring
+  runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring, read-only views
+  ui/                  operator cockpit: pure renderer (cockpit.ts) and Ink app (App.tsx)
+  index.tsx            entry point: cockpit on a terminal, plain logs otherwise
 tests/                 offline suite (node:test via tsx)
 ```

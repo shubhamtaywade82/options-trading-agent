@@ -16,7 +16,8 @@ modes the design is built around. The README covers operation and configuration.
 | Advice | `src/llm/advisor.ts` | Ollama structured output, veto only, fail-closed. |
 | Venue | `src/execution/paper.ts`, `src/dhan/liveExecution.ts` | Same `ExecutionPort` contract. Paper simulates; live places super orders. |
 | Orchestration | `src/runtime/*` | Serial per-underlying agent; orchestrator with routing, clock, breach handling, shutdown. |
-| Audit | `src/ops/*` | JSONL event log (serialised writes), IST console logger. |
+| Audit | `src/ops/*` | JSONL journal, one file per IST day (serialised writes), IST console logger, bounded in-memory log for the cockpit, journal summary. |
+| Cockpit | `src/ui/*`, `src/runtime/views.ts` | Read-only snapshot (`Orchestrator.snapshot`) rendered by a pure renderer and an Ink app. Three operator actions (close, entry block, stop), each behind a second press. |
 
 ## 2. Trade lifecycle (per underlying)
 

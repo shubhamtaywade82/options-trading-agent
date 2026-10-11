@@ -89,4 +89,5 @@ export type ExitReason =
   | 'EOD_FLATTEN'
   | 'DAILY_LOSS'
   | 'SHUTDOWN'
+  | 'MANUAL'
   | 'EXTERNAL';

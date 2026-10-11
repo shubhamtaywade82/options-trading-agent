@@ -334,3 +334,66 @@ describe('runtime: halts', () => {
     assert.equal(harness.orchestrator.agent('NIFTY')?.isFlat(), true);
   });
 });
+
+describe('runtime: operator actions and cockpit snapshot', () => {
+  it('reports the phase as RUNNING once started and FAILED with the reason when the start is refused', async () => {
+    const running = build();
+    await running.orchestrator.start();
+    assert.equal(running.orchestrator.snapshot().phase, 'RUNNING');
+    assert.equal(running.orchestrator.snapshot().underlyings[0]?.symbol, 'NIFTY');
+
+    const refused = build({}, { brokerOpen: 1 });
+    await assert.rejects(refused.orchestrator.start(), /open option position/);
+    const failed = refused.orchestrator.snapshot();
+    assert.equal(failed.phase, 'FAILED');
+    assert.match(failed.phaseDetail ?? '', /open option position/);
+  });
+
+  it('closes the selected position through the normal exit path with reason MANUAL', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position?.quantity, 75);
+
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /close requested/);
+    await settle(harness.orchestrator);
+
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL');
+    const view = harness.orchestrator.snapshot().underlyings[0];
+    assert.equal(view?.position, undefined);
+    assert.equal(view?.lastExit?.reason, 'MANUAL');
+    assert.equal(view?.state, 'IDLE');
+  });
+
+  it('says why there is nothing to close instead of acting', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /no open position/);
+    assert.match(harness.orchestrator.requestManualExit('SENSEX'), /not traded by this agent/);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), false);
+  });
+
+  it('blocks new entries on request and clears the block only when nothing forbids it', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('operator entry block'));
+    assert.match(harness.orchestrator.toggleEntryBlock(), /entry block cleared/);
+    assert.equal(harness.orchestrator.snapshot().day.killSwitchReason, undefined);
+  });
+
+  it('refuses to clear the block while the day has breached its loss limit', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    harness.setClock('10:05:00');
+    optionTick(harness, '48001', 15);
+    await settle(harness.orchestrator);
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('daily loss'));
+    assert.match(harness.orchestrator.toggleEntryBlock(), /daily loss limit is breached/);
+    assert.ok(harness.orchestrator.snapshot().day.killSwitchReason?.startsWith('daily loss'));
+  });
+});

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { EventLog, journalFileName } from '../ops/eventLog.js';
 import { restoreDayBook } from '../ops/dayState.js';
 import { DayBook } from '../risk/dayBook.js';
-import { createConsoleLogger, type Logger } from '../ops/logger.js';
+import { createConsoleLogger, RingLogger, type Logger } from '../ops/logger.js';
 import { istParts } from '../time/ist.js';
 import type { MarketPort } from './ports.js';
 import { Orchestrator } from './orchestrator.js';
@@ -21,6 +21,8 @@ import { Orchestrator } from './orchestrator.js';
 export interface Runtime {
   readonly orchestrator: Orchestrator;
   readonly logger: Logger;
+  /** Set in cockpit mode: the bounded log the terminal screen renders. */
+  readonly records: RingLogger | undefined;
 }
 
 /**
@@ -29,8 +31,13 @@ export interface Runtime {
  * venue differs. Index specs are resolved from the scrip master up front, so an
  * unknown index fails at startup rather than on the first signal.
  */
-export async function buildRuntime(config: AgentConfig, now: () => number = Date.now): Promise<Runtime> {
-  const logger = createConsoleLogger(undefined, now);
+export async function buildRuntime(
+  config: AgentConfig,
+  now: () => number = Date.now,
+  options: { cockpit?: boolean } = {},
+): Promise<Runtime> {
+  const records = options.cockpit === true ? new RingLogger(200, now) : undefined;
+  const logger: Logger = records ?? createConsoleLogger(undefined, now);
   const events = new EventLog(
     config.ops.eventLogDir,
     (error) => logger.error('event log write failed', { error: String(error) }),
@@ -87,7 +94,7 @@ export async function buildRuntime(config: AgentConfig, now: () => number = Date
     logger,
     now,
   });
-  return { orchestrator, logger };
+  return { orchestrator, logger, records };
 }
 
 function buildAdvisor(config: AgentConfig, logger: Logger): TradeAdvisor | undefined {
