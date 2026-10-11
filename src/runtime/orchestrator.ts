@@ -11,6 +11,8 @@ import { assertWarmupClock } from './clockGuard.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
 import type { CockpitSnapshot } from './views.js';
+import type { TradingGate } from './tradingGate.js';
+import { withDeadline } from './deadline.js';
 
 /** The live feed as the orchestrator sees it: routing, lifecycle and freshness. */
 export interface OrchestratorFeed extends FeedPort {
@@ -31,6 +33,13 @@ export interface OrchestratorServices {
   readonly now?: () => number;
   readonly clockIntervalMs?: number;
   readonly shutdownTimeoutMs?: number;
+  /** Conditions beyond the book that stop orders: the leader lock and unconfirmed events. Open when omitted. */
+  readonly gate?: TradingGate;
+  /**
+   * Runs once, after the final event flush. Ends the run record, releases the leader lock and closes the
+   * database and Redis connections. It must not throw, and it must be safe to call twice.
+   */
+  readonly closeSession?: () => Promise<void>;
 }
 
 const DEFAULT_CLOCK_INTERVAL_MS = 1_000;
@@ -117,6 +126,13 @@ export class Orchestrator {
         `broker reports ${openLegs} open option position(s) before start; close or adopt them before starting the agent`,
       );
     }
+    // An order accepted just before a crash has no position yet, so only the order book can show it.
+    const liveOrders = await this.services.market.brokerLiveOrderCount();
+    if (liveOrders > 0) {
+      throw new Error(
+        `broker reports ${liveOrders} order(s) that are not in a terminal status; wait for them to settle or cancel them before starting`,
+      );
+    }
 
     const today = istParts(this.now()).date;
     const from = shiftDateKey(today, -(this.config.strategy.warmupDays * 2 + 2));
@@ -183,10 +199,18 @@ export class Orchestrator {
     }
     this.unsubscribeTicks?.();
     this.unsubscribeEvents?.();
-    await Promise.all([...this.agents.values()].map((agent) => agent.drain()));
+    const timeoutMs = this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
+    const drained = await withDeadline(Promise.all([...this.agents.values()].map((agent) => agent.drain())), timeoutMs, 'drain timed out').then(
+      () => true,
+      () => false,
+    );
+    if (!drained) {
+      this.services.logger.error('agent queues did not drain in time; work still queued may not be recorded', {});
+    }
     this.services.feed.stop();
     await this.services.execution.close();
     await this.services.events.flush();
+    await this.services.closeSession?.();
     this.phase = 'STOPPED';
     this.services.logger.info('agent stopped', { flat });
   }
@@ -248,9 +272,8 @@ export class Orchestrator {
     if (day.killSwitchReason === undefined) {
       const reason = `operator entry block (${new Date(this.now()).toISOString()})`;
       this.book.activateKillSwitch(reason);
-      // Journaled so a restart keeps the block. It is not in the broker kill switch, which does not
-      // apply to an operator block.
-      this.services.events.record('operator_entry_block', { reason });
+      // Durable, so a restart keeps the block. It is not in the broker kill switch, which does not apply to an operator block.
+      this.durableEvent('operator_entry_block', { reason });
       this.services.logger.warn('operator blocked new entries');
       return 'new entries blocked; press k again to clear';
     }
@@ -262,7 +285,7 @@ export class Orchestrator {
       return 'cannot clear: the daily loss limit is breached for today';
     }
     this.book.clearKillSwitch();
-    this.services.events.record('operator_entry_clear', {});
+    this.durableEvent('operator_entry_clear', {});
     this.services.logger.warn('operator cleared the entry block');
     return 'entry block cleared; new entries may resume';
   }
@@ -295,6 +318,7 @@ export class Orchestrator {
       logger: this.services.logger,
       onHalt: (underlying, reason) => this.onHalt(underlying, reason),
       now: this.now,
+      ...(this.services.gate === undefined ? {} : { gate: this.services.gate }),
     });
   }
 
@@ -332,7 +356,7 @@ export class Orchestrator {
     const reason = `daily loss ${snapshot.dayPnlInr.toFixed(2)} breached -${this.dailyLossLimitInr.toFixed(2)}`;
     this.book.recordDailyLossBreach(reason);
     this.services.logger.error('daily loss limit breached; flattening', { reason });
-    this.services.events.record('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
+    this.durableEvent('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
     this.brokerKillPending = reason;
   }
 
@@ -343,7 +367,7 @@ export class Orchestrator {
   private onHalt(underlying: string, reason: string): void {
     const fullReason = `${underlying}: ${reason}`;
     this.book.activateKillSwitch(fullReason);
-    this.services.events.record('book_kill_switch', { reason: fullReason });
+    this.durableEvent('book_kill_switch', { reason: fullReason });
     this.engageBrokerKillSwitch(fullReason);
   }
 
@@ -367,6 +391,19 @@ export class Orchestrator {
     }
     void engage.call(this.services.execution, reason).catch((error: unknown) => {
       this.services.logger.error('broker kill switch call failed', { reason, error: String(error) });
+    });
+  }
+
+  /**
+   * A state change that restart cannot re-derive. It is written durably in the background: the in-memory
+   * decision applies at once, and until the write is confirmed the event counts as unconfirmed, which holds entries.
+   */
+  private durableEvent(type: string, payload: Readonly<Record<string, unknown>>): void {
+    this.services.events.durable(type, payload).catch((error: unknown) => {
+      this.services.logger.error('event is not durable yet; entries wait until it is recorded', {
+        type,
+        error: error instanceof Error ? error.message : String(error),
+      });
     });
   }
 

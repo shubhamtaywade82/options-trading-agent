@@ -21,7 +21,8 @@ describe('loadConfig', () => {
   it('refuses live mode without the explicit acknowledgement phrase', () => {
     assert.throws(() => loadConfig({ ...BASE, MODE: 'live' }), /LIVE_TRADING_ACK/);
     assert.throws(() => loadConfig({ ...BASE, MODE: 'live', LIVE_TRADING_ACK: 'yes' }), /LIVE_TRADING_ACK/);
-    assert.equal(loadConfig({ ...BASE, MODE: 'live', LIVE_TRADING_ACK: LIVE_ACK_PHRASE }).mode, 'live');
+    const live = { ...BASE, MODE: 'live', DATABASE_URL: 'postgres://ledger.internal/agent', REDIS_URL: 'redis://cache.internal:6379/0' };
+    assert.equal(loadConfig({ ...live, LIVE_TRADING_ACK: LIVE_ACK_PHRASE }).mode, 'live');
   });
 
   it('rejects unknown modes and unsupported underlyings', () => {

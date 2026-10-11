@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { OptionSegment } from './domain/types.js';
+import { parseRedisUrl, validatePostgresUrl } from './persistence/urls.js';
 import { parseMinuteOfDay } from './time/ist.js';
 
 /** Index symbols this agent knows how to trade, with the segment their options list on. */
@@ -85,6 +87,17 @@ export interface AgentConfig {
     readonly brokerKillSwitchOnBreach: boolean;
     readonly reconcileIntervalMs: number;
     readonly orderTimeoutMs: number;
+  };
+  readonly persistence: {
+    /** PostgreSQL ledger. Required in live mode. Credentials inside the URL are never logged. */
+    readonly databaseUrl: string | undefined;
+    /** Redis for the account rate gate and the contract cache. Optional; the trading lease lives in PostgreSQL. */
+    readonly redisUrl: string | undefined;
+    /** Stable name for this host, recorded on every run. Defaults to the hostname at runtime. */
+    readonly instanceId: string | undefined;
+    /** Trading lease TTL. A crashed holder's lease expires after this, plus the order timeout. */
+    readonly leaseTtlMs: number;
+    readonly postgresMaxConnections: number;
   };
 }
 
@@ -275,10 +288,45 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       reconcileIntervalMs: number(env, 'RECONCILE_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000, integer: true }),
       orderTimeoutMs: number(env, 'ORDER_TIMEOUT_MS', 30_000, { min: 1_000, max: 300_000, integer: true }),
     },
+    persistence: parsePersistence(env, mode),
   };
 
   validateCrossFields(config);
   return config;
+}
+
+/** Brings persistence settings into the config. Live mode needs both stores: the ledger (which also holds the lease) and Redis.*/
+function parsePersistence(env: Env, mode: AgentConfig['mode']): AgentConfig['persistence'] {
+  const databaseUrl = optionalText(env, 'DATABASE_URL');
+  const redisUrl = optionalText(env, 'REDIS_URL');
+  if (databaseUrl !== undefined) {
+    validatePostgresUrl(databaseUrl);
+  }
+  if (redisUrl !== undefined) {
+    parseRedisUrl(redisUrl);
+  }
+  if (mode === 'live' && (databaseUrl === undefined || redisUrl === undefined)) {
+    throw new Error('live mode requires DATABASE_URL (trading ledger and lease) and REDIS_URL (rate gate and cache)');
+  }
+  return {
+    databaseUrl,
+    redisUrl,
+    instanceId: optionalText(env, 'INSTANCE_ID'),
+    leaseTtlMs: number(env, 'LEASE_TTL_MS', 30_000, { min: 5_000, max: 120_000, integer: true }),
+    postgresMaxConnections: number(env, 'POSTGRES_MAX_CONNECTIONS', 5, { min: 1, max: 50, integer: true }),
+  };
+}
+
+/**
+ * A fingerprint of the trading-relevant configuration, recorded on every run so a ledger row can be
+ * tied to the settings that produced it. Secrets and connection strings are excluded by construction:
+ * this function only reads the trading sections.
+ */
+export function configFingerprint(config: AgentConfig): string {
+  const { mode, underlyings, capital, contract, exits, session, strategy, feed, paper } = config;
+  return createHash('sha256')
+    .update(JSON.stringify({ mode, underlyings, capital, contract, exits, session, strategy, feed, paper }))
+    .digest('hex');
 }
 
 function validateCrossFields(config: AgentConfig): void {

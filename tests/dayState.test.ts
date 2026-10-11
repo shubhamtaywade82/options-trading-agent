@@ -108,3 +108,13 @@ describe('DayBook breach latch', () => {
     assert.equal(snapshot.dailyLossBreach, 'daily loss -2100.00 breached -2000.00');
   });
 });
+
+describe('restoreDayBook unresolved intents', () => {
+  it('starts a cooldown for an intent with no outcome, so a restart cannot re-enter at once', () => {
+    const book = new DayBook(Date.parse(T('10:00')), 300_000);
+    restoreDayBook(book, [line(T('10:20'), 'entry_submitted', { underlying: 'NIFTY' })], SESSION_DAY);
+    assert.deepEqual(book.snapshot().openUnderlyings, [], 'it is released, so it does not block the day forever');
+    assert.equal(book.cooldownUntilFor('NIFTY'), Date.parse(T('10:20')) + 300_000);
+    assert.equal(book.snapshot().tradesToday, 1, 'the attempt counts toward the trade limit');
+  });
+});

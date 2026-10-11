@@ -8,6 +8,7 @@ import type { AdvisoryVerdict, TradeAdvisor } from '../src/llm/advisor.js';
 import type { EventLog } from '../src/ops/eventLog.js';
 import type { Logger } from '../src/ops/logger.js';
 import { Orchestrator, type OrchestratorFeed } from '../src/runtime/orchestrator.js';
+import { ledgerAndLeaseGate, type TradingGate } from '../src/runtime/tradingGate.js';
 import type { ChainSnapshot } from '../src/options/selector.js';
 import { bar, contract, istEpoch, SESSION_DAY } from './support/fixtures.js';
 
@@ -112,6 +113,10 @@ function build(
     feedGate?: Promise<void>;
     /** When set, the paper venue records each broker kill-switch engagement here. */
     killSwitch?: string[];
+    /** Controls durable writes. Each call is recorded, and the returned promise decides whether it succeeds. */
+    durable?: (type: string) => Promise<void>;
+    gate?: TradingGate;
+    brokerLiveOrders?: number;
   } = {},
 ): Harness {
   // Start after the warmup's last bar has closed; the clock guard refuses bars stamped in the future.
@@ -147,11 +152,18 @@ function build(
     optionContracts: async () => [CE, PE],
     availableFunds: async () => 300_000,
     brokerOpenOptionCount: async () => options.brokerOpen ?? 0,
+    brokerLiveOrderCount: async () => options.brokerLiveOrders ?? 0,
   };
   const eventLog = {
     record: (type: string, payload: Record<string, unknown>) => {
       events.push({ type, payload });
     },
+    // Durable writes land in the same list. The harness has no journal file or ledger to fail.
+    durable: async (type: string, payload: Record<string, unknown>) => {
+      events.push({ type, payload });
+      await (options.durable ?? (async () => undefined))(type);
+    },
+    unconfirmedEvents: () => 0,
     flush: async () => undefined,
   } as unknown as EventLog;
   const orchestrator = new Orchestrator(config, [SPEC], {
@@ -164,6 +176,7 @@ function build(
     now,
     clockIntervalMs: 1e9,
     shutdownTimeoutMs: 2_000,
+    ...(options.gate === undefined ? {} : { gate: options.gate }),
   });
   return {
     orchestrator,
@@ -589,3 +602,160 @@ describe('runtime: stop during start', () => {
     assert.equal(harness.feed.subscribed.size, 0);
   });
 });
+
+describe('runtime: durable intents and the trading gate', () => {
+  /** Ticks to the 09:45 breakout without settling, so a test can act while the entry is still being prepared. */
+  async function breakoutWithoutSettling(harness: Harness): Promise<void> {
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    for (let i = 0; i < 20; i += 1) {
+      await yieldToEventLoop();
+    }
+  }
+
+  it('sends no entry when its intent is not durable, and reports why', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        throw new Error('ledger unavailable');
+      }
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.code, 'INTENT_NOT_DURABLE');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'IDLE');
+  });
+
+  it('drops an entry whose intent is still being written when a block lands, and records it as rejected, not sent', async () => {
+    const release = gate();
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        await release.wait;
+      }
+    } });
+    await harness.orchestrator.start();
+    await breakoutWithoutSettling(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'SIGNAL_DETECTED', 'the intent is being written');
+
+    assert.match(harness.orchestrator.toggleEntryBlock(), /new entries blocked/);
+    release.release();
+    await settle(harness.orchestrator);
+
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined, 'the order was not sent');
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.code, 'ENTRY_BLOCKED');
+    const rejected = harness.events.find((event) => event.type === 'entry_rejected');
+    assert.match(String(rejected?.payload['reason'] ?? ''), /^ABORTED_AFTER_INTENT: operator entry block/);
+  });
+
+  it('gives up on an intent that is not durable within the deadline, so a stalled database cannot hold the queue', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'entry_submitted') {
+        await new Promise<void>(() => undefined);
+      }
+    } });
+    await harness.orchestrator.start();
+    harness.setClock('09:40:10');
+    spotTick(harness, 101.5, '09:40:10');
+    harness.setClock('09:45:05');
+    spotTick(harness, 101.6, '09:45:05');
+    const started = Date.now();
+    await settle(harness.orchestrator);
+    assert.ok(Date.now() - started >= 1_900, 'the wait ends at the deadline, not earlier');
+    const dropped = harness.orchestrator.snapshot().underlyings[0]?.lastDrop;
+    assert.equal(dropped?.code, 'INTENT_NOT_DURABLE');
+    assert.match(dropped?.detail ?? '', /not durable within 2000 ms/);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position, undefined);
+  });
+
+  it('still sends an exit when its intent is not durable, and records the gap', async () => {
+    const harness = build({}, { durable: async (type) => {
+      if (type === 'exit_submitted') {
+        throw new Error('ledger unavailable');
+      }
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /close requested/);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL', 'the exit went out');
+    assert.ok(harness.events.some((event) => event.type === 'audit_gap'), 'the missing intent is recorded as an audit gap');
+  });
+
+  it('honours a gate exit block when one is reported, and keeps the position open', async () => {
+    let exitBlock: string | undefined;
+    const tradingGate: TradingGate = { entryBlock: () => undefined, exitBlock: () => exitBlock };
+    const harness = build({}, { gate: tradingGate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    exitBlock = 'broker exit path is fail-stopped';
+    requestManual(harness);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), false, 'no SELL is sent');
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.position?.quantity, 75, 'the position is still open');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'RISK_MANAGEMENT_ACTIVE');
+  });
+
+  it('sends the exit after the trading lease is lost: a protective exit must not wait on the lease', async () => {
+    const leaseHolds = { value: true };
+    const gate = ledgerAndLeaseGate({ unconfirmedEvents: () => 0, leaseHolds: () => leaseHolds.value });
+    const harness = build({}, { gate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    leaseHolds.value = false;
+    requestManual(harness);
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.some((event) => event.type === 'exit_submitted'), true, 'the SELL goes out');
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'MANUAL');
+    assert.equal(gate.entryBlock(), 'trading lease lost; another run may be trading this account', 'entries stay blocked');
+  });
+
+  it('holds new entries while events are not yet confirmed, and sends none', async () => {
+    const tradingGate: TradingGate = {
+      entryBlock: () => '2 event(s) are not yet confirmed in the journal and ledger; entries wait',
+      exitBlock: () => undefined,
+    };
+    const harness = build({}, { gate: tradingGate });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), false);
+    assert.match(harness.orchestrator.snapshot().underlyings[0]?.lastDrop?.detail ?? '', /not yet confirmed/);
+  });
+
+  it('refuses to start while the broker reports live orders, even with no position yet', async () => {
+    const harness = build({}, { brokerLiveOrders: 1 });
+    await assert.rejects(harness.orchestrator.start(), /not in a terminal status/);
+    assert.equal(harness.orchestrator.snapshot().phase, 'FAILED');
+  });
+
+  it('writes halts and kill-switch activations durably', async () => {
+    const durableTypes: string[] = [];
+    const execution: ExecutionPort = {
+      mode: 'live',
+      submitEntry: async (order) => {
+        listener?.({ kind: 'ENTRY_UNCONFIRMED', correlationId: order.correlationId, underlying: 'NIFTY', reason: 'timeout' });
+      },
+      submitExit: async () => undefined,
+      onOptionTick: () => undefined,
+      onEvent: (fn) => {
+        listener = fn;
+        return () => undefined;
+      },
+      close: async () => undefined,
+    };
+    let listener: ((event: ExecutionEvent) => void) | undefined;
+    const harness = build({}, { execution, durable: async (type) => {
+      durableTypes.push(type);
+    } });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.ok(durableTypes.includes('halted'), 'the halt is durable');
+    assert.ok(durableTypes.includes('book_kill_switch'), 'the kill switch it set is durable');
+  });
+});
+
+/** Requests a manual close of the selected underlying, as the operator's key does. */
+function requestManual(harness: Harness): void {
+  harness.orchestrator.requestManualExit('NIFTY');
+}

@@ -19,7 +19,11 @@
     "test": "tsx --test tests/*.test.ts",
     "smoke:live": "tsx scripts/smoke-live.ts",
     "journal:summary": "tsx scripts/journal-summary.ts",
-    "cockpit:demo": "tsx scripts/cockpit-demo.ts"
+    "cockpit:demo": "tsx scripts/cockpit-demo.ts",
+    "db:status": "tsx scripts/db.ts status",
+    "db:migrate": "tsx scripts/db.ts migrate",
+    "db:acknowledge": "tsx scripts/db.ts acknowledge",
+    "test:integration": "tsx --test tests/persistence.integration.test.ts"
   },
   "dependencies": {
     "@nemesis-oss/dhanhq-sdk": "git+https://github.com/shubhamtaywade82/dhanhq-sdk.git#353901eca3d894ba75e008b9449ab7afc8368a72",
@@ -28,12 +32,15 @@
     "cli-truncate": "^4.0.0",
     "dotenv": "^16.4.5",
     "ink": "^5.2.1",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1",
     "react": "^18.3.1",
     "string-width": "^7.2.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^18.3.31",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3"

@@ -44,8 +44,14 @@ export function fakeRuntime(): { runtime: Runtime; stop: () => Promise<void> } {
     optionContracts: async () => [],
     availableFunds: async () => 300_000,
     brokerOpenOptionCount: async () => 0,
+    brokerLiveOrderCount: async () => 0,
   };
-  const events = { record: () => undefined, flush: async () => undefined } as unknown as EventLog;
+  const events = {
+    record: () => undefined,
+    durable: async () => undefined,
+    unconfirmedEvents: () => 0,
+    flush: async () => undefined,
+  } as unknown as EventLog;
   const config = loadConfig({ DHAN_CLIENT_ID: '1', DHAN_ACCESS_TOKEN: 't' });
   const orchestrator = new Orchestrator(config, [FAKE_SPEC], {
     market,

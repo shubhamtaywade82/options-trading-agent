@@ -11,6 +11,11 @@ export interface MarketPort {
   availableFunds(): Promise<number>;
   /** Live only: number of option legs with a non-zero net quantity at the broker. Paper returns 0. */
   brokerOpenOptionCount(): Promise<number>;
+  /**
+   * Live only: orders and super orders at the broker that are not in a terminal status, or whose status is
+   * missing. An order the process sent before a crash shows here even before it fills. Paper returns 0.
+   */
+  brokerLiveOrderCount(): Promise<number>;
 }
 
 /** Feed-side view for the agent: LTP freshness and option subscription lifecycle. */

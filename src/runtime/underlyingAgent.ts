@@ -28,6 +28,14 @@ import { DayBook } from '../risk/dayBook.js';
 import { evaluatePreTrade } from '../risk/riskEngine.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { SerialQueue } from './serialQueue.js';
+import { withDeadline } from './deadline.js';
+import { OPEN_GATE, type TradingGate } from './tradingGate.js';
+
+/**
+ * The longest an entry intent may take to become durable. It runs inside the serial queue, so a stalled
+ * database must not hold up exits. A timeout drops the entry. A late write is counted as a trade on restore.
+ */
+const INTENT_DEADLINE_MS = 2_000;
 
 export interface AgentDependencies {
   readonly spec: UnderlyingSpec;
@@ -41,6 +49,8 @@ export interface AgentDependencies {
   readonly logger: Logger;
   readonly onHalt: (underlying: string, reason: string) => void;
   readonly now?: () => number;
+  /** Process-level conditions (leader lock, unconfirmed events) that stop orders. Open when omitted. */
+  readonly gate?: TradingGate;
 }
 
 type Preparation =
@@ -84,6 +94,7 @@ export class UnderlyingAgent {
   private lastDrop: DropView | undefined;
   private lastCandidate: CandidateView | undefined;
   private lastExit: ExitView | undefined;
+  private withheldReason: string | undefined;
 
   constructor(private readonly deps: AgentDependencies) {
     this.symbol = deps.spec.symbol;
@@ -286,26 +297,43 @@ export class UnderlyingAgent {
       }
     }
     if (!prepared.ok) {
-      this.lastDrop = { code: prepared.code, detail: prepared.detail, at: this.now() };
-      this.fsm.dispatch('SIGNAL_DROPPED');
-      this.record('signal_dropped', { code: prepared.code, detail: prepared.detail });
-      this.deps.logger.info('signal dropped', { underlying: this.symbol, code: prepared.code, detail: prepared.detail });
+      this.drop(prepared.code, prepared.detail);
       return;
     }
 
     const { order } = prepared;
+    // The intent must be durable before the broker call. A crash after the call must still find it on restart.
+    try {
+      await withDeadline(
+        this.durableRecord('entry_submitted', {
+          correlationId: order.correlationId,
+          contract: order.contract.symbol,
+          quantity: order.quantity,
+          entryReference: order.entryReference,
+          stopLossPrice: order.stopLossPrice,
+          targetPrice: order.targetPrice,
+        }),
+        INTENT_DEADLINE_MS,
+        `entry intent was not durable within ${INTENT_DEADLINE_MS} ms`,
+      );
+    } catch (error) {
+      this.deps.logger.error('entry not submitted: its intent is not durable', { underlying: this.symbol, error: describe(error) });
+      this.drop('INTENT_NOT_DURABLE', describe(error));
+      return;
+    }
+    // The durable write is an await, so the gate is read again before the state moves and the order is sent.
+    // An intent that is journalled but not sent is recorded as rejected, which restore reads as released.
+    const blockedAfterIntent = this.entryBlockReason();
+    if (blockedAfterIntent !== undefined) {
+      this.record('entry_rejected', { correlationId: order.correlationId, reason: `ABORTED_AFTER_INTENT: ${blockedAfterIntent}` });
+      this.drop('ENTRY_BLOCKED', blockedAfterIntent);
+      return;
+    }
+
     this.fsm.dispatch('ENTRY_SUBMITTED');
     this.pending = order;
     this.deps.book.recordEntry(this.symbol);
     this.deps.feed.subscribe([instrumentRefOf(order.contract)]);
-    this.record('entry_submitted', {
-      correlationId: order.correlationId,
-      contract: order.contract.symbol,
-      quantity: order.quantity,
-      entryReference: order.entryReference,
-      stopLossPrice: order.stopLossPrice,
-      targetPrice: order.targetPrice,
-    });
     this.deps.logger.info('entry submitted', {
       underlying: this.symbol,
       contract: order.contract.symbol,
@@ -329,7 +357,20 @@ export class UnderlyingAgent {
     if (this.haltReason !== undefined) {
       return `halted: ${this.haltReason}`;
     }
-    return this.deps.book.snapshot().killSwitchReason;
+    return this.deps.book.snapshot().killSwitchReason ?? (this.deps.gate ?? OPEN_GATE).entryBlock();
+  }
+
+  /** Ends a signal without an order. The state returns to IDLE, and the reason is journalled and shown. */
+  private drop(code: string, detail: string): void {
+    this.lastDrop = { code, detail, at: this.now() };
+    this.fsm.dispatch('SIGNAL_DROPPED');
+    this.record('signal_dropped', { code, detail });
+    this.deps.logger.info('signal dropped', { underlying: this.symbol, code, detail });
+  }
+
+  /** A journal write that must reach the ledger. The caller decides what a failure means. */
+  private durableRecord(type: string, payload: Readonly<Record<string, unknown>>): Promise<void> {
+    return this.deps.events.durable(type, { underlying: this.symbol, ...payload });
   }
 
   /** Builds and validates one entry from a signal. Every rejection carries a stable code. */
@@ -625,24 +666,33 @@ export class UnderlyingAgent {
     if (position === undefined) {
       return;
     }
-    const pnlInr = (averagePrice - position.averagePrice) * quantity;
-    this.lastExit = { reason, pnlInr: Number(pnlInr.toFixed(2)), at };
+    // Rounded once, here, so the book, the journal and the restored day all carry the same figure.
+    const pnlInr = Number(((averagePrice - position.averagePrice) * quantity).toFixed(2));
+    this.lastExit = { reason, pnlInr, at };
     this.manualExit = false;
     this.deps.book.recordClose({ underlying: this.symbol, pnlInr, closedAtMs: at });
     this.deps.feed.unsubscribe([instrumentRefOf(position.contract)]);
     this.position = undefined;
     this.pending = undefined;
     this.lastMark = undefined;
-    this.record('trade_closed', {
+    // The close is durable: a standby that restores the day must see the realised P&L. The position is already
+    // closed in memory, so a failure is logged and, through unconfirmed events, holds new entries until it is recorded.
+    this.durableRecord('trade_closed', {
       positionId: position.positionId,
       contract: position.contract.symbol,
       quantity,
       entryPrice: position.averagePrice,
       exitPrice: averagePrice,
-      pnlInr: Number(pnlInr.toFixed(2)),
+      pnlInr,
       reason,
+    }).catch((error: unknown) => {
+      this.deps.logger.error('trade close is not durable yet; entries wait until it is recorded', {
+        underlying: this.symbol,
+        positionId: position.positionId,
+        error: describe(error),
+      });
     });
-    this.deps.logger.info('position closed', { underlying: this.symbol, reason, pnlInr: Number(pnlInr.toFixed(2)) });
+    this.deps.logger.info('position closed', { underlying: this.symbol, reason, pnlInr });
   }
 
   private async checkExits(shutdown: boolean): Promise<void> {
@@ -669,8 +719,22 @@ export class UnderlyingAgent {
       reason,
       referencePrice: this.lastMark ?? position.averagePrice,
     };
+    // An exit reduces risk, so it is never held for the ledger. The intent is written durably in the background,
+    // and a failure is recorded as an audit gap. Gate-blocked exits (lost leader lock) do not reach the broker.
+    const withheld = (this.deps.gate ?? OPEN_GATE).exitBlock();
+    if (withheld !== undefined) {
+      if (this.withheldReason !== withheld) {
+        this.withheldReason = withheld;
+        this.deps.logger.error('exit withheld', { underlying: this.symbol, reason: withheld });
+      }
+      return;
+    }
+    this.withheldReason = undefined;
     this.fsm.dispatch('EXIT_SUBMITTED');
-    this.record('exit_submitted', { positionId: position.positionId, reason, referencePrice: order.referencePrice });
+    this.durableRecord('exit_submitted', { positionId: position.positionId, reason, referencePrice: order.referencePrice }).catch((error: unknown) => {
+      this.record('audit_gap', { event: 'exit_submitted', positionId: position.positionId, error: describe(error) });
+      this.deps.logger.error('exit intent is not durable; the exit is still sent', { underlying: this.symbol, error: describe(error) });
+    });
     this.deps.logger.info('exit submitted', { underlying: this.symbol, reason, referencePrice: order.referencePrice });
     try {
       await this.deps.execution.submitExit(order);
@@ -709,7 +773,10 @@ export class UnderlyingAgent {
     }
     this.haltReason = reason;
     this.deps.logger.error('underlying halted', { underlying: this.symbol, reason });
-    this.record('halted', { reason, state: this.fsm.state });
+    // A halt cannot be re-derived on restart, so it is durable. The halt itself does not wait for the write.
+    this.durableRecord('halted', { reason, state: this.fsm.state }).catch((error: unknown) => {
+      this.deps.logger.error('halt is not durable yet; entries wait until it is recorded', { underlying: this.symbol, error: describe(error) });
+    });
     this.deps.onHalt(this.symbol, reason);
   }
 
