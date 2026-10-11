@@ -1,0 +1,136 @@
+export type RiskCode =
+  | 'NOT_A_BUY_ORDER'
+  | 'KILL_SWITCH_ACTIVE'
+  | 'DAILY_LOSS_LIMIT'
+  | 'TRADE_COUNT_LIMIT'
+  | 'OPEN_POSITION_LIMIT'
+  | 'UNDERLYING_ALREADY_OPEN'
+  | 'COOLDOWN_ACTIVE'
+  | 'OUTSIDE_ENTRY_WINDOW'
+  | 'EXPIRY_DAY_CUTOFF'
+  | 'SPOT_DATA_STALE'
+  | 'OPTION_QUOTE_STALE'
+  | 'PREMIUM_INVALID'
+  | 'STOP_LOSS_INVALID'
+  | 'TARGET_INVALID'
+  | 'LOTS_OUT_OF_RANGE'
+  | 'RISK_EXCEEDS_BUDGET'
+  | 'INSUFFICIENT_FUNDS';
+
+export interface PreTradeInput {
+  readonly side: 'BUY' | 'SELL';
+  readonly entryReference: number;
+  readonly stopLossPrice: number;
+  readonly targetPrice: number;
+  readonly lots: number;
+  readonly lotSize: number;
+  readonly maxLotsPerOrder: number;
+  readonly maxRiskInr: number;
+  readonly availableFundsInr: number;
+
+  readonly nowMs: number;
+  readonly minuteOfDay: number;
+  readonly entryStartMinute: number;
+  readonly entryEndMinute: number;
+  readonly isExpiryDay: boolean;
+  readonly expiryDayCutoffMinute: number;
+
+  readonly killSwitchActive: boolean;
+  readonly dailyPnlInr: number;
+  readonly dailyLossLimitInr: number;
+  readonly tradesToday: number;
+  readonly maxTradesPerDay: number;
+  readonly openPositions: number;
+  readonly maxOpenPositions: number;
+  readonly underlyingOpen: boolean;
+  readonly cooldownUntilMs: number | undefined;
+
+  /** Age of the latest spot tick; undefined when no tick has ever arrived. */
+  readonly spotTickAgeMs: number | undefined;
+  readonly optionQuoteAgeMs: number | undefined;
+  readonly staleMs: number;
+}
+
+export interface RiskViolation {
+  readonly code: RiskCode;
+  readonly detail: string;
+}
+
+export interface RiskVerdict {
+  readonly approved: boolean;
+  readonly violations: readonly RiskViolation[];
+  /** Risk recomputed from the order's own numbers, not from the sizing step. */
+  readonly riskInr: number;
+}
+
+/**
+ * Pre-trade gate. Pure: it reads only its input and returns every violation,
+ * so a rejected trade is explained completely in the event log. Nothing here
+ * can be bypassed by the LLM advisor or the strategy.
+ */
+export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
+  const violations: RiskViolation[] = [];
+  const add = (code: RiskCode, detail: string): void => {
+    violations.push({ code, detail });
+  };
+
+  if (input.side !== 'BUY') {
+    add('NOT_A_BUY_ORDER', `entry side is ${input.side}; this agent only buys options`);
+  }
+
+  if (input.killSwitchActive) {
+    add('KILL_SWITCH_ACTIVE', 'kill switch is active; no new entries');
+  }
+  if (input.dailyPnlInr <= -input.dailyLossLimitInr) {
+    add('DAILY_LOSS_LIMIT', `day P&L ${input.dailyPnlInr.toFixed(2)} at or below -${input.dailyLossLimitInr.toFixed(2)}`);
+  }
+  if (input.tradesToday >= input.maxTradesPerDay) {
+    add('TRADE_COUNT_LIMIT', `${input.tradesToday} entries today, limit ${input.maxTradesPerDay}`);
+  }
+  if (input.openPositions >= input.maxOpenPositions) {
+    add('OPEN_POSITION_LIMIT', `${input.openPositions} open, limit ${input.maxOpenPositions}`);
+  }
+  if (input.underlyingOpen) {
+    add('UNDERLYING_ALREADY_OPEN', 'this underlying already has an open position or pending entry');
+  }
+  if (input.cooldownUntilMs !== undefined && input.nowMs < input.cooldownUntilMs) {
+    add('COOLDOWN_ACTIVE', `cooldown until ${new Date(input.cooldownUntilMs).toISOString()}`);
+  }
+  if (input.minuteOfDay < input.entryStartMinute || input.minuteOfDay >= input.entryEndMinute) {
+    add('OUTSIDE_ENTRY_WINDOW', `minute ${input.minuteOfDay} outside [${input.entryStartMinute}, ${input.entryEndMinute})`);
+  }
+  if (input.isExpiryDay && input.minuteOfDay >= input.expiryDayCutoffMinute) {
+    add('EXPIRY_DAY_CUTOFF', `expiry-day entries stop at minute ${input.expiryDayCutoffMinute}`);
+  }
+  if (input.spotTickAgeMs === undefined || input.spotTickAgeMs > input.staleMs) {
+    add('SPOT_DATA_STALE', `spot tick age ${input.spotTickAgeMs ?? 'unknown'} ms exceeds ${input.staleMs} ms`);
+  }
+  if (input.optionQuoteAgeMs === undefined || input.optionQuoteAgeMs > input.staleMs) {
+    add('OPTION_QUOTE_STALE', `option quote age ${input.optionQuoteAgeMs ?? 'unknown'} ms exceeds ${input.staleMs} ms`);
+  }
+
+  if (!(input.entryReference > 0) || !Number.isFinite(input.entryReference)) {
+    add('PREMIUM_INVALID', `entry reference ${input.entryReference} is not a positive premium`);
+  }
+  if (!(input.stopLossPrice > 0) || !(input.stopLossPrice < input.entryReference)) {
+    add('STOP_LOSS_INVALID', `stop ${input.stopLossPrice} must be positive and below entry ${input.entryReference}`);
+  }
+  if (!(input.targetPrice > input.entryReference)) {
+    add('TARGET_INVALID', `target ${input.targetPrice} must be above entry ${input.entryReference}`);
+  }
+  if (!Number.isInteger(input.lots) || input.lots < 1 || input.lots > input.maxLotsPerOrder) {
+    add('LOTS_OUT_OF_RANGE', `lots ${input.lots} outside [1, ${input.maxLotsPerOrder}]`);
+  }
+
+  const riskInr = input.lots * input.lotSize * (input.entryReference - input.stopLossPrice);
+  if (riskInr > input.maxRiskInr) {
+    add('RISK_EXCEEDS_BUDGET', `risk ${riskInr.toFixed(2)} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
+  }
+
+  const premiumInr = input.lots * input.lotSize * input.entryReference;
+  if (premiumInr > input.availableFundsInr) {
+    add('INSUFFICIENT_FUNDS', `premium ${premiumInr.toFixed(2)} exceeds available funds ${input.availableFundsInr.toFixed(2)}`);
+  }
+
+  return { approved: violations.length === 0, violations, riskInr };
+}
