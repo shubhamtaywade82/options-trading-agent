@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { OptionSegment } from './domain/types.js';
+import { TRADING_MODES, type TradingMode } from './domain/mode.js';
+
+/** The production REST host the SDK uses when DHAN_BASE_URL is not set. The sandbox must never point here. */
+const PRODUCTION_DHAN_HOST = 'api.dhan.co';
 import { parseRedisUrl, validatePostgresUrl } from './persistence/urls.js';
 import { parseMinuteOfDay } from './time/ist.js';
 
@@ -22,13 +26,25 @@ export type DhanAuthConfig =
   | { readonly kind: 'static'; readonly accessToken: string }
   | { readonly kind: 'otp'; readonly pin: string; readonly totpSecret: string };
 
+/**
+ * Sandbox order credentials. Used only in sandbox mode. Market data never uses these; it always uses `dhan`.
+ * The sandbox base URL has no default, because the sandbox host is not part of the SDK and must be set explicitly.
+ */
+export interface SandboxConfig {
+  readonly clientId: string;
+  readonly accessToken: string;
+  readonly baseUrl: string;
+}
+
 export interface AgentConfig {
-  readonly mode: 'paper' | 'live';
+  readonly mode: TradingMode;
   readonly dhan: {
     readonly clientId: string;
     readonly auth: DhanAuthConfig;
     readonly baseUrl: string | undefined;
   };
+  /** Present only in sandbox mode. */
+  readonly sandbox: SandboxConfig | undefined;
   readonly underlyings: readonly { readonly symbol: string; readonly optionSegment: OptionSegment }[];
   readonly capital: {
     readonly inr: number;
@@ -72,6 +88,8 @@ export interface AgentConfig {
     readonly istShiftedTimestamps: boolean;
   };
   readonly paper: {
+    /** Where paper orders are simulated. Only the PostgreSQL venue exists today. */
+    readonly backend: 'postgres';
     readonly slippageBps: number;
   };
   readonly llm: {
@@ -89,9 +107,9 @@ export interface AgentConfig {
     readonly orderTimeoutMs: number;
   };
   readonly persistence: {
-    /** PostgreSQL ledger. Required in live mode. Credentials inside the URL are never logged. */
+    /** PostgreSQL. Required in every mode: the ledger and lease for live and sandbox, the paper venue for paper. Credentials inside the URL are never logged. */
     readonly databaseUrl: string | undefined;
-    /** Redis for the account rate gate and the contract cache. Optional; the trading lease lives in PostgreSQL. */
+    /** Redis for the account rate gate and the contract cache. Required for live and sandbox, optional for paper. The trading lease lives in PostgreSQL. */
     readonly redisUrl: string | undefined;
     /** Stable name for this host, recorded on every run. Defaults to the hostname at runtime. */
     readonly instanceId: string | undefined;
@@ -216,21 +234,24 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     // A single file grew without bound and was read in full at every start. Refuse rather than ignore it.
     throw new Error('EVENT_LOG_PATH was replaced by EVENT_LOG_DIR (daily journal files); unset EVENT_LOG_PATH');
   }
-  const mode = text(env, 'MODE', 'paper').toLowerCase();
-  if (mode !== 'paper' && mode !== 'live') {
-    throw new Error(`MODE must be "paper" or "live", got "${mode}"`);
+  const modeText = text(env, 'MODE', 'paper').toLowerCase();
+  if (!(TRADING_MODES as readonly string[]).includes(modeText)) {
+    throw new Error(`MODE must be one of ${TRADING_MODES.join(', ')}, got "${modeText}"`);
   }
+  const mode = modeText as TradingMode;
   if (mode === 'live' && text(env, 'LIVE_TRADING_ACK', '') !== LIVE_ACK_PHRASE) {
     throw new Error(`live mode requires LIVE_TRADING_ACK=${LIVE_ACK_PHRASE}`);
   }
 
+  const dhanBaseUrl = optionalText(env, 'DHAN_BASE_URL');
   const config: AgentConfig = {
     mode,
     dhan: {
       clientId: text(env, 'DHAN_CLIENT_ID'),
       auth: parseDhanAuth(env),
-      baseUrl: optionalText(env, 'DHAN_BASE_URL'),
+      baseUrl: dhanBaseUrl,
     },
+    sandbox: mode === 'sandbox' ? parseSandbox(env, dhanBaseUrl) : undefined,
     underlyings: parseUnderlyings(env),
     capital: {
       inr: number(env, 'CAPITAL_INR', 100_000, { min: 1_000, max: 1e12 }),
@@ -273,6 +294,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       istShiftedTimestamps: flag(env, 'DHAN_EPOCH_IST_SHIFTED', false),
     },
     paper: {
+      backend: parsePaperBackend(env),
       slippageBps: number(env, 'PAPER_SLIPPAGE_BPS', 0, { min: 0, max: 500 }),
     },
     llm: {
@@ -295,8 +317,58 @@ export function loadConfig(env: Env = process.env): AgentConfig {
   return config;
 }
 
-/** Brings persistence settings into the config. Live mode needs both stores: the ledger (which also holds the lease) and Redis.*/
-function parsePersistence(env: Env, mode: AgentConfig['mode']): AgentConfig['persistence'] {
+/**
+ * Sandbox order credentials. Every value is required together, and the base URL must not be the production host:
+ * a sandbox run that quietly sent orders to production would be the worst failure this mode can have.
+ */
+function parseSandbox(env: Env, dhanBaseUrl: string | undefined): SandboxConfig {
+  const clientId = optionalText(env, 'SANDBOX_DHAN_CLIENT_ID');
+  const accessToken = optionalText(env, 'SANDBOX_DHAN_ACCESS_TOKEN');
+  const baseUrl = optionalText(env, 'SANDBOX_DHAN_BASE_URL');
+  if (clientId === undefined || accessToken === undefined || baseUrl === undefined) {
+    throw new Error('sandbox mode requires SANDBOX_DHAN_CLIENT_ID, SANDBOX_DHAN_ACCESS_TOKEN and SANDBOX_DHAN_BASE_URL');
+  }
+  let host: string;
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== 'https:') {
+      throw new Error('not https');
+    }
+    host = url.hostname.toLowerCase();
+  } catch {
+    throw new Error('SANDBOX_DHAN_BASE_URL must be an https URL');
+  }
+  // DHAN_BASE_URL is validated by the SDK when the client is built. Here it only needs to be compared against.
+  const marketDataHost = dhanBaseUrl === undefined ? undefined : hostOfUrl(dhanBaseUrl);
+  if (host === PRODUCTION_DHAN_HOST || host === marketDataHost) {
+    throw new Error(`SANDBOX_DHAN_BASE_URL points at a production host (${host}); sandbox orders must go to the sandbox host`);
+  }
+  return { clientId, accessToken, baseUrl };
+}
+
+function hostOfUrl(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/** Paper orders are simulated by the PostgreSQL venue. The local paper_exchange server is not implemented, so it is refused, not ignored. */
+function parsePaperBackend(env: Env): 'postgres' {
+  const raw = (optionalText(env, 'PAPER_BACKEND') ?? 'postgres').toLowerCase();
+  if (raw !== 'postgres') {
+    throw new Error(`PAPER_BACKEND must be "postgres"; the "${raw}" paper backend is not implemented`);
+  }
+  return 'postgres';
+}
+
+/**
+ * Brings persistence settings into the config. Live and sandbox need the ledger (which holds the trading lease)
+ * and Redis. Paper needs the ledger too, because its wallet, orders and positions are stored there. Redis is
+ * optional for paper.
+ */
+function parsePersistence(env: Env, mode: TradingMode): AgentConfig['persistence'] {
   const databaseUrl = optionalText(env, 'DATABASE_URL');
   const redisUrl = optionalText(env, 'REDIS_URL');
   if (databaseUrl !== undefined) {
@@ -305,8 +377,11 @@ function parsePersistence(env: Env, mode: AgentConfig['mode']): AgentConfig['per
   if (redisUrl !== undefined) {
     parseRedisUrl(redisUrl);
   }
-  if (mode === 'live' && (databaseUrl === undefined || redisUrl === undefined)) {
-    throw new Error('live mode requires DATABASE_URL (trading ledger and lease) and REDIS_URL (rate gate and cache)');
+  if (mode !== 'paper' && (databaseUrl === undefined || redisUrl === undefined)) {
+    throw new Error(`${mode} mode requires DATABASE_URL (trading ledger and lease) and REDIS_URL (rate gate and cache)`);
+  }
+  if (mode === 'paper' && databaseUrl === undefined) {
+    throw new Error('paper mode requires DATABASE_URL (the paper wallet, orders and positions are stored there)');
   }
   return {
     databaseUrl,

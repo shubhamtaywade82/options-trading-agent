@@ -1,3 +1,4 @@
+import type { TradingMode } from '../domain/mode.js';
 import { mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LedgerRecord } from '../persistence/ledger.js';
@@ -26,7 +27,7 @@ export interface EventLogOptions {
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
   /** Stamped on every line, so restore can attribute each event to a mode and a client. */
-  readonly scope: { readonly mode: 'paper' | 'live'; readonly clientId: string };
+  readonly scope: { readonly mode: TradingMode; readonly clientId: string };
 }
 
 const LEDGER_BATCH = 500;

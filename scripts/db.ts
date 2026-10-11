@@ -51,12 +51,12 @@ async function main(): Promise<void> {
       for (const row of leases.rows) {
         console.log(`  ${row.client_id}  run ${row.holder_run}  epoch ${row.epoch}  ${row.held ? `held until ${row.expires_at.toISOString()}` : 'free'}`);
       }
-      const unended = await pool.query<{ run_id: string; client_id: string; instance_id: string; started_at: Date }>(
-        "SELECT run_id::text AS run_id, client_id, instance_id, started_at FROM runs WHERE mode = 'live' AND ended_at IS NULL ORDER BY started_at",
+      const unended = await pool.query<{ run_id: string; mode: string; client_id: string; instance_id: string; started_at: Date }>(
+        'SELECT run_id::text AS run_id, mode, client_id, instance_id, started_at FROM runs WHERE ended_at IS NULL ORDER BY started_at',
       );
-      console.log(`live runs that never ended: ${unended.rows.length}`);
+      console.log(`runs that never ended (any mode): ${unended.rows.length}`);
       for (const row of unended.rows) {
-        console.log(`  ${row.run_id}  client ${row.client_id}  instance ${row.instance_id}  started ${row.started_at.toISOString()}`);
+        console.log(`  ${row.run_id}  ${row.mode}  client ${row.client_id}  instance ${row.instance_id}  started ${row.started_at.toISOString()}`);
       }
     } else if (command === 'acknowledge') {
       const runId = argument('--run');

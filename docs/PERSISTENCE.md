@@ -6,10 +6,10 @@ This describes the persistence layer as implemented. Where a guarantee does not 
 
 | Store | Role | Authority |
 |---|---|---|
-| PostgreSQL 16 (`DATABASE_URL`) | System of record: `trade_events` ledger, `runs`, `leases`, `schema_migrations` | Yes. Owns the trading lease and fences every live write. |
+| PostgreSQL 16 (`DATABASE_URL`) | System of record: `trade_events` ledger, `runs`, `leases`, `schema_migrations`, and in paper mode the `paper_*` venue tables | Yes. Owns the trading lease and fences every write. |
 | JSONL journal (`events-YYYY-MM-DD.jsonl`, IST day) | Write-ahead log on local disk; restore source when the ledger is unavailable | Local durability. Source for backfill. |
 | Redis 7 (`REDIS_URL`) | Account-wide rate gate and contract cache | No. Losing Redis slows the agent or costs a re-fetch. It never decides a trade. |
-| In-process memory | Fallback for paper runs and unit tests | No. |
+| In-process memory | Unit tests only (`PaperExecutionPort`). Production paper mode does not use it. | No. |
 
 PostgreSQL is the only trading authority. A Redis lock can be granted twice across a failover, so it is not used for that decision.
 
@@ -28,14 +28,37 @@ Migrations are in `src/persistence/migrations.ts`, applied in order, each in its
 - `002_lease_and_tags`: `leases (client_id PK, holder_run, epoch, expires_at)`, and the mode/client tags used by restore.
 - `003_append_only_and_run_safety`: a trigger on `trade_events` raises on `UPDATE`, `DELETE`, and `TRUNCATE`. `runs` gains `unconfirmed_at_end` and `acknowledged`.
 
+`004_paper_venue`: `paper_wallets` (balance cannot go negative), `paper_positions` (a position closes once; a trigger refuses any change to a closed one), `paper_orders` and `paper_wallet_entries` (append-only, same as `trade_events`). Every cash movement records the balance it leaves.
+
 The migrator refuses to run when an applied migration's checksum (sha256) has changed, or when the database holds a version this build does not know.
+
+## Modes and accounts
+
+The three modes are `live`, `sandbox` and `paper` (`src/domain/mode.ts`). Market data is always the live Dhan feed. Only the order venue differs.
+
+| Mode | Order venue | Lease account key | Required stores |
+| --- | --- | --- | --- |
+| live | Dhan production (`dhan` credentials) | `live:<clientId>` | PostgreSQL, Redis |
+| sandbox | Dhan sandbox (`SANDBOX_DHAN_*`, https, never `api.dhan.co`) | `sandbox:<clientId>` | PostgreSQL, Redis |
+| paper | PostgreSQL paper venue | `paper:<clientId>` | PostgreSQL (Redis optional) |
+
+Each mode has its own lease and its own review queue, so a paper run never blocks a live run for the same client. Journal and ledger rows are tagged with the mode, so restore never replays one mode's events into another.
+
+## Paper venue
+
+`PostgresPaperExecutionPort` simulates fills with the same rules as the in-memory venue: entry at the reference premium plus slippage, rounded up to tick; stop and target enforced on option LTP; a gap through the stop fills at the LTP. Every state change is one fenced transaction in `PostgresPaperStore`. The database write happens before its event is emitted:
+
+- Entry: debits the wallet and records the position and entry order. Insufficient cash is `ENTRY_REJECTED`. A failed write is `ENTRY_UNCONFIRMED`, which halts the agent.
+- Exit or protective exit: closes the position, credits the wallet and records the realised P&L (credit minus debit, to the paisa). A failed agent exit is `EXIT_UNCONFIRMED` and the position stays open. A failed protective exit is `BROKER_MISMATCH`, which halts the agent.
+- Wallet: created once with `CAPITAL_INR`. A later start with a different capital is refused, not silently ignored.
+- Restart: the venue reloads the wallet and open positions. The orchestrator refuses to start while the venue holds an open position, the same rule live applies to open broker legs.
 
 ## Trading lease and fencing
 
 - `PostgresLeaseStore` runs every statement on the database clock. A new holder can take the lease only after `expires_at` plus `ORDER_TIMEOUT_MS`, so an order in flight from the old holder can finish.
 - `epoch` increments on every acquisition. A renewal succeeds only for the same `(run, epoch)` while unexpired.
 - `Lease` renews every `ttl/3` on its own single-connection pool. It counts a renewal as successful only when the request was sent less than `ttl` ago, measured on a monotonic clock. `holds()` is false once that window passes.
-- A live `PostgresLedger` writes in a transaction that takes `SELECT ... FOR SHARE` on the lease row for its `(run, epoch)`. A takeover cannot commit mid-write. A fenced-out writer gets `LeaseLostError` and its rows are not written.
+- Every write through the ledger or the paper store goes through `runFenced`: a transaction that takes `SELECT ... FOR SHARE` on the lease row for its `(account, run, epoch)`. A takeover cannot commit mid-write. A fenced-out writer gets `LeaseLostError` and its rows are not written.
 - The trading gate refuses **entries** when the lease is not held. Exits are not gated by the lease (see Failure semantics).
 
 ## Journal (JSONL)
@@ -66,6 +89,7 @@ Before a live entry:
 | PostgreSQL unreachable at start | Refuse to start (`persistence startup failed`) | n/a |
 | Ledger insert failing at runtime | Refused while events are unconfirmed | Proceed; `exit_submitted` is recorded as `audit_gap` if its intent write failed |
 | Lease not held | Refused | Proceed |
+| Paper venue write fails | Halted (`ENTRY_UNCONFIRMED`) | Agent exit halted (`EXIT_UNCONFIRMED`); protective exit halted (`BROKER_MISMATCH`) |
 | Redis unreachable | Rate gate and cache fall back or miss; no trading effect | Same |
 | Unconfirmed events at shutdown | Recorded on `runs.unconfirmed_at_end`; the next live start refuses until acknowledged | n/a |
 
@@ -77,7 +101,7 @@ Exits proceed on lease loss because an open position with no working exit is the
 2. Create the lease pool (single connection, statement timeout below the renewal interval) and the ledger pool.
 3. Connect Redis (`PING`). Failure is redacted and fatal in live mode.
 4. Register the run in `runs`.
-5. Live only: acquire the lease. Then refuse while `runsNeedingReview` is non-empty. That covers earlier live runs for the same client that never ended, or that ended with unconfirmed events, and are not acknowledged.
+5. Acquire the account's lease. Then refuse while `runsNeedingReview` is non-empty for that mode and client. That covers earlier runs of the same mode that never ended, or that ended with unconfirmed events, and are not acknowledged.
 6. Restore the day (below). Refusals name the exact remedy.
 
 Any startup failure closes what was opened and throws a redacted error. No credential reaches a log line.
@@ -108,6 +132,11 @@ Without a `DATABASE_URL`, restore reads the journal directly through `scopeJourn
 ## Open items
 
 These are known gaps. Each one is a stated requirement, not a shipped guarantee.
+
+0. **paper_exchange backend.** `PAPER_BACKEND` accepts only `postgres`. The local `paper_exchange` server has no adapter here, because its API is not in this repository. Setting any other value is refused at startup.
+0a. **Restart with open paper positions.** The agent cannot yet re-adopt an open position into its state machine. Restart with an open paper position is refused until it is closed. Adoption needs an `UnderlyingAgent` restore path, which does not exist for live either.
+0b. **Sandbox order-update stream.** Sandbox fills come from the sandbox client's order WebSocket. Whether the sandbox host serves that stream is not verified against the Dhan sandbox. Verify before relying on sandbox fills.
+0c. **Sandbox base URL.** The SDK has no sandbox host, so `SANDBOX_DHAN_BASE_URL` is required and has no default. The agent refuses only the production host it knows about (`api.dhan.co`) and the market-data host; it cannot prove an arbitrary URL is the sandbox.
 
 1. **Synchronous replication.** Live mode assumes PostgreSQL `synchronous_commit = on` with a synchronous standby. Nothing checks this at startup. Until it is enforced, a failover can lose the last committed events, and restore cannot see them.
 2. **TLS.** `validatePostgresUrl` checks scheme and host only. Live use should require `sslmode=verify-full` and `sslrootcert`, and Redis should use `rediss://`. Not enforced yet.

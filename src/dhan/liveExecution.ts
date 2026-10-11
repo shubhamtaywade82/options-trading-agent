@@ -17,6 +17,8 @@ export type LiveClient = Pick<DhanClient, 'orders' | 'superOrders' | 'positions'
 type PositionRow = Awaited<ReturnType<DhanClient['positions']['list']>>[number];
 
 export interface LiveExecutionOptions {
+  /** Which Dhan account the orders reach. Stamped on every event through the port's mode, so a sandbox order is never journalled as live. */
+  readonly mode: 'live' | 'sandbox';
   readonly orderTimeoutMs: number;
   readonly reconcileIntervalMs: number;
   readonly logger: Logger;
@@ -80,7 +82,7 @@ function describeError(error: unknown): string {
  * be validated in a sandbox before live use.
  */
 export class LiveExecutionPort implements ExecutionPort {
-  readonly mode = 'live' as const;
+  readonly mode: 'live' | 'sandbox';
   private readonly listeners = new Set<ExecutionListener>();
   private readonly tracker = new OrderTracker();
   private readonly tracked = new Map<string, TrackedPosition>();
@@ -92,6 +94,7 @@ export class LiveExecutionPort implements ExecutionPort {
     private readonly client: LiveClient,
     private readonly options: LiveExecutionOptions,
   ) {
+    this.mode = options.mode;
     this.now = options.now ?? Date.now;
     client.ws.orders.on('order', (state: OrderState) => this.tracker.onOrderUpdate(state));
   }

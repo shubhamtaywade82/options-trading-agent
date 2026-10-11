@@ -52,7 +52,7 @@ export function fakeRuntime(): { runtime: Runtime; stop: () => Promise<void> } {
     unconfirmedEvents: () => 0,
     flush: async () => undefined,
   } as unknown as EventLog;
-  const config = loadConfig({ DHAN_CLIENT_ID: '1', DHAN_ACCESS_TOKEN: 't' });
+  const config = loadConfig({ DHAN_CLIENT_ID: '1', DHAN_ACCESS_TOKEN: 't', DATABASE_URL: 'postgres://paper.test.invalid/agent' });
   const orchestrator = new Orchestrator(config, [FAKE_SPEC], {
     market,
     feed: new QuietFeed(),

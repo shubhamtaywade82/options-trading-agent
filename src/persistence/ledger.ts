@@ -1,3 +1,4 @@
+import type { TradingMode } from '../domain/mode.js';
 import type { Pool, PoolClient } from 'pg';
 import { LeaseLostError } from './lease.js';
 
@@ -19,7 +20,7 @@ export interface LedgerRecord {
 export interface RunRow {
   readonly runId: string;
   readonly instanceId: string;
-  readonly mode: 'paper' | 'live';
+  readonly mode: TradingMode;
   readonly clientId: string;
   readonly configFingerprint: string;
   readonly startedAt: string;
@@ -37,6 +38,37 @@ export interface LedgerFence {
 }
 
 const INSERT_CHUNK = 500;
+
+/**
+ * Runs `work` in one transaction, after proving this run still holds the lease at its epoch. The shared lock on
+ * the lease row is held until commit, so a takeover cannot commit in the middle of the work. Any throw rolls the
+ * transaction back. Every fenced write in the agent goes through here, so there is one definition of "held".
+ */
+export async function runFenced<T>(pool: Pool, fence: LedgerFence, work: (client: PoolClient) => Promise<T>): Promise<T> {
+  const epoch = fence.epoch();
+  if (epoch === undefined) {
+    throw new LeaseLostError('this run does not hold the trading lease; the write is refused');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const held = await client.query(
+      'SELECT 1 FROM leases WHERE client_id = $1 AND holder_run = $2 AND epoch = $3 AND expires_at > now() FOR SHARE',
+      [fence.clientId, fence.runId, epoch],
+    );
+    if ((held.rowCount ?? 0) === 0) {
+      throw new LeaseLostError('the trading lease moved to another run; the write is refused');
+    }
+    const result = await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 /**
  * PostgreSQL text and jsonb reject the NUL character. One such string would fail its whole batch, and the
@@ -70,29 +102,7 @@ export class PostgresLedger {
     if (this.fence === undefined) {
       return this.insertRows(this.pool, records);
     }
-    const epoch = this.fence.epoch();
-    if (epoch === undefined) {
-      throw new LeaseLostError('this run does not hold the trading lease; the write is refused');
-    }
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const held = await client.query(
-        'SELECT 1 FROM leases WHERE client_id = $1 AND holder_run = $2 AND epoch = $3 AND expires_at > now() FOR SHARE',
-        [this.fence.clientId, this.fence.runId, epoch],
-      );
-      if ((held.rowCount ?? 0) === 0) {
-        throw new LeaseLostError('the trading lease moved to another run; the write is refused');
-      }
-      const inserted = await this.insertRows(client, records);
-      await client.query('COMMIT');
-      return inserted;
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    return runFenced(this.pool, this.fence, (client) => this.insertRows(client, records));
   }
 
   private async insertRows(queryable: Pool | PoolClient, records: readonly LedgerRecord[]): Promise<number> {
@@ -162,16 +172,17 @@ export class PostgresLedger {
   }
 
   /**
-   * Live runs for this client that need an operator decision before a new live run starts: runs that never
-   * ended (a crash), and runs that ended with events still unconfirmed in the journal or ledger.
+   * Runs for this client and mode that need an operator decision before a new run of that mode starts: runs that
+   * never ended (a crash), and runs that ended with events still unconfirmed in the journal or ledger. Sandbox and
+   * paper runs are reviewed separately from live runs, because they touch different accounts or none at all.
    */
-  async runsNeedingReview(clientId: string, exceptRunId: string): Promise<Array<{ runId: string; instanceId: string; startedAt: string; reason: string }>> {
+  async runsNeedingReview(clientId: string, mode: TradingMode, exceptRunId: string): Promise<Array<{ runId: string; instanceId: string; startedAt: string; reason: string }>> {
     const result = await this.pool.query<{ run_id: string; instance_id: string; started_at: Date; unconfirmed_at_end: number; ended_at: Date | null }>(
       `SELECT run_id::text AS run_id, instance_id, started_at, unconfirmed_at_end, ended_at FROM runs
-       WHERE client_id = $1 AND mode = 'live' AND run_id <> $2 AND acknowledged = false
+       WHERE client_id = $1 AND mode = $2 AND run_id <> $3 AND acknowledged = false
          AND (ended_at IS NULL OR unconfirmed_at_end > 0)
        ORDER BY started_at`,
-      [clientId, exceptRunId],
+      [clientId, mode, exceptRunId],
     );
     return result.rows.map((row) => ({
       runId: row.run_id,

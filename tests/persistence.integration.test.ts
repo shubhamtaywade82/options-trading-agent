@@ -208,11 +208,11 @@ describe('PostgreSQL ledger', { skip: PG_URL === undefined }, () => {
     const client = `ACK${suffix}`;
     const crashed = await freshRun('live', client);
     const current = await freshRun('live', client);
-    const listed = await ledger!.runsNeedingReview(client, current);
+    const listed = await ledger!.runsNeedingReview(client, 'live', current);
     assert.deepEqual(listed.map((r) => r.runId), [crashed]);
     assert.equal(await ledger!.acknowledgeRun(crashed, 'checked the broker book'), 1);
     assert.equal(await ledger!.acknowledgeRun(crashed, 'again'), 0, 'an acknowledged run is not acknowledged twice');
-    assert.deepEqual(await ledger!.runsNeedingReview(client, current), []);
+    assert.deepEqual(await ledger!.runsNeedingReview(client, 'live', current), []);
     const { rows } = await pool!.query<{ ended_reason: string }>('SELECT ended_reason FROM runs WHERE run_id = $1', [crashed]);
     assert.equal(rows[0]?.ended_reason, 'acknowledged: checked the broker book');
   });

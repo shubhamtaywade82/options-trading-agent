@@ -10,7 +10,7 @@ import { parseRedisUrl, validatePostgresUrl } from '../src/persistence/urls.js';
 import { scopeJournalLines } from '../src/persistence/scope.js';
 import { istEpoch } from './support/fixtures.js';
 
-const BASE = { DHAN_CLIENT_ID: '1100000001', DHAN_ACCESS_TOKEN: 'token' };
+const BASE = { DHAN_CLIENT_ID: '1100000001', DHAN_ACCESS_TOKEN: 'token', DATABASE_URL: 'postgres://paper.test.invalid/agent' };
 const RUN = '6f1c2d3e-4a5b-4c6d-8e7f-900112233445';
 
 describe('redact', () => {
@@ -77,10 +77,11 @@ describe('config persistence rules', () => {
     );
   });
 
-  it('keeps paper mode journal-only when no store is configured', () => {
+  it('requires the PostgreSQL store in paper mode, because the paper wallet and positions live there', () => {
+    assert.throws(() => loadConfig({ DHAN_CLIENT_ID: '1', DHAN_ACCESS_TOKEN: 't' }), /paper mode requires DATABASE_URL/);
     const config = loadConfig(BASE);
-    assert.equal(config.persistence.databaseUrl, undefined);
-    assert.equal(config.persistence.redisUrl, undefined);
+    assert.equal(config.persistence.databaseUrl, 'postgres://paper.test.invalid/agent');
+    assert.equal(config.persistence.redisUrl, undefined, 'Redis is optional in paper mode');
     assert.equal(config.persistence.leaseTtlMs, 30_000);
   });
 

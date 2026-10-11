@@ -4,8 +4,10 @@ import { DhanFeed } from '../dhan/feed.js';
 import { InstrumentMaster } from '../dhan/instrumentMaster.js';
 import { DhanMarketData } from '../dhan/marketData.js';
 import { LiveExecutionPort, type LiveClient } from '../dhan/liveExecution.js';
-import type { AgentConfig } from '../config.js';
-import { PaperExecutionPort } from '../execution/paper.js';
+import type { AgentConfig, SandboxConfig } from '../config.js';
+import type { ExecutionPort } from '../execution/ports.js';
+import { PostgresPaperExecutionPort } from '../execution/postgresPaper.js';
+import { PostgresPaperStore } from '../execution/paperStore.js';
 import { OllamaTradeAdvisor, type TradeAdvisor } from '../llm/advisor.js';
 import type { UnderlyingSpec } from '../domain/types.js';
 import { readFile } from 'node:fs/promises';
@@ -32,10 +34,13 @@ export interface Runtime {
 }
 
 /**
- * Composes the production object graph from validated config. Paper and live
- * share every read path (instruments, charts, option chain, feed); only the
- * venue differs. Index specs are resolved from the scrip master up front, so an
- * unknown index fails at startup rather than on the first signal.
+ * Composes the object graph from validated config. Every mode shares the same market-data path (instruments,
+ * charts, option chain, feed) on the live Dhan credentials. Only the order venue differs:
+ *   live    -> Dhan production account
+ *   sandbox -> Dhan sandbox account (sandbox credentials and base URL)
+ *   paper   -> PostgreSQL paper venue (wallet, orders, positions, P&L)
+ * Index specs are resolved from the scrip master up front, so an unknown index fails at startup rather than on
+ * the first signal.
  *
  * Storage: the journal file is always written, and every line carries its mode and client. When DATABASE_URL
  * is set, the ledger is the source for restoring the day, after the journal is backfilled into it. The
@@ -65,7 +70,9 @@ async function compose(
   records: RingLogger | undefined,
   session: PersistenceSession,
 ): Promise<Runtime> {
-  const scope = { mode: config.mode, clientId: config.dhan.clientId };
+  const mode = config.mode;
+  const clientId = config.dhan.clientId;
+  const scope = { mode, clientId };
   const events = new EventLog({
     directory: config.ops.eventLogDir,
     runId: session.runId,
@@ -75,35 +82,78 @@ async function compose(
     now,
   });
 
-  const client = await createDhanClient(config.dhan, { logger, now });
-  const master = new InstrumentMaster(client.instruments, () => istParts(now()).date, { cache: session.cache, now });
-  const marketData = new DhanMarketData(client, {
+  // Market data is always the live Dhan feed, on the market-data credentials.
+  const dataClient = await createDhanClient(config.dhan, { logger, now });
+  const master = new InstrumentMaster(dataClient.instruments, () => istParts(now()).date, { cache: session.cache, now });
+  const marketData = new DhanMarketData(dataClient, {
     istShiftedTimestamps: config.feed.istShiftedTimestamps,
     now,
     rateGate: session.rateGate,
-    accountKey: config.dhan.clientId,
+    accountKey: clientId,
   });
-  const feed = new DhanFeed(client, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
+  const feed = new DhanFeed(dataClient, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
 
-  const live = config.mode === 'live';
+  // Orders reach a Dhan account only in live and sandbox. Sandbox uses its own client, so no sandbox request
+  // can carry production credentials, and no production request can carry sandbox ones.
+  const orderClient =
+    config.mode === 'live'
+      ? dataClient
+      : config.mode === 'sandbox' && config.sandbox !== undefined
+        ? await createDhanClient(sandboxDhan(config.sandbox), { logger, now })
+        : undefined;
+  const orderFunds =
+    config.mode === 'sandbox' && orderClient !== undefined
+      ? new DhanMarketData(orderClient, {
+          istShiftedTimestamps: config.feed.istShiftedTimestamps,
+          now,
+          rateGate: session.rateGate,
+          accountKey: `${clientId}:sandbox`,
+        })
+      : undefined;
+
+  const venue = config.mode === 'paper' ? await openPaperVenue(config, session, logger, now) : undefined;
+
   const market: MarketPort = {
     intradayCandles: (spot, barMinutes, fromDate, toDate) => marketData.intradayCandles(spot, barMinutes, fromDate, toDate),
     listExpiries: (spot) => marketData.listExpiries(spot),
     optionChain: (spot, expiry) => marketData.optionChain(spot, expiry),
     optionContracts: (underlying, optionSegment) => master.optionContracts(underlying, optionSegment),
-    availableFunds: () => (live ? marketData.availableFunds() : Promise.resolve(config.capital.inr)),
-    brokerOpenOptionCount: async () => (live ? countOpenOptionLegs(client) : 0),
-    brokerLiveOrderCount: async () => (live ? countLiveOrders(client) : 0),
+    availableFunds: () => {
+      if (venue !== undefined) {
+        return venue.cash();
+      }
+      if (config.mode === 'live') {
+        return marketData.availableFunds();
+      }
+      if (orderFunds === undefined) {
+        return Promise.reject(new Error('no order account to read funds from in this mode'));
+      }
+      return orderFunds.availableFunds();
+    },
+    // In paper mode the venue's own open positions play the role of the broker book.
+    brokerOpenOptionCount: async () => {
+      if (orderClient !== undefined) {
+        return countOpenOptionLegs(orderClient);
+      }
+      return venue?.openPositionCount() ?? 0;
+    },
+    brokerLiveOrderCount: async () => (orderClient === undefined ? 0 : countLiveOrders(orderClient)),
   };
 
-  const execution = live
-    ? new LiveExecutionPort(client as LiveClient, {
-        orderTimeoutMs: config.ops.orderTimeoutMs,
-        reconcileIntervalMs: config.ops.reconcileIntervalMs,
-        logger,
-        now,
-      })
-    : new PaperExecutionPort({ slippageBps: config.paper.slippageBps, now });
+  let execution: ExecutionPort;
+  if (orderClient !== undefined) {
+    execution = new LiveExecutionPort(orderClient as LiveClient, {
+      mode: config.mode === 'sandbox' ? 'sandbox' : 'live',
+      orderTimeoutMs: config.ops.orderTimeoutMs,
+      reconcileIntervalMs: config.ops.reconcileIntervalMs,
+      logger,
+      now,
+    });
+  } else if (venue !== undefined) {
+    execution = venue;
+  } else {
+    throw new Error(`no order venue for ${mode} mode`);
+  }
 
   const advisor = buildAdvisor(config, logger);
 
@@ -169,6 +219,39 @@ async function restoreFromLedger(
   } catch (error) {
     throw new Error(`cannot restore ${dayKey} from the ledger: ${errorMessage(error, secrets)}`);
   }
+}
+
+/** Sandbox orders use a static token. The sandbox base URL is set explicitly, and the config refuses the production host. */
+function sandboxDhan(sandbox: SandboxConfig): AgentConfig['dhan'] {
+  return {
+    clientId: sandbox.clientId,
+    auth: { kind: 'static', accessToken: sandbox.accessToken },
+    baseUrl: sandbox.baseUrl,
+  };
+}
+
+/**
+ * Opens the PostgreSQL paper venue: creates the wallet on first use and loads the open positions. The venue needs
+ * the database and the lease fence, both of which exist in paper mode because the config requires DATABASE_URL.
+ */
+async function openPaperVenue(
+  config: AgentConfig,
+  session: PersistenceSession,
+  logger: Logger,
+  now: () => number,
+): Promise<PostgresPaperExecutionPort> {
+  if (session.pool === undefined || session.fence === undefined) {
+    throw new Error('paper mode needs the PostgreSQL paper venue, and DATABASE_URL is not open');
+  }
+  const venue = new PostgresPaperExecutionPort(new PostgresPaperStore(session.pool, session.fence), {
+    clientId: config.dhan.clientId,
+    slippageBps: config.paper.slippageBps,
+    initialCapitalInr: config.capital.inr,
+    logger,
+    now,
+  });
+  await venue.open();
+  return venue;
 }
 
 function buildAdvisor(config: AgentConfig, logger: Logger): TradeAdvisor | undefined {

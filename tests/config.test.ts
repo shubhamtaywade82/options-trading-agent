@@ -2,7 +2,18 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { LIVE_ACK_PHRASE, loadConfig } from '../src/config.js';
 
-const BASE = { DHAN_CLIENT_ID: '1100000001', DHAN_ACCESS_TOKEN: 'token' };
+const SANDBOX = {
+  SANDBOX_DHAN_CLIENT_ID: 'SANDBOX-CLIENT',
+  SANDBOX_DHAN_ACCESS_TOKEN: 'sandbox-token',
+  SANDBOX_DHAN_BASE_URL: 'https://sandbox.example.test/v2',
+};
+
+const BASE = {
+  DHAN_CLIENT_ID: '1100000001',
+  DHAN_ACCESS_TOKEN: 'token',
+  DATABASE_URL: 'postgres://paper.test.invalid/agent',
+  REDIS_URL: 'redis://cache.test.invalid:6379/0',
+};
 
 describe('loadConfig', () => {
   it('loads paper-mode defaults that trade NIFTY with one lot and a 1% risk budget', () => {
@@ -23,6 +34,53 @@ describe('loadConfig', () => {
     assert.throws(() => loadConfig({ ...BASE, MODE: 'live', LIVE_TRADING_ACK: 'yes' }), /LIVE_TRADING_ACK/);
     const live = { ...BASE, MODE: 'live', DATABASE_URL: 'postgres://ledger.internal/agent', REDIS_URL: 'redis://cache.internal:6379/0' };
     assert.equal(loadConfig({ ...live, LIVE_TRADING_ACK: LIVE_ACK_PHRASE }).mode, 'live');
+  });
+
+  it('accepts exactly three modes: live, sandbox and paper', () => {
+    const sandbox = { ...BASE, MODE: 'sandbox', ...SANDBOX };
+    assert.equal(loadConfig({ ...BASE, MODE: 'paper' }).mode, 'paper');
+    assert.equal(loadConfig({ ...BASE, MODE: 'PAPER' }).mode, 'paper');
+    assert.equal(loadConfig(sandbox).mode, 'sandbox');
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'backtest' }), /MODE must be one of live, sandbox, paper/);
+  });
+
+  it('gives sandbox its own order credentials and keeps market-data credentials separate', () => {
+    const config = loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX });
+    assert.deepEqual(config.sandbox, { clientId: 'SANDBOX-CLIENT', accessToken: 'sandbox-token', baseUrl: 'https://sandbox.example.test/v2' });
+    assert.equal(config.dhan.clientId, '1100000001', 'market data keeps the live client id');
+    assert.equal(config.sandbox === undefined, false);
+    assert.equal(loadConfig(BASE).sandbox, undefined, 'only sandbox mode carries sandbox credentials');
+  });
+
+  it('refuses sandbox mode without all three sandbox settings, and never names a token in the error', () => {
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_ACCESS_TOKEN: undefined }), /SANDBOX_DHAN_ACCESS_TOKEN/);
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: undefined }), /SANDBOX_DHAN_BASE_URL/);
+    assert.throws(
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: 'http://sandbox.example.test/v2' }),
+      /must be an https URL/,
+    );
+  });
+
+  it('refuses a sandbox base URL that is the production host, so sandbox orders cannot reach production', () => {
+    assert.throws(
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: 'https://api.dhan.co/v2' }),
+      /production host/,
+    );
+    assert.throws(
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_BASE_URL: 'https://gateway.example.test', SANDBOX_DHAN_BASE_URL: 'https://gateway.example.test/sandbox' }),
+      /production host/,
+    );
+  });
+
+  it('needs the ledger and Redis for sandbox, as for live, and does not need the live acknowledgement', () => {
+    const noStores = { ...BASE, DATABASE_URL: undefined, MODE: 'sandbox', ...SANDBOX };
+    assert.throws(() => loadConfig(noStores), /sandbox mode requires DATABASE_URL.*REDIS_URL/);
+    assert.equal(loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX }).mode, 'sandbox');
+  });
+
+  it('accepts only the PostgreSQL paper venue; the paper_exchange backend is refused, not ignored', () => {
+    assert.equal(loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'postgres' }).paper.backend, 'postgres');
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange' }), /"exchange" paper backend is not implemented/);
   });
 
   it('rejects unknown modes and unsupported underlyings', () => {
@@ -69,7 +127,7 @@ describe('loadConfig', () => {
 });
 
 describe('loadConfig Dhan authentication', () => {
-  const OTP = { DHAN_CLIENT_ID: '1100000001', DHAN_PIN: '4321', DHAN_TOTP_SECRET: 'JBSWY3DPEHPK3PXP' };
+  const OTP = { DHAN_CLIENT_ID: '1100000001', DHAN_PIN: '4321', DHAN_TOTP_SECRET: 'JBSWY3DPEHPK3PXP', DATABASE_URL: 'postgres://paper.test.invalid/agent' };
 
   it('uses a static access token when no OTP variable is set', () => {
     assert.deepEqual(loadConfig(BASE).dhan.auth, { kind: 'static', accessToken: 'token' });

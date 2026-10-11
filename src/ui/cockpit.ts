@@ -197,7 +197,12 @@ function boxed(title: string, lines: readonly string[], width: number): string[]
 
 function header(snapshot: CockpitSnapshot, width: number): string[] {
   const inner = width - 2;
-  const tag = snapshot.mode === 'paper' ? chalk.yellow.bold('◉ PAPER') : chalk.green.bold('● LIVE');
+  const tag =
+    snapshot.mode === 'paper'
+      ? chalk.yellow.bold('◉ PAPER')
+      : snapshot.mode === 'sandbox'
+        ? chalk.cyan.bold('◎ SANDBOX')
+        : chalk.green.bold('● LIVE');
   const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}`;
   const entriesOpen = snapshot.phase === 'RUNNING' && snapshot.day.killSwitchReason === undefined;
   const right = `${dim(formatIstClock(snapshot.at))} ${entriesOpen ? green('entries OPEN') : red('entries BLOCKED')} `;

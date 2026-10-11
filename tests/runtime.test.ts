@@ -125,6 +125,7 @@ function build(
   const config: AgentConfig = loadConfig({
     DHAN_CLIENT_ID: '1',
     DHAN_ACCESS_TOKEN: 't',
+    DATABASE_URL: 'postgres://paper.test.invalid/agent',
     CAPITAL_INR: '300000',
     MAX_RISK_PER_TRADE_PCT: '1',
     MAX_DAILY_LOSS_PCT: '1',

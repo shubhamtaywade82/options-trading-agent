@@ -1,3 +1,4 @@
+import type { TradingMode } from '../domain/mode.js';
 import type { TradeState } from '../domain/fsm.js';
 import type { Direction, ExitReason, OptionType } from '../domain/types.js';
 
@@ -88,7 +89,7 @@ export interface AgentView {
 
 export interface CockpitSnapshot {
   readonly at: number;
-  readonly mode: 'paper' | 'live';
+  readonly mode: TradingMode;
   readonly phase: 'IDLE' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED';
   readonly phaseDetail: string | undefined;
   readonly capitalInr: number;

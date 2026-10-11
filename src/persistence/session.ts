@@ -3,10 +3,11 @@ import { hostname } from 'node:os';
 import type { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { configFingerprint, type AgentConfig } from '../config.js';
+import type { TradingMode } from '../domain/mode.js';
 import type { Logger } from '../ops/logger.js';
 import { MemoryCacheStore, RedisCacheStore, type CacheStore } from './cache.js';
 import { Lease, PostgresLeaseStore } from './lease.js';
-import { PostgresLedger } from './ledger.js';
+import { PostgresLedger, type LedgerFence } from './ledger.js';
 import { MIGRATIONS } from './migrations.js';
 import { createPostgresPool, migrate } from './postgres.js';
 import { connectRedis } from './redis.js';
@@ -18,11 +19,14 @@ const KEY_ROOT = 'dhan-agent';
 
 export interface PersistenceSession {
   readonly runId: string;
-  /** Present when DATABASE_URL is set. Live writes through it are fenced to the lease. */
+  /** Present when DATABASE_URL is set. Every write through it is fenced to the lease. */
   readonly ledger: PostgresLedger | undefined;
+  /** The PostgreSQL pool and the lease fence, for stores that keep their own tables, such as the paper venue. */
+  readonly pool: Pool | undefined;
+  readonly fence: LedgerFence | undefined;
   readonly cache: CacheStore;
   readonly rateGate: RateGate;
-  /** Present in live mode. The trading right for this client id, held in PostgreSQL. */
+  /** Present whenever DATABASE_URL is set. The trading right for this account, held in PostgreSQL. */
   readonly lease: Lease | undefined;
   /** Strings that must never appear in a log line or error message. */
   readonly secrets: readonly string[];
@@ -34,9 +38,17 @@ export interface PersistenceSession {
 }
 
 /**
- * Opens every configured store and registers the run. Live mode also takes the trading lease and refuses
- * to start while an earlier live run for the same client never ended, because that run may still hold
- * orders or positions that this process has not seen. Any failure closes what was opened and throws a
+ * The account a lease and its fence belong to. Live, sandbox and paper are different accounts or different
+ * books, so each mode holds its own lease. Two runs of the same mode for the same client never both trade.
+ */
+export function accountKey(mode: TradingMode, clientId: string): string {
+  return `${mode}:${clientId}`;
+}
+
+/**
+ * Opens every configured store and registers the run. Any run with a ledger takes the account's trading lease
+ * and refuses to start while an earlier run of the same mode and client never ended, because that run may still
+ * hold orders or positions that this process has not seen. Any failure closes what was opened and throws a
  * redacted error, so a refused start leaves nothing connected and never prints a credential.
  */
 export async function openSession(
@@ -46,7 +58,7 @@ export async function openSession(
   const { logger } = input;
   const { databaseUrl, redisUrl, leaseTtlMs, postgresMaxConnections } = config.persistence;
   const clientId = config.dhan.clientId;
-  const live = config.mode === 'live';
+  const account = accountKey(config.mode, clientId);
   const secrets = [...(databaseUrl === undefined ? [] : secretsOf(databaseUrl)), ...(redisUrl === undefined ? [] : secretsOf(redisUrl))];
   const runId = randomUUID();
   const instance = config.persistence.instanceId ?? hostname();
@@ -55,6 +67,7 @@ export async function openSession(
   let leasePool: Pool | undefined;
   let redis: Redis | undefined;
   let lease: Lease | undefined;
+  let fence: LedgerFence | undefined;
   let ledger: PostgresLedger | undefined;
   let runRegistered = false;
   let closing: Promise<void> | undefined;
@@ -102,9 +115,9 @@ export async function openSession(
         statementTimeoutMs: Math.max(1_000, Math.floor(leaseTtlMs / 3)),
         onError: (error) => logger.error('lease connection error', { error: errorMessage(error, secrets) }),
       });
-      // Created before the ledger, because a live ledger writes under the lease's epoch.
+      // Created before the ledger, because every ledger write is fenced to the lease's epoch.
       lease = new Lease(new PostgresLeaseStore(leasePool), {
-        clientId,
+        clientId: account,
         runId,
         ttlMs: leaseTtlMs,
         // A new holder waits this long after expiry, so an order that was in flight can still finish.
@@ -113,10 +126,8 @@ export async function openSession(
         // clock step backwards would otherwise keep the lease "held" after its ttl has passed.
         now: () => performance.now(),
       });
-      ledger = new PostgresLedger(
-        pool,
-        live ? { clientId, runId, epoch: () => lease?.epoch() } : undefined,
-      );
+      fence = { clientId: account, runId, epoch: () => lease?.epoch() };
+      ledger = new PostgresLedger(pool, fence);
     }
 
     if (redisUrl !== undefined) {
@@ -145,24 +156,24 @@ export async function openSession(
       runRegistered = true;
     }
 
-    if (live && lease !== undefined && ledger !== undefined) {
+    if (lease !== undefined && ledger !== undefined) {
       if (!(await lease.acquire())) {
         throw new Error(
-          `another run holds the trading lease for client ${clientId}. A crashed run releases it when its lease expires, plus the order timeout; start again after that`,
+          `another run holds the trading lease for ${account}. A crashed run releases it when its lease expires, plus the order timeout; start again after that`,
         );
       }
-      logger.info('trading lease acquired', { clientId, runId });
-      const review = await ledger.runsNeedingReview(clientId, runId);
+      logger.info('trading lease acquired', { account, runId });
+      const review = await ledger.runsNeedingReview(clientId, config.mode, runId);
       if (review.length > 0) {
         const list = review.map((r) => `${r.runId} (${r.instanceId}, started ${r.startedAt}, ${r.reason})`).join('; ');
         throw new Error(
-          `live runs for client ${clientId} need review before this one starts: ${list}. Check their positions and orders at the broker, then run npm run db:acknowledge -- --run <runId> --reason "<what you checked>"`,
+          `${config.mode} runs for client ${clientId} need review before this one starts: ${list}. Check their positions and orders, then run npm run db:acknowledge -- --run <runId> --reason "<what you checked>"`,
         );
       }
-      lease.onLost((reason) => logger.error('trading lease lost; no orders will be sent', { reason }));
+      lease.onLost((reason) => logger.error('trading lease lost; no new entries will be sent', { reason }));
     }
 
-    return { runId, ledger, cache, rateGate, lease, secrets, close };
+    return { runId, ledger, pool, fence, cache, rateGate, lease, secrets, close };
   } catch (error) {
     await close('startup failed');
     throw new Error(`persistence startup failed: ${errorMessage(error, secrets)}`);

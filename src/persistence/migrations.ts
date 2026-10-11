@@ -94,4 +94,83 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE runs ADD COLUMN acknowledged boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    version: '004_paper_venue',
+    sql: `
+      -- Paper mode's simulated venue. Market data is real; the wallet, orders and positions live here.
+      -- Money is numeric(18,2) rupees. Prices are numeric(14,4), because option tick sizes are fractions of a rupee.
+      CREATE TABLE paper_wallets (
+        client_id text PRIMARY KEY,
+        initial_inr numeric(18,2) NOT NULL CHECK (initial_inr > 0),
+        balance_inr numeric(18,2) NOT NULL CHECK (balance_inr >= 0),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE paper_positions (
+        position_id text PRIMARY KEY CHECK (char_length(position_id) BETWEEN 1 AND 128),
+        client_id text NOT NULL REFERENCES paper_wallets (client_id),
+        underlying text NOT NULL,
+        security_id text NOT NULL,
+        exchange_segment text NOT NULL,
+        tick_size numeric(10,4) NOT NULL CHECK (tick_size > 0),
+        quantity integer NOT NULL CHECK (quantity > 0),
+        average_price numeric(14,4) NOT NULL CHECK (average_price > 0),
+        stop_loss_price numeric(14,4) NOT NULL,
+        target_price numeric(14,4) NOT NULL,
+        status text NOT NULL CHECK (status IN ('OPEN', 'CLOSED')),
+        opened_at timestamptz NOT NULL,
+        closed_at timestamptz,
+        exit_price numeric(14,4),
+        exit_reason text,
+        realized_pnl_inr numeric(18,2),
+        CHECK ((status = 'OPEN') = (closed_at IS NULL))
+      );
+      CREATE INDEX paper_positions_open_idx ON paper_positions (client_id) WHERE status = 'OPEN';
+
+      CREATE TABLE paper_orders (
+        correlation_id text PRIMARY KEY CHECK (char_length(correlation_id) BETWEEN 1 AND 128),
+        position_id text NOT NULL REFERENCES paper_positions (position_id),
+        client_id text NOT NULL,
+        kind text NOT NULL CHECK (kind IN ('ENTRY', 'EXIT', 'PROTECTIVE_EXIT')),
+        side text NOT NULL CHECK (side IN ('BUY', 'SELL')),
+        quantity integer NOT NULL CHECK (quantity > 0),
+        price numeric(14,4) NOT NULL CHECK (price > 0),
+        reason text,
+        at timestamptz NOT NULL
+      );
+
+      -- Every cash movement. The wallet balance is the sum of these, and balance_after is checked on every write.
+      CREATE TABLE paper_wallet_entries (
+        id bigserial PRIMARY KEY,
+        client_id text NOT NULL REFERENCES paper_wallets (client_id),
+        correlation_id text NOT NULL UNIQUE REFERENCES paper_orders (correlation_id),
+        delta_inr numeric(18,2) NOT NULL,
+        balance_after_inr numeric(18,2) NOT NULL CHECK (balance_after_inr >= 0),
+        at timestamptz NOT NULL
+      );
+
+      -- Orders and cash entries are history: written once, never changed.
+      CREATE FUNCTION paper_history_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'paper orders and wallet entries are append-only';
+      END
+      $$;
+      CREATE TRIGGER paper_orders_immutable BEFORE UPDATE OR DELETE ON paper_orders
+        FOR EACH ROW EXECUTE FUNCTION paper_history_append_only();
+      CREATE TRIGGER paper_wallet_entries_immutable BEFORE UPDATE OR DELETE ON paper_wallet_entries
+        FOR EACH ROW EXECUTE FUNCTION paper_history_append_only();
+
+      -- A position opens once and closes once. A closed position is never reopened or edited.
+      CREATE FUNCTION paper_position_closed_is_final() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF OLD.status = 'CLOSED' THEN
+          RAISE EXCEPTION 'paper position % is already closed', OLD.position_id;
+        END IF;
+        RETURN NEW;
+      END
+      $$;
+      CREATE TRIGGER paper_positions_close_once BEFORE UPDATE ON paper_positions
+        FOR EACH ROW EXECUTE FUNCTION paper_position_closed_is_final();
+    `,
+  },
 ];

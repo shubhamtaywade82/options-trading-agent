@@ -1,3 +1,4 @@
+import type { TradingMode } from '../domain/mode.js';
 import type { ExitReason, OptionContract, Tick } from '../domain/types.js';
 
 /** Entry is always a BUY of a long option. There is deliberately no SELL-to-open shape. */
@@ -87,7 +88,7 @@ export type ExecutionListener = (event: ExecutionEvent) => void;
  * outcome; it reports rejected or unconfirmed states through events.
  */
 export interface ExecutionPort {
-  readonly mode: 'paper' | 'live';
+  readonly mode: TradingMode;
   /** Starts background work such as broker reconciliation. Optional: paper has none. */
   start?(): void;
   submitEntry(order: EntryOrder): Promise<void>;

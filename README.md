@@ -16,7 +16,7 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 | Long CE / long PE on index options (buy-to-open only) | Any option selling, spreads that sell premium, or short options |
 | NSE_FNO and BSE_FNO index options | Equities, futures, commodities, crypto |
 | DhanHQ REST + WebSocket market data and super-order execution | Other brokers |
-| Paper venue on live market data, and live venue | Historical option backtesting (not yet, see Known limits) |
+| Three modes on live market data: `paper`, `sandbox`, `live` | Historical option backtesting (not yet, see Known limits) |
 
 ## Quick start
 
@@ -28,8 +28,17 @@ npm run typecheck && npm test
 npm run dev:paper            # paper venue, live market data, simulated fills
 ```
 
+There are three modes. Market data is always the live Dhan feed in every mode.
+
+| Mode | Market data | Orders go to | Persistence |
+| --- | --- | --- | --- |
+| `paper` | live Dhan feed | simulated venue in PostgreSQL: wallet, orders, positions, P&L | PostgreSQL (required) |
+| `sandbox` | live Dhan feed | Dhan sandbox account (`SANDBOX_DHAN_*`, sandbox host only) | PostgreSQL and Redis (required) |
+| `live` | live Dhan feed | Dhan production account | PostgreSQL and Redis (required) |
+
 Live trading needs `MODE=live` **and** `LIVE_TRADING_ACK=I_ACCEPT_LIVE_ORDER_RISK`. Without
-both, the process exits before opening a socket.
+both, the process exits before opening a socket. `npm run dev:sandbox` starts sandbox mode.
+Each mode holds its own trading lease, keyed `mode:clientId`, so a paper run never blocks a live run.
 
 Node 22 or newer is required.
 

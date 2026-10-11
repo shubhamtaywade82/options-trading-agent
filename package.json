@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "tsx src/index.tsx",
     "dev:paper": "MODE=paper tsx src/index.tsx",
+    "dev:sandbox": "MODE=sandbox tsx src/index.tsx",
     "dev:live": "MODE=live tsx src/index.tsx",
     "build": "tsc",
     "typecheck": "tsc --noEmit --project tsconfig.typecheck.json",

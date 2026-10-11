@@ -112,7 +112,7 @@ function exit(quantity = 75): ExitOrder {
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
 
 function port(broker: ReturnType<typeof fakeBroker>, orderTimeoutMs = 200, reconcileIntervalMs = 60_000) {
-  const live = new LiveExecutionPort(broker.client, { orderTimeoutMs, reconcileIntervalMs, logger: SILENT });
+  const live = new LiveExecutionPort(broker.client, { mode: 'live', orderTimeoutMs, reconcileIntervalMs, logger: SILENT });
   const events: ExecutionEvent[] = [];
   live.onEvent((event) => events.push(event));
   return { live, events };
