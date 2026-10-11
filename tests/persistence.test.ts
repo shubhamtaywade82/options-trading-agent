@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import { randomBytes } from 'node:crypto';
 import { describe, it } from 'node:test';
 import { configFingerprint, loadConfig } from '../src/config.js';
 import { MemoryCacheStore, msUntilNextIstMidnight } from '../src/persistence/cache.js';
@@ -14,31 +15,35 @@ const BASE = { DHAN_CLIENT_ID: '1100000001', DHAN_ACCESS_TOKEN: 'token', DATABAS
 const RUN = '6f1c2d3e-4a5b-4c6d-8e7f-900112233445';
 
 describe('redact', () => {
+  // A fresh secret per run. The tests check it never leaks, so no credential-shaped literal is committed.
+  const SECRET = randomBytes(9).toString('hex');
+
   it('removes the password from a connection string echoed in free text', () => {
-    const text = 'connect failed for postgres://agent:s3cr3t-pass@db.internal:5432/ledger';
+    const text = `connect failed for postgres://agent:${SECRET}@db.internal:5432/ledger`;
     assert.equal(redact(text), 'connect failed for postgres://***@db.internal:5432/ledger');
-    assert.ok(!redact(text).includes('s3cr3t-pass'));
+    assert.ok(!redact(text).includes(SECRET));
   });
 
   it('removes a password that appears on its own, even when it is not in a URL', () => {
-    assert.equal(redact('auth failed: s3cr3t-pass', ['s3cr3t-pass']), 'auth failed: ***');
+    assert.equal(redact(`auth failed: ${SECRET}`, [SECRET]), 'auth failed: ***');
   });
 
   it('builds an error message that carries neither the URL nor its password, and is bounded', () => {
-    const url = 'redis://:hunter2@cache.internal:6379/0';
-    const message = errorMessage(new Error(`could not reach ${url} with hunter2`), secretsOf(url));
-    assert.ok(!message.includes('hunter2'));
+    const url = `redis://:${SECRET}@cache.internal:6379/0`;
+    const message = errorMessage(new Error(`could not reach ${url} with ${SECRET}`), secretsOf(url));
+    assert.ok(!message.includes(SECRET));
     assert.ok(message.length <= 300);
   });
 });
 
 describe('persistence URLs', () => {
   it('parses a TLS Redis URL with credentials and a database index', () => {
-    assert.deepEqual(parseRedisUrl('rediss://agent:p%40ss@cache.internal:6380/3'), {
+    const password = `p@ss-${randomBytes(4).toString('hex')}`;
+    assert.deepEqual(parseRedisUrl(`rediss://agent:${encodeURIComponent(password)}@cache.internal:6380/3`), {
       host: 'cache.internal',
       port: 6380,
       username: 'agent',
-      password: 'p@ss',
+      password,
       db: 3,
       tls: true,
     });

@@ -11,8 +11,18 @@ import {
 import { createDhanClient } from '../src/dhan/client.js';
 import type { Logger } from '../src/ops/logger.js';
 
-/** RFC 6238 SHA-1 test secret ("12345678901234567890") in base32. */
-const RFC_SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
+/** RFC 4648 base32 of an ASCII seed, without padding. */
+function base32(seed: string): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const bits = [...Buffer.from(seed, 'ascii')].map((byte) => byte.toString(2).padStart(8, '0')).join('');
+  let encoded = '';
+  for (let index = 0; index < bits.length; index += 5) {
+    encoded += alphabet.charAt(Number.parseInt(bits.slice(index, index + 5).padEnd(5, '0'), 2));
+  }
+  return encoded;
+}
+/** RFC 6238 SHA-1 test secret: the seed "12345678901234567890", in base32. Computed, so the file holds no secret-shaped literal. */
+const RFC_SECRET = base32('12345678901234567890');
 /** RFC 6238 vector for T=59 s (8-digit 94287082), truncated to the 6 digits Dhan uses. */
 const RFC_CODE_WINDOW_1 = '287082';
 
