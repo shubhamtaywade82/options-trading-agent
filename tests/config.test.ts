@@ -67,6 +67,49 @@ describe('loadConfig', () => {
   });
 });
 
+describe('loadConfig Dhan authentication', () => {
+  const OTP = { DHAN_CLIENT_ID: '1100000001', DHAN_PIN: '4321', DHAN_TOTP_SECRET: 'JBSWY3DPEHPK3PXP' };
+
+  it('uses a static access token when no OTP variable is set', () => {
+    assert.deepEqual(loadConfig(BASE).dhan.auth, { kind: 'static', accessToken: 'token' });
+  });
+
+  it('selects PIN + TOTP login without requiring a static access token', () => {
+    assert.deepEqual(loadConfig(OTP).dhan.auth, { kind: 'otp', pin: '4321', totpSecret: 'JBSWY3DPEHPK3PXP' });
+  });
+
+  it('normalises a TOTP secret copied from an authenticator app (spaces, dashes, lowercase, padding)', () => {
+    const config = loadConfig({ ...OTP, DHAN_TOTP_SECRET: 'jbsw y3dp-ehpk3pxp==' });
+    assert.deepEqual(config.dhan.auth, { kind: 'otp', pin: '4321', totpSecret: 'JBSWY3DPEHPK3PXP' });
+  });
+
+  it('requires DHAN_PIN and DHAN_TOTP_SECRET together', () => {
+    assert.throws(() => loadConfig({ DHAN_CLIENT_ID: '1', DHAN_PIN: '4321' }), /must be set together/);
+    assert.throws(() => loadConfig({ DHAN_CLIENT_ID: '1', DHAN_TOTP_SECRET: 'JBSWY3DPEHPK3PXP' }), /must be set together/);
+  });
+
+  it('refuses a static token alongside OTP variables, so the token source is never ambiguous', () => {
+    assert.throws(() => loadConfig({ ...OTP, DHAN_ACCESS_TOKEN: 'stale' }), /conflicts with DHAN_PIN/);
+  });
+
+  it('rejects a TOTP secret that is not base32, without echoing it', () => {
+    const bad = 'NOT-BASE32!0189';
+    assert.throws(() => loadConfig({ ...OTP, DHAN_TOTP_SECRET: bad }), (error: Error) => {
+      assert.match(error.message, /base32/);
+      assert.equal(error.message.includes(bad), false);
+      return true;
+    });
+  });
+
+  it('names the accepted credential sources when neither a token nor OTP variables are set', () => {
+    assert.throws(() => loadConfig({ DHAN_CLIENT_ID: '1' }), /DHAN_ACCESS_TOKEN is required unless DHAN_PIN/);
+  });
+
+  it('still requires DHAN_CLIENT_ID for OTP login', () => {
+    assert.throws(() => loadConfig({ DHAN_PIN: '4321', DHAN_TOTP_SECRET: 'JBSWY3DPEHPK3PXP' }), /DHAN_CLIENT_ID is required/);
+  });
+});
+
 describe('loadConfig journal location', () => {
   it('defaults to a directory of daily journal files', () => {
     assert.equal(loadConfig(BASE).ops.eventLogDir, 'data/journal');

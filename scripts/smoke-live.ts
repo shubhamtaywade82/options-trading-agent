@@ -5,6 +5,9 @@
  * order code and places no orders. MODE is forced to paper, so the live acknowledgement
  * does not apply.
  *
+ * With DHAN_PIN and DHAN_TOTP_SECRET set, the first step is a PIN+TOTP login, which is also
+ * the auth check. The access token is never printed.
+ *
  *   npm run smoke:live
  */
 import 'dotenv/config';
@@ -12,6 +15,7 @@ import { createDhanClient } from '../src/dhan/client.js';
 import { InstrumentMaster } from '../src/dhan/instrumentMaster.js';
 import { DhanMarketData } from '../src/dhan/marketData.js';
 import { loadConfig } from '../src/config.js';
+import { createConsoleLogger } from '../src/ops/logger.js';
 import { assertWarmupClock } from '../src/runtime/clockGuard.js';
 import { pickExpiry } from '../src/options/selector.js';
 import { formatMinuteOfDay, istParts, shiftDateKey } from '../src/time/ist.js';
@@ -32,7 +36,7 @@ async function check(name: string, run: () => Promise<string>): Promise<Check> {
 
 async function main(): Promise<void> {
   const config = loadConfig({ ...process.env, MODE: 'paper' });
-  const client = createDhanClient(config.dhan);
+  const client = await createDhanClient(config.dhan, { logger: createConsoleLogger() });
   const nowMs = Date.now();
   const today = istParts(nowMs).date;
   const master = new InstrumentMaster(client.instruments, () => today);

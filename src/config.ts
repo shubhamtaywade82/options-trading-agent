@@ -12,11 +12,19 @@ export const KNOWN_UNDERLYINGS: Readonly<Record<string, OptionSegment>> = {
 
 export const LIVE_ACK_PHRASE = 'I_ACCEPT_LIVE_ORDER_RISK';
 
+/**
+ * How the Dhan access token is obtained. `otp` logs in with PIN + TOTP at startup and renews
+ * the token itself. `static` uses a token pasted in by hand, which expires and must be replaced.
+ */
+export type DhanAuthConfig =
+  | { readonly kind: 'static'; readonly accessToken: string }
+  | { readonly kind: 'otp'; readonly pin: string; readonly totpSecret: string };
+
 export interface AgentConfig {
   readonly mode: 'paper' | 'live';
   readonly dhan: {
     readonly clientId: string;
-    readonly accessToken: string;
+    readonly auth: DhanAuthConfig;
     readonly baseUrl: string | undefined;
   };
   readonly underlyings: readonly { readonly symbol: string; readonly optionSegment: OptionSegment }[];
@@ -135,6 +143,36 @@ function minuteOfDay(env: Env, key: string, fallback: string): number {
   }
 }
 
+/**
+ * OTP login (DHAN_PIN + DHAN_TOTP_SECRET) is preferred and selected whenever either is set.
+ * A static DHAN_ACCESS_TOKEN is accepted only when no OTP variable is present, so the token
+ * source is never ambiguous. Error messages name variables but never echo their values.
+ */
+function parseDhanAuth(env: Env): DhanAuthConfig {
+  const pin = optionalText(env, 'DHAN_PIN');
+  const totpSecret = optionalText(env, 'DHAN_TOTP_SECRET');
+  const accessToken = optionalText(env, 'DHAN_ACCESS_TOKEN');
+
+  if (pin === undefined && totpSecret === undefined) {
+    if (accessToken === undefined) {
+      throw new Error('DHAN_ACCESS_TOKEN is required unless DHAN_PIN and DHAN_TOTP_SECRET are set');
+    }
+    return { kind: 'static', accessToken };
+  }
+  if (pin === undefined || totpSecret === undefined) {
+    throw new Error('DHAN_PIN and DHAN_TOTP_SECRET must be set together');
+  }
+  if (accessToken !== undefined) {
+    throw new Error('DHAN_ACCESS_TOKEN conflicts with DHAN_PIN/DHAN_TOTP_SECRET; remove DHAN_ACCESS_TOKEN so the token source is unambiguous');
+  }
+  // Authenticator apps show the secret in groups of four, sometimes with padding. Normalise before validating.
+  const normalizedSecret = totpSecret.replace(/[\s-]/g, '').replace(/=+$/, '').toUpperCase();
+  if (!/^[A-Z2-7]+$/.test(normalizedSecret)) {
+    throw new Error('DHAN_TOTP_SECRET must be a base32 secret (letters A-Z and digits 2-7)');
+  }
+  return { kind: 'otp', pin, totpSecret: normalizedSecret };
+}
+
 function parseUnderlyings(env: Env): AgentConfig['underlyings'] {
   const symbols = text(env, 'UNDERLYINGS', 'NIFTY')
     .split(',')
@@ -177,7 +215,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     mode,
     dhan: {
       clientId: text(env, 'DHAN_CLIENT_ID'),
-      accessToken: text(env, 'DHAN_ACCESS_TOKEN'),
+      auth: parseDhanAuth(env),
       baseUrl: optionalText(env, 'DHAN_BASE_URL'),
     },
     underlyings: parseUnderlyings(env),

@@ -44,7 +44,7 @@ export async function buildRuntime(
     now,
   );
 
-  const client = createDhanClient(config.dhan);
+  const client = await createDhanClient(config.dhan, { logger, now });
   const master = new InstrumentMaster(client.instruments, () => istParts(now()).date);
   const marketData = new DhanMarketData(client, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
   const feed = new DhanFeed(client, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });

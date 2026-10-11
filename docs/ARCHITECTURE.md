@@ -8,6 +8,7 @@ modes the design is built around. The README covers operation and configuration.
 | Layer | Module | Responsibility |
 | --- | --- | --- |
 | Config | `src/config.ts` | Validated env. Live needs an explicit acknowledgement. Cross-field rules (session order, risk ≤ daily loss). |
+| Auth | `src/dhan/auth.ts`, `src/dhan/client.ts` | OTP login (PIN + TOTP) or a static token, never both. One token manager serves REST and both WebSocket feeds. Renewal is single-flight. |
 | Time | `src/time/ist.ts`, `calendar.ts` | All session logic on IST minutes. Epoch conversion is explicit (`DHAN_EPOCH_IST_SHIFTED`). |
 | Market data | `src/dhan/marketData.ts`, `instrumentMaster.ts`, `feed.ts` | Charts, expiries, option chain (account-wide 3 s throttle), scrip master (exact symbol lookup, fail-closed), WS feed with receipt-time freshness. |
 | Signal | `src/market/*`, `src/strategy/orbSupertrend.ts` | Bar aggregation from ticks; closed-bar indicators; ORB + SuperTrend signal. |
@@ -95,6 +96,9 @@ Two states the diagram does not show are legal and matter in operation:
 | Gap through the stop (paper) | `onOptionTick` with `ltp ≤ stop` | Fill at the LTP, not at the stop. Daily-loss check may trip. |
 | Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. |
 | Process restart with open broker position | `brokerOpenOptionCount` at start | Refuses to start. Operator reconciles. |
+| Dhan login rejected (wrong PIN, wrong or stale TOTP) | `AuthenticationError` from `createDhanClient` | Startup stops and prints the broker reason. Nothing is traded. |
+| Login returns no usable expiry, or an already-expired token | `assertUsableToken` at startup | Startup refused. Without an expiry the SDK would log in again on every request. |
+| Access token rejected mid-session (401) | HTTP 401 → `onTokenExpired` | One renewal shared by all in-flight calls: renew while valid, otherwise PIN + TOTP. Trading writes that got a 401 are not resent. The next call uses the renewed token. |
 | Process restart with day state | `restoreDayBook` from today's journal file | P&L, trade count, cooldown, and today's breach are restored. Only the current IST day's file is read. A malformed line in it refuses startup. |
 | Event log write fails | `EventLog` error callback | Logged to console. Trading is not blocked. |
 | Advisor down or slow | timeout / exception in `review` | SKIP (fail-closed). |

@@ -23,7 +23,7 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 ```bash
 npm ci                       # installs @nemesis-oss/dhanhq-sdk pinned to a git commit (builds on prepare)
                              # CI rewrites github ssh URLs to https first; see .github/workflows/ci.yml
-cp .env.example .env         # fill DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN
+cp .env.example .env         # fill DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (see Dhan authentication)
 npm run typecheck && npm test
 npm run dev:paper            # paper venue, live market data, simulated fills
 ```
@@ -165,6 +165,27 @@ All keys, defaults, and bounds are in [`.env.example`](.env.example) and `src/co
 Invalid or unsafe values stop startup with a message that names the key. Defaults are
 starting points. Tune `MIN_OPEN_INTEREST`, `MIN_VOLUME`, `MAX_SPREAD_PCT`, `STOP_LOSS_PCT`,
 and `TARGET_RR` per index and per regime. None of them has been calibrated against data here.
+
+## Dhan authentication
+
+Set one source. Setting both is a startup error.
+
+- **OTP login (preferred).** `DHAN_PIN` and `DHAN_TOTP_SECRET`. At startup the agent sends the
+  client id, the PIN and a fresh TOTP code to `auth.dhan.co` and holds the returned token. The
+  token renews itself shortly before expiry. If a request gets a 401, one renewal runs and all
+  calls waiting on it share the result. A TOTP code with under 5 s left in its 30 s window is
+  not sent. The agent waits for the next window instead, because the code could expire in transit.
+- **Static token.** `DHAN_ACCESS_TOKEN`, copied from the Dhan portal. It expires and is not
+  renewed. Used only when neither OTP variable is set.
+
+The PIN and the TOTP secret together let anyone mint tokens for the account indefinitely.
+Keep both in `.env` (gitignored) or your secret store. Never commit them, paste them into an
+issue, or put them in a log. The agent logs the token expiry time. It never logs the token,
+the PIN or the secret.
+
+The login path is covered by tests that replace the SDK's HTTP call with a stub. The real broker
+exchange has not been run from this environment. Run `npm run smoke:live` with real credentials
+before relying on it. The first check it runs is the login.
 
 ## Tools
 
