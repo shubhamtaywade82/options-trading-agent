@@ -144,7 +144,7 @@ and `TARGET_RR` per index and per regime. None of them has been calibrated again
 npm run check   # typecheck + build + tests
 ```
 
-The suite has 131 tests, all offline. They cover:
+The suite has 134 tests, all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
 
 - the state machine's full transition table and illegal-transition rejection
 - indicators, bar aggregation, and the ORB+SuperTrend signal, including session-boundary
