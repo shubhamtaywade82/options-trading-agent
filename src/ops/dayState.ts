@@ -1,0 +1,79 @@
+import { DayBook } from '../risk/dayBook.js';
+import { istParts } from '../time/ist.js';
+
+export interface RestoreResult {
+  readonly eventsApplied: number;
+  /** Underlyings with an entry journalled today and no terminal outcome. Released so they are not blocked forever. */
+  readonly releasedUnresolved: readonly string[];
+}
+
+/**
+ * Rebuilds today's day-book state (P&L, trade count, cooldowns, breach state)
+ * from the append-only journal. Without this, a restart would reset the daily
+ * loss counter to zero and allow trading past the limit.
+ *
+ * Fail-closed: a malformed journal line for the current IST day throws, because
+ * skipping it could under-count losses. A truncated final line from an
+ * interrupted write is the usual cause, and the operator must inspect it first.
+ */
+export function restoreDayBook(book: DayBook, journalLines: readonly string[], dayKey: string): RestoreResult {
+  const open = new Map<string, number>();
+  let applied = 0;
+  journalLines.forEach((line, index) => {
+    if (line.trim() === '') {
+      return;
+    }
+    let event: { ts?: unknown; type?: unknown; underlying?: unknown; pnlInr?: unknown; reason?: unknown };
+    try {
+      event = JSON.parse(line) as typeof event;
+    } catch {
+      throw new Error(`event journal line ${index + 1} is malformed; inspect it before restarting`);
+    }
+    if (typeof event.ts !== 'string') {
+      return;
+    }
+    const at = Date.parse(event.ts);
+    if (Number.isNaN(at) || istParts(at).date !== dayKey) {
+      return;
+    }
+    const underlying = typeof event.underlying === 'string' ? event.underlying : undefined;
+    switch (event.type) {
+      case 'entry_submitted':
+        if (underlying !== undefined) {
+          book.recordEntry(underlying);
+          open.set(underlying, index);
+          applied += 1;
+        }
+        break;
+      case 'entry_rejected':
+        if (underlying !== undefined) {
+          book.releaseUnfilled(underlying);
+          open.delete(underlying);
+          applied += 1;
+        }
+        break;
+      case 'trade_closed':
+        if (underlying !== undefined && typeof event.pnlInr === 'number') {
+          book.recordClose({ underlying, pnlInr: event.pnlInr, closedAtMs: at });
+          open.delete(underlying);
+          applied += 1;
+        }
+        break;
+      case 'book_kill_switch':
+        book.activateKillSwitch(typeof event.reason === 'string' ? event.reason : 'restored breach');
+        applied += 1;
+        break;
+      case 'daily_loss_breach':
+        book.activateKillSwitch('daily loss limit breached earlier today');
+        applied += 1;
+        break;
+      default:
+        break;
+    }
+  });
+  const released = [...open.keys()].sort();
+  for (const underlying of released) {
+    book.releaseUnfilled(underlying);
+  }
+  return { eventsApplied: applied, releasedUnresolved: released };
+}
