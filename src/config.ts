@@ -27,13 +27,23 @@ export type DhanAuthConfig =
   | { readonly kind: 'otp'; readonly pin: string; readonly totpSecret: string };
 
 /**
- * Sandbox order credentials. Used only in sandbox mode. Market data never uses these; it always uses `dhan`.
- * The sandbox base URL has no default, because the sandbox host is not part of the SDK and must be set explicitly.
+ * Sandbox order credentials, passed to the SDK's `hybrid` mode. Market data stays on the production credentials;
+ * orders, positions, funds and controls go to the sandbox. `baseUrl` is optional: the SDK defaults to sandbox.dhan.co.
  */
 export interface SandboxConfig {
   readonly clientId: string;
   readonly accessToken: string;
-  readonly baseUrl: string;
+  readonly baseUrl: string | undefined;
+}
+
+/** The paper_exchange server (github.com/shubhamtaywade82/paper_exchange) used as the paper order venue. */
+export interface PaperExchangeConfig {
+  /** Base URL of the server, without the /api suffix. */
+  readonly url: string;
+  /** Sent as X-API-Key. Never logged. */
+  readonly apiKey: string;
+  /** Sent as X-Account-Id. The paper account the orders belong to. */
+  readonly accountId: string;
 }
 
 export interface AgentConfig {
@@ -88,8 +98,10 @@ export interface AgentConfig {
     readonly istShiftedTimestamps: boolean;
   };
   readonly paper: {
-    /** Where paper orders are simulated. Only the PostgreSQL venue exists today. */
-    readonly backend: 'postgres';
+    /** Where paper orders are simulated: the local PostgreSQL venue, or the paper_exchange server. */
+    readonly backend: 'postgres' | 'exchange';
+    /** Present when backend is exchange. */
+    readonly exchange: PaperExchangeConfig | undefined;
     readonly slippageBps: number;
   };
   readonly llm: {
@@ -294,7 +306,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       istShiftedTimestamps: flag(env, 'DHAN_EPOCH_IST_SHIFTED', false),
     },
     paper: {
-      backend: parsePaperBackend(env),
+      ...parsePaperBackend(env),
       slippageBps: number(env, 'PAPER_SLIPPAGE_BPS', 0, { min: 0, max: 500 }),
     },
     llm: {
@@ -318,30 +330,33 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 }
 
 /**
- * Sandbox order credentials. Every value is required together, and the base URL must not be the production host:
- * a sandbox run that quietly sent orders to production would be the worst failure this mode can have.
+ * Sandbox order credentials. Client id and token are required together. The base URL is optional, and when set it
+ * must be https and must not be the production host: a sandbox run that quietly sent orders to production would be
+ * the worst failure this mode can have.
  */
 function parseSandbox(env: Env, dhanBaseUrl: string | undefined): SandboxConfig {
-  const clientId = optionalText(env, 'SANDBOX_DHAN_CLIENT_ID');
-  const accessToken = optionalText(env, 'SANDBOX_DHAN_ACCESS_TOKEN');
-  const baseUrl = optionalText(env, 'SANDBOX_DHAN_BASE_URL');
-  if (clientId === undefined || accessToken === undefined || baseUrl === undefined) {
-    throw new Error('sandbox mode requires SANDBOX_DHAN_CLIENT_ID, SANDBOX_DHAN_ACCESS_TOKEN and SANDBOX_DHAN_BASE_URL');
+  const clientId = optionalText(env, 'DHAN_SANDBOX_CLIENT_ID');
+  const accessToken = optionalText(env, 'DHAN_SANDBOX_ACCESS_TOKEN');
+  if (clientId === undefined || accessToken === undefined) {
+    throw new Error('sandbox mode requires DHAN_SANDBOX_CLIENT_ID and DHAN_SANDBOX_ACCESS_TOKEN');
   }
-  let host: string;
-  try {
-    const url = new URL(baseUrl);
-    if (url.protocol !== 'https:') {
-      throw new Error('not https');
+  const baseUrl = optionalText(env, 'DHAN_SANDBOX_BASE_URL');
+  if (baseUrl !== undefined) {
+    let host: string;
+    try {
+      const url = new URL(baseUrl);
+      if (url.protocol !== 'https:') {
+        throw new Error('not https');
+      }
+      host = url.hostname.toLowerCase();
+    } catch {
+      throw new Error('DHAN_SANDBOX_BASE_URL must be an https URL');
     }
-    host = url.hostname.toLowerCase();
-  } catch {
-    throw new Error('SANDBOX_DHAN_BASE_URL must be an https URL');
-  }
-  // DHAN_BASE_URL is validated by the SDK when the client is built. Here it only needs to be compared against.
-  const marketDataHost = dhanBaseUrl === undefined ? undefined : hostOfUrl(dhanBaseUrl);
-  if (host === PRODUCTION_DHAN_HOST || host === marketDataHost) {
-    throw new Error(`SANDBOX_DHAN_BASE_URL points at a production host (${host}); sandbox orders must go to the sandbox host`);
+    // DHAN_BASE_URL is validated by the SDK when the client is built. Here it only needs to be compared against.
+    const marketDataHost = dhanBaseUrl === undefined ? undefined : hostOfUrl(dhanBaseUrl);
+    if (host === PRODUCTION_DHAN_HOST || host === marketDataHost) {
+      throw new Error(`DHAN_SANDBOX_BASE_URL points at a production host (${host}); sandbox orders must go to the sandbox host`);
+    }
   }
   return { clientId, accessToken, baseUrl };
 }
@@ -354,13 +369,38 @@ function hostOfUrl(url: string): string | undefined {
   }
 }
 
-/** Paper orders are simulated by the PostgreSQL venue. The local paper_exchange server is not implemented, so it is refused, not ignored. */
-function parsePaperBackend(env: Env): 'postgres' {
+/**
+ * Paper order venue. `postgres` simulates fills in the local database. `exchange` sends paper orders to a running
+ * paper_exchange server, which keeps the account, margin and ledger on its side. Either way, market data is live.
+ */
+function parsePaperBackend(env: Env): { backend: 'postgres' | 'exchange'; exchange: PaperExchangeConfig | undefined } {
   const raw = (optionalText(env, 'PAPER_BACKEND') ?? 'postgres').toLowerCase();
-  if (raw !== 'postgres') {
-    throw new Error(`PAPER_BACKEND must be "postgres"; the "${raw}" paper backend is not implemented`);
+  if (raw === 'postgres') {
+    return { backend: 'postgres', exchange: undefined };
   }
-  return 'postgres';
+  if (raw !== 'exchange') {
+    throw new Error(`PAPER_BACKEND must be "postgres" or "exchange", got "${raw}"`);
+  }
+  const url = optionalText(env, 'PAPER_EXCHANGE_URL');
+  const apiKey = optionalText(env, 'PAPER_EXCHANGE_API_KEY');
+  if (url === undefined || apiKey === undefined) {
+    throw new Error('PAPER_BACKEND=exchange requires PAPER_EXCHANGE_URL and PAPER_EXCHANGE_API_KEY');
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('PAPER_EXCHANGE_URL must be a URL');
+  }
+  const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
+    throw new Error('PAPER_EXCHANGE_URL must be https, or http on loopback');
+  }
+  const accountId = optionalText(env, 'PAPER_EXCHANGE_ACCOUNT_ID') ?? text(env, 'DHAN_CLIENT_ID');
+  return {
+    backend: 'exchange',
+    exchange: { url: url.replace(/\/+$/, ''), apiKey, accountId },
+  };
 }
 
 /**

@@ -1,11 +1,34 @@
 import { DhanClient, TokenManager } from '@nemesis-oss/dhanhq-sdk';
-import type { AgentConfig } from '../config.js';
+import type { AgentConfig, SandboxConfig } from '../config.js';
 import type { Logger } from '../ops/logger.js';
 import { assertUsableToken, createTotpProvider, formatExpiry, singleFlight } from './auth.js';
 
 export interface DhanClientOptions {
   readonly logger?: Logger;
   readonly now?: () => number;
+  /**
+   * Present in sandbox mode. The SDK's `hybrid` mode then serves market data from production on the production
+   * credentials, and sends orders, positions, funds and controls to the sandbox on these credentials.
+   */
+  readonly sandbox?: SandboxConfig;
+}
+
+/** The SDK options that switch a client to sandbox orders. Empty for live and paper, which send orders only to production or nowhere. */
+function sandboxOptions(sandbox: SandboxConfig | undefined): {
+  mode?: 'hybrid';
+  sandboxToken?: string;
+  sandboxClientId?: string;
+  sandboxBaseURL?: string;
+} {
+  if (sandbox === undefined) {
+    return {};
+  }
+  return {
+    mode: 'hybrid',
+    sandboxToken: sandbox.accessToken,
+    sandboxClientId: sandbox.clientId,
+    ...(sandbox.baseUrl === undefined ? {} : { sandboxBaseURL: sandbox.baseUrl }),
+  };
 }
 
 /**
@@ -25,8 +48,9 @@ export interface DhanClientOptions {
  */
 export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanClientOptions = {}): Promise<DhanClient> {
   const baseURL = dhan.baseUrl === undefined ? {} : { baseURL: dhan.baseUrl };
+  const sandbox = sandboxOptions(options.sandbox);
   if (dhan.auth.kind === 'static') {
-    return new DhanClient({ clientId: dhan.clientId, token: dhan.auth.accessToken, ...baseURL });
+    return new DhanClient({ clientId: dhan.clientId, token: dhan.auth.accessToken, ...baseURL, ...sandbox });
   }
 
   const { pin, totpSecret } = dhan.auth;
@@ -73,6 +97,7 @@ export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanC
       await renew();
     },
     ...baseURL,
+    ...sandbox,
   });
   // Built directly, not through client.auth.enableAutoTokenManagement, because that call replaces
   // the provider in the client config. REST and both WebSocket feeds must share `provide`.

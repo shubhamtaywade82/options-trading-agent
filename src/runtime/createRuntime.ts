@@ -1,10 +1,16 @@
 import { OllamaClient } from '@nemesis-oss/ollama-sdk';
 import { createDhanClient } from '../dhan/client.js';
+import type { DhanClient } from '@nemesis-oss/dhanhq-sdk';
+import { DhanSandboxGateway } from '../dhan/sandboxGateway.js';
+import { GatewayExecutionPort } from '../execution/gatewayPort.js';
+import type { OrderGateway } from '../execution/orderGateway.js';
+import { PaperExchangeClient } from '../paper/exchangeClient.js';
+import { PaperExchangeGateway } from '../paper/exchangeGateway.js';
 import { DhanFeed } from '../dhan/feed.js';
 import { InstrumentMaster } from '../dhan/instrumentMaster.js';
 import { DhanMarketData } from '../dhan/marketData.js';
 import { LiveExecutionPort, type LiveClient } from '../dhan/liveExecution.js';
-import type { AgentConfig, SandboxConfig } from '../config.js';
+import type { AgentConfig } from '../config.js';
 import type { ExecutionPort } from '../execution/ports.js';
 import { PostgresPaperExecutionPort } from '../execution/postgresPaper.js';
 import { PostgresPaperStore } from '../execution/paperStore.js';
@@ -82,8 +88,8 @@ async function compose(
     now,
   });
 
-  // Market data is always the live Dhan feed, on the market-data credentials.
-  const dataClient = await createDhanClient(config.dhan, { logger, now });
+  // Market data is always the live Dhan feed. In sandbox mode the same client sends orders to the sandbox (SDK hybrid mode).
+  const dataClient = await createDhanClient(config.dhan, { logger, now, ...(config.sandbox === undefined ? {} : { sandbox: config.sandbox }) });
   const master = new InstrumentMaster(dataClient.instruments, () => istParts(now()).date, { cache: session.cache, now });
   const marketData = new DhanMarketData(dataClient, {
     istShiftedTimestamps: config.feed.istShiftedTimestamps,
@@ -93,25 +99,9 @@ async function compose(
   });
   const feed = new DhanFeed(dataClient, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
 
-  // Orders reach a Dhan account only in live and sandbox. Sandbox uses its own client, so no sandbox request
-  // can carry production credentials, and no production request can carry sandbox ones.
-  const orderClient =
-    config.mode === 'live'
-      ? dataClient
-      : config.mode === 'sandbox' && config.sandbox !== undefined
-        ? await createDhanClient(sandboxDhan(config.sandbox), { logger, now })
-        : undefined;
-  const orderFunds =
-    config.mode === 'sandbox' && orderClient !== undefined
-      ? new DhanMarketData(orderClient, {
-          istShiftedTimestamps: config.feed.istShiftedTimestamps,
-          now,
-          rateGate: session.rateGate,
-          accountKey: `${clientId}:sandbox`,
-        })
-      : undefined;
-
-  const venue = config.mode === 'paper' ? await openPaperVenue(config, session, logger, now) : undefined;
+  const paperExchange = config.mode === 'paper' && config.paper.backend === 'exchange' ? buildPaperExchangeClient(config) : undefined;
+  const venue = config.mode === 'paper' && config.paper.backend === 'postgres' ? await openPaperVenue(config, session, logger, now) : undefined;
+  const gateway = buildGateway(config, dataClient, paperExchange, logger, now);
 
   const market: MarketPort = {
     intradayCandles: (spot, barMinutes, fromDate, toDate) => marketData.intradayCandles(spot, barMinutes, fromDate, toDate),
@@ -122,37 +112,50 @@ async function compose(
       if (venue !== undefined) {
         return venue.cash();
       }
-      if (config.mode === 'live') {
-        return marketData.availableFunds();
+      if (paperExchange !== undefined) {
+        return paperExchange.availableBalance();
       }
-      if (orderFunds === undefined) {
-        return Promise.reject(new Error('no order account to read funds from in this mode'));
-      }
-      return orderFunds.availableFunds();
+      // Live and sandbox: the trading funds call. In sandbox mode the SDK routes it to the sandbox account.
+      return marketData.availableFunds();
     },
-    // In paper mode the venue's own open positions play the role of the broker book.
+    // The venue's own open positions play the role of the broker book. Paper_exchange and sandbox answer from their server.
     brokerOpenOptionCount: async () => {
-      if (orderClient !== undefined) {
-        return countOpenOptionLegs(orderClient);
+      if (venue !== undefined) {
+        return venue.openPositionCount();
       }
-      return venue?.openPositionCount() ?? 0;
+      if (gateway !== undefined && config.mode !== 'live') {
+        return gateway.openPositionCount();
+      }
+      return countOpenOptionLegs(dataClient);
     },
-    brokerLiveOrderCount: async () => (orderClient === undefined ? 0 : countLiveOrders(orderClient)),
+    brokerLiveOrderCount: async () => {
+      if (config.mode === 'live') {
+        return countLiveOrders(dataClient);
+      }
+      if (config.mode === 'sandbox') {
+        return countLiveRegularOrders(dataClient);
+      }
+      return 0;
+    },
   };
 
   let execution: ExecutionPort;
-  if (orderClient !== undefined) {
-    execution = new LiveExecutionPort(orderClient as LiveClient, {
-      mode: config.mode === 'sandbox' ? 'sandbox' : 'live',
+  if (config.mode === 'live') {
+    execution = new LiveExecutionPort(dataClient as LiveClient, {
+      mode: 'live',
       orderTimeoutMs: config.ops.orderTimeoutMs,
       reconcileIntervalMs: config.ops.reconcileIntervalMs,
       logger,
       now,
     });
+  } else if (config.mode === 'sandbox' && gateway !== undefined) {
+    execution = new GatewayExecutionPort(gateway, { mode: 'sandbox', logger, now });
+  } else if (paperExchange !== undefined && gateway !== undefined) {
+    execution = new GatewayExecutionPort(gateway, { mode: 'paper', logger, now });
   } else if (venue !== undefined) {
     execution = venue;
   } else {
-    throw new Error(`no order venue for ${mode} mode`);
+    throw new Error(`no order venue for ${config.mode} mode`);
   }
 
   const advisor = buildAdvisor(config, logger);
@@ -221,13 +224,33 @@ async function restoreFromLedger(
   }
 }
 
-/** Sandbox orders use a static token. The sandbox base URL is set explicitly, and the config refuses the production host. */
-function sandboxDhan(sandbox: SandboxConfig): AgentConfig['dhan'] {
-  return {
-    clientId: sandbox.clientId,
-    auth: { kind: 'static', accessToken: sandbox.accessToken },
-    baseUrl: sandbox.baseUrl,
-  };
+/** The paper_exchange client, built from validated config. The API key is never logged. */
+function buildPaperExchangeClient(config: AgentConfig): PaperExchangeClient {
+  const exchange = config.paper.exchange;
+  if (exchange === undefined) {
+    throw new Error('PAPER_BACKEND=exchange without a paper_exchange configuration');
+  }
+  return new PaperExchangeClient({ baseUrl: exchange.url, apiKey: exchange.apiKey, accountId: exchange.accountId, timeoutMs: 5_000 });
+}
+
+/**
+ * The order gateway for the venue that takes orders in this mode, or undefined when the mode has none of its own (live
+ * uses the super-order port, and the PostgreSQL paper venue is its own port).
+ */
+function buildGateway(
+  config: AgentConfig,
+  dataClient: DhanClient,
+  paperExchange: PaperExchangeClient | undefined,
+  logger: Logger,
+  now: () => number,
+): OrderGateway | undefined {
+  if (config.mode === 'sandbox') {
+    return new DhanSandboxGateway(dataClient, { orderTimeoutMs: config.ops.orderTimeoutMs, pollIntervalMs: 500, logger, now });
+  }
+  if (paperExchange !== undefined) {
+    return new PaperExchangeGateway(paperExchange, { logger });
+  }
+  return undefined;
 }
 
 /**
@@ -294,6 +317,12 @@ async function countLiveOrders(client: Pick<LiveClient, 'orders' | 'superOrders'
   const [orders, superOrders] = await Promise.all([client.orders.list(), client.superOrders.list()]);
   const live = (status: string | undefined): boolean => status === undefined || !TERMINAL_ORDER_STATUSES.has(status);
   return orders.filter((order) => live(order.orderStatus)).length + superOrders.filter((order) => live(order.orderStatus)).length;
+}
+
+/** The sandbox serves no super orders (it answers 404), so only regular orders are counted there. */
+async function countLiveRegularOrders(client: Pick<DhanClient, 'orders'>): Promise<number> {
+  const orders = await client.orders.list();
+  return orders.filter((order) => order.orderStatus === undefined || !TERMINAL_ORDER_STATUSES.has(order.orderStatus)).length;
 }
 
 async function countOpenOptionLegs(client: Pick<LiveClient, 'positions'>): Promise<number> {

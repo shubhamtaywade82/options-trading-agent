@@ -32,8 +32,8 @@ There are three modes. Market data is always the live Dhan feed in every mode.
 
 | Mode | Market data | Orders go to | Persistence |
 | --- | --- | --- | --- |
-| `paper` | live Dhan feed | simulated venue in PostgreSQL: wallet, orders, positions, P&L | PostgreSQL (required) |
-| `sandbox` | live Dhan feed | Dhan sandbox account (`SANDBOX_DHAN_*`, sandbox host only) | PostgreSQL and Redis (required) |
+| `paper` | live Dhan feed | `PAPER_BACKEND=postgres`: simulated venue in PostgreSQL. `PAPER_BACKEND=exchange`: a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server | PostgreSQL (required) |
+| `sandbox` | live Dhan feed | Dhan sandbox account via the SDK's `hybrid` mode (`DHAN_SANDBOX_*`) | PostgreSQL and Redis (required) |
 | `live` | live Dhan feed | Dhan production account | PostgreSQL and Redis (required) |
 
 Live trading needs `MODE=live` **and** `LIVE_TRADING_ACK=I_ACCEPT_LIVE_ORDER_RISK`. Without

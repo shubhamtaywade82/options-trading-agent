@@ -39,8 +39,11 @@ The three modes are `live`, `sandbox` and `paper` (`src/domain/mode.ts`). Market
 | Mode | Order venue | Lease account key | Required stores |
 | --- | --- | --- | --- |
 | live | Dhan production (`dhan` credentials) | `live:<clientId>` | PostgreSQL, Redis |
-| sandbox | Dhan sandbox (`SANDBOX_DHAN_*`, https, never `api.dhan.co`) | `sandbox:<clientId>` | PostgreSQL, Redis |
-| paper | PostgreSQL paper venue | `paper:<clientId>` | PostgreSQL (Redis optional) |
+| sandbox | Dhan sandbox via the SDK's `hybrid` mode (`DHAN_SANDBOX_*`) | `sandbox:<clientId>` | PostgreSQL, Redis |
+| paper, `PAPER_BACKEND=postgres` | PostgreSQL paper venue | `paper:<clientId>` | PostgreSQL (Redis optional) |
+| paper, `PAPER_BACKEND=exchange` | paper_exchange server (`PAPER_EXCHANGE_*`) | `paper:<clientId>` | PostgreSQL (Redis optional) |
+
+Sandbox uses one SDK client in `hybrid` mode (`@nemesis-oss/dhanhq-sdk` v1.3.0). Market data, option chain, charts and the market feed go to production on the production credentials. Orders, positions, funds and controls go to `sandbox.dhan.co` on the sandbox credentials. The SDK refuses a trading call the sandbox does not serve, and never falls back to production.
 
 Each mode has its own lease and its own review queue, so a paper run never blocks a live run for the same client. Journal and ledger rows are tagged with the mode, so restore never replays one mode's events into another.
 
@@ -52,6 +55,15 @@ Each mode has its own lease and its own review queue, so a paper run never block
 - Exit or protective exit: closes the position, credits the wallet and records the realised P&L (credit minus debit, to the paisa). A failed agent exit is `EXIT_UNCONFIRMED` and the position stays open. A failed protective exit is `BROKER_MISMATCH`, which halts the agent.
 - Wallet: created once with `CAPITAL_INR`. A later start with a different capital is refused, not silently ignored.
 - Restart: the venue reloads the wallet and open positions. The orchestrator refuses to start while the venue holds an open position, the same rule live applies to open broker legs.
+
+### Gateway venues (sandbox and paper_exchange)
+
+Dhan's sandbox serves no super orders and no WebSocket, and paper_exchange has no exchange-held bracket. Both therefore use `GatewayExecutionPort` (`src/execution/gatewayPort.ts`), which sends market orders through an `OrderGateway` and enforces stops and targets on option LTP itself:
+
+- `DhanSandboxGateway` places a regular INTRADAY MARKET order and polls `orders.getById` until it settles, using the SDK's typed `filledQty` and `averageTradedPrice`. A still-working order is cancelled at the deadline. A fill with no average price is unconfirmed.
+- `PaperExchangeGateway` sends a market order with `execution_price` set to the agent's premium and `reduce_only` on sells. The server fills it inside the POST. The fill price is read from the order's TRADE ledger entry, because the order response has none. An order not filled at once is cancelled.
+
+The agent's own stop is the difference from live. If the process dies with a position open on these venues, nothing stops it out until the next start. Live does not have this gap, because its legs are held by the exchange.
 
 ## Trading lease and fencing
 
@@ -133,10 +145,10 @@ Without a `DATABASE_URL`, restore reads the journal directly through `scopeJourn
 
 These are known gaps. Each one is a stated requirement, not a shipped guarantee.
 
-0. **paper_exchange backend.** `PAPER_BACKEND` accepts only `postgres`. The local `paper_exchange` server has no adapter here, because its API is not in this repository. Setting any other value is refused at startup.
-0a. **Restart with open paper positions.** The agent cannot yet re-adopt an open position into its state machine. Restart with an open paper position is refused until it is closed. Adoption needs an `UnderlyingAgent` restore path, which does not exist for live either.
-0b. **Sandbox order-update stream.** Sandbox fills come from the sandbox client's order WebSocket. Whether the sandbox host serves that stream is not verified against the Dhan sandbox. Verify before relying on sandbox fills.
-0c. **Sandbox base URL.** The SDK has no sandbox host, so `SANDBOX_DHAN_BASE_URL` is required and has no default. The agent refuses only the production host it knows about (`api.dhan.co`) and the market-data host; it cannot prove an arbitrary URL is the sandbox.
+0. **paper_exchange has no server-side protections for options.** The server's protections key on the position's underlying symbol (`PositionProtection#instrument_id` is `position.symbol`), and the monitor reads the mark price by that symbol. An option stop would be compared with the index price. This agent therefore keeps stops on its own side for paper_exchange. The fix belongs in paper_exchange: key protection quotes by the option contract.
+0a. **Restart with open paper or sandbox positions.** The agent cannot yet re-adopt an open position into its state machine. Restart with an open paper position is refused until it is closed. Adoption needs an `UnderlyingAgent` restore path, which does not exist for live either.
+0b. **Sandbox stops are agent-side.** Sandbox fills are polled, not streamed, and stops are sent by the agent (see Gateway venues). A process that dies with a sandbox position open leaves it without a stop.
+0c. **Sandbox base URL.** `DHAN_SANDBOX_BASE_URL` is optional and defaults to the SDK's `sandbox.dhan.co`. When set, it must be https and not `api.dhan.co` or the market-data host.
 
 1. **Synchronous replication.** Live mode assumes PostgreSQL `synchronous_commit = on` with a synchronous standby. Nothing checks this at startup. Until it is enforced, a failover can lose the last committed events, and restore cannot see them.
 2. **TLS.** `validatePostgresUrl` checks scheme and host only. Live use should require `sslmode=verify-full` and `sslrootcert`, and Redis should use `rediss://`. Not enforced yet.

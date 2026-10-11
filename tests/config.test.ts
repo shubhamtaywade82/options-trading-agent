@@ -3,9 +3,9 @@ import { describe, it } from 'node:test';
 import { LIVE_ACK_PHRASE, loadConfig } from '../src/config.js';
 
 const SANDBOX = {
-  SANDBOX_DHAN_CLIENT_ID: 'SANDBOX-CLIENT',
-  SANDBOX_DHAN_ACCESS_TOKEN: 'sandbox-token',
-  SANDBOX_DHAN_BASE_URL: 'https://sandbox.example.test/v2',
+  DHAN_SANDBOX_CLIENT_ID: 'SANDBOX-CLIENT',
+  DHAN_SANDBOX_ACCESS_TOKEN: 'sandbox-token',
+  DHAN_SANDBOX_BASE_URL: 'https://sandbox.example.test/v2',
 };
 
 const BASE = {
@@ -53,21 +53,21 @@ describe('loadConfig', () => {
   });
 
   it('refuses sandbox mode without all three sandbox settings, and never names a token in the error', () => {
-    assert.throws(() => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_ACCESS_TOKEN: undefined }), /SANDBOX_DHAN_ACCESS_TOKEN/);
-    assert.throws(() => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: undefined }), /SANDBOX_DHAN_BASE_URL/);
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_SANDBOX_ACCESS_TOKEN: undefined }), /DHAN_SANDBOX_ACCESS_TOKEN/);
+    assert.equal(loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_SANDBOX_BASE_URL: undefined }).sandbox?.baseUrl, undefined, 'the SDK default host is used');
     assert.throws(
-      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: 'http://sandbox.example.test/v2' }),
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_SANDBOX_BASE_URL: 'http://sandbox.example.test/v2' }),
       /must be an https URL/,
     );
   });
 
   it('refuses a sandbox base URL that is the production host, so sandbox orders cannot reach production', () => {
     assert.throws(
-      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, SANDBOX_DHAN_BASE_URL: 'https://api.dhan.co/v2' }),
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_SANDBOX_BASE_URL: 'https://api.dhan.co/v2' }),
       /production host/,
     );
     assert.throws(
-      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_BASE_URL: 'https://gateway.example.test', SANDBOX_DHAN_BASE_URL: 'https://gateway.example.test/sandbox' }),
+      () => loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX, DHAN_BASE_URL: 'https://gateway.example.test', DHAN_SANDBOX_BASE_URL: 'https://gateway.example.test/sandbox' }),
       /production host/,
     );
   });
@@ -78,9 +78,34 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ ...BASE, MODE: 'sandbox', ...SANDBOX }).mode, 'sandbox');
   });
 
-  it('accepts only the PostgreSQL paper venue; the paper_exchange backend is refused, not ignored', () => {
-    assert.equal(loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'postgres' }).paper.backend, 'postgres');
-    assert.throws(() => loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange' }), /"exchange" paper backend is not implemented/);
+  it('selects the paper venue: the PostgreSQL venue by default, or a paper_exchange server', () => {
+    assert.equal(loadConfig({ ...BASE, MODE: 'paper' }).paper.backend, 'postgres');
+    assert.equal(loadConfig({ ...BASE, MODE: 'paper' }).paper.exchange, undefined);
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'memory' }), /must be "postgres" or "exchange"/);
+  });
+
+  it('requires the paper_exchange URL and API key when that backend is chosen, and never echoes the key', () => {
+    assert.throws(() => loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange' }), /PAPER_EXCHANGE_URL and PAPER_EXCHANGE_API_KEY/);
+    assert.throws(
+      () => {
+        try {
+          loadConfig({ ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange', PAPER_EXCHANGE_URL: 'not a url', PAPER_EXCHANGE_API_KEY: 'k-secret' });
+        } catch (error) {
+          assert.ok(!(error as Error).message.includes('k-secret'));
+          throw error;
+        }
+      },
+      /must be a URL/,
+    );
+  });
+
+  it('accepts paper_exchange over https, or over http on loopback only, and defaults the account to the Dhan client id', () => {
+    const exchange = { ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange', PAPER_EXCHANGE_API_KEY: 'k' };
+    const local = loadConfig({ ...exchange, PAPER_EXCHANGE_URL: 'http://127.0.0.1:3100/' });
+    assert.deepEqual(local.paper.exchange, { url: 'http://127.0.0.1:3100', apiKey: 'k', accountId: BASE.DHAN_CLIENT_ID });
+    assert.equal(loadConfig({ ...exchange, PAPER_EXCHANGE_URL: 'https://paper.example.test' }).paper.backend, 'exchange');
+    assert.throws(() => loadConfig({ ...exchange, PAPER_EXCHANGE_URL: 'http://paper.example.test' }), /https, or http on loopback/);
+    assert.equal(loadConfig({ ...exchange, PAPER_EXCHANGE_URL: 'http://127.0.0.1:3100', PAPER_EXCHANGE_ACCOUNT_ID: 'paper-1' }).paper.exchange?.accountId, 'paper-1');
   });
 
   it('rejects unknown modes and unsupported underlyings', () => {
