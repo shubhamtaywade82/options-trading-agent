@@ -21,8 +21,7 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 ## Quick start
 
 ```bash
-npm ci                       # installs @nemesis-oss/dhanhq-sdk pinned to a git commit (builds on prepare)
-                             # CI rewrites github ssh URLs to https first; see .github/workflows/ci.yml
+npm ci                       # installs @nemesis-oss/dhanhq-sdk 1.3.0 from npm (exact pin)
 cp .env.example .env         # fill DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (see Dhan authentication)
 npm run typecheck && npm test
 npm run dev:paper            # paper venue, live market data, simulated fills
@@ -297,8 +296,8 @@ The Ink dashboard was rebuilt for options rather than removed. See [Operator coc
 
 `npm test` is a fresh suite for the index-options system. The dependency on
 `@nemesis-oss/ollama-sdk` is kept and upgraded to the 1.13 line. The DhanHQ dependency is
-`@nemesis-oss/dhanhq-sdk` pinned to commit `353901e` (v1.2.0 on `main`), which includes the
-trading-write replay-safety fix. The npm registry's latest release is 1.1.0.
+`@nemesis-oss/dhanhq-sdk` is pinned exactly to 1.3.0 from npm. It replaces the earlier git pin
+to commit `353901e` (v1.2.0).
 
 ## Layout
 
