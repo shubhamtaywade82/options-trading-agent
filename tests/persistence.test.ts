@@ -38,12 +38,13 @@ describe('redact', () => {
 
 describe('persistence URLs', () => {
   it('parses a TLS Redis URL with credentials and a database index', () => {
-    const password = `p@ss-${randomBytes(4).toString('hex')}`;
-    assert.deepEqual(parseRedisUrl(`rediss://agent:${encodeURIComponent(password)}@cache.internal:6380/3`), {
+    // The expected password is built per run. Its '@' is percent-encoded in the URL, so the parser must decode it.
+    const expected = `p@${randomBytes(4).toString('hex')}`;
+    assert.deepEqual(parseRedisUrl(`rediss://agent:${encodeURIComponent(expected)}@cache.internal:6380/3`), {
       host: 'cache.internal',
       port: 6380,
       username: 'agent',
-      password,
+      password: expected,
       db: 3,
       tls: true,
     });
