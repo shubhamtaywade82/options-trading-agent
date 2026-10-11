@@ -64,7 +64,16 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
         applied += 1;
         break;
       case 'daily_loss_breach':
-        book.activateKillSwitch('daily loss limit breached earlier today');
+        book.recordDailyLossBreach('daily loss limit breached earlier today');
+        applied += 1;
+        break;
+      // Replayed in journal order, so a clear that followed a breach clears it here too, as it did at runtime.
+      case 'operator_entry_block':
+        book.activateKillSwitch(typeof event.reason === 'string' ? event.reason : 'operator entry block (restored)');
+        applied += 1;
+        break;
+      case 'operator_entry_clear':
+        book.clearKillSwitch();
         applied += 1;
         break;
       default:

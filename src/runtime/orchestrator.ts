@@ -57,6 +57,8 @@ export class Orchestrator {
   private unsubscribeEvents: (() => void) | undefined;
   private brokerKillPending: string | undefined;
   private started = false;
+  private stopRequested = false;
+  private starting: Promise<void> | undefined;
   private phase: CockpitSnapshot['phase'] = 'IDLE';
   private phaseDetail: string | undefined;
 
@@ -85,10 +87,17 @@ export class Orchestrator {
   /** Starts the agent. A failed start is recorded in the snapshot so the cockpit can show why. */
   async start(): Promise<void> {
     this.phase = 'STARTING';
+    this.starting = this.startInternal();
     try {
-      await this.startInternal();
-      this.phase = 'RUNNING';
+      await this.starting;
+      if (!this.stopRequested) {
+        this.phase = 'RUNNING';
+      }
     } catch (error) {
+      if (this.stopRequested) {
+        // stop() was called mid-start and owns the teardown and the final phase.
+        return;
+      }
       this.phase = 'FAILED';
       this.phaseDetail = error instanceof Error ? error.message : String(error);
       this.services.logger.error('start failed', { reason: this.phaseDetail });
@@ -113,6 +122,7 @@ export class Orchestrator {
     const from = shiftDateKey(today, -(this.config.strategy.warmupDays * 2 + 2));
     const barMs = this.config.strategy.barMinutes * 60_000;
     for (const spec of this.specs) {
+      this.assertNotStopping();
       const history = await this.services.market.intradayCandles(spec.spot, this.config.strategy.barMinutes, from, today);
       assertWarmupClock(history[history.length - 1], this.now(), this.config.strategy.barMinutes);
       // The newest warmup bar may still be forming on the exchange; only fully closed bars are seeded.
@@ -121,12 +131,20 @@ export class Orchestrator {
       this.services.logger.info('warmup loaded', { underlying: spec.symbol, bars: complete.length });
     }
 
+    // Each step that arms I/O or a timer is preceded by a stop check, so a stop during warmup
+    // leaves nothing running. The feed check comes after its await, for the same reason.
+    this.assertNotStopping();
     this.unsubscribeTicks = this.services.feed.onTick((tick) => this.route(tick));
     this.unsubscribeEvents = this.services.execution.onEvent((event) => {
       this.agents.get(event.underlying)?.onExecutionEvent(event);
     });
     this.services.execution.start?.();
     await this.services.feed.start();
+    if (this.stopRequested) {
+      // stop() may already have torn the feed down while this connect was in flight. Tear it down again.
+      this.services.feed.stop();
+      throw new Error('stop requested while the agent was starting');
+    }
     this.services.feed.subscribe(this.specs.map((spec) => spec.spot));
 
     this.timer = setInterval(() => this.onClock(), this.services.clockIntervalMs ?? DEFAULT_CLOCK_INTERVAL_MS);
@@ -139,7 +157,9 @@ export class Orchestrator {
 
   /** Stops new entries, flattens through the normal exit path, then waits (bounded) for flat before closing I/O. */
   async stop(): Promise<void> {
+    this.stopRequested = true;
     this.phase = 'STOPPING';
+    await this.settleStart();
     if (this.timer !== undefined) {
       clearInterval(this.timer);
       this.timer = undefined;
@@ -151,6 +171,12 @@ export class Orchestrator {
     const flat = await this.waitUntil(
       () => [...this.agents.values()].every((agent) => agent.isFlat()),
       this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+      // A rejected exit is retried on each poll, within its backoff, so a quiet option feed cannot stall shutdown.
+      () => {
+        for (const agent of this.agents.values()) {
+          agent.retryExit();
+        }
+      },
     );
     if (!flat) {
       this.services.logger.error('shutdown timed out with open positions; live brackets remain at the broker', {});
@@ -220,7 +246,11 @@ export class Orchestrator {
   toggleEntryBlock(): string {
     const day = this.book.snapshot();
     if (day.killSwitchReason === undefined) {
-      this.book.activateKillSwitch(`operator entry block (${new Date(this.now()).toISOString()})`);
+      const reason = `operator entry block (${new Date(this.now()).toISOString()})`;
+      this.book.activateKillSwitch(reason);
+      // Journaled so a restart keeps the block. It is not in the broker kill switch, which does not
+      // apply to an operator block.
+      this.services.events.record('operator_entry_block', { reason });
       this.services.logger.warn('operator blocked new entries');
       return 'new entries blocked; press k again to clear';
     }
@@ -232,6 +262,7 @@ export class Orchestrator {
       return 'cannot clear: the daily loss limit is breached for today';
     }
     this.book.clearKillSwitch();
+    this.services.events.record('operator_entry_clear', {});
     this.services.logger.warn('operator cleared the entry block');
     return 'entry block cleared; new entries may resume';
   }
@@ -293,11 +324,13 @@ export class Orchestrator {
 
   private enforceDailyLoss(): void {
     const snapshot = this.book.snapshot();
-    if (snapshot.dayPnlInr > -this.dailyLossLimitInr || snapshot.killSwitchReason !== undefined) {
+    // Keyed on the breach latch, not the kill switch. An operator block may already hold the switch,
+    // and that must not stop the breach being journaled or the broker switch being armed.
+    if (snapshot.dayPnlInr > -this.dailyLossLimitInr || snapshot.dailyLossBreach !== undefined) {
       return;
     }
     const reason = `daily loss ${snapshot.dayPnlInr.toFixed(2)} breached -${this.dailyLossLimitInr.toFixed(2)}`;
-    this.book.activateKillSwitch(reason);
+    this.book.recordDailyLossBreach(reason);
     this.services.logger.error('daily loss limit breached; flattening', { reason });
     this.services.events.record('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
     this.brokerKillPending = reason;
@@ -337,12 +370,39 @@ export class Orchestrator {
     });
   }
 
-  private async waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  private assertNotStopping(): void {
+    if (this.stopRequested) {
+      throw new Error('stop requested while the agent was starting');
+    }
+  }
+
+  /**
+   * Waits for an in-flight start so teardown never runs under it. The wait is bounded by the shutdown
+   * timeout: a hung connect must not make the operator's stop hang with it.
+   */
+  private async settleStart(): Promise<void> {
+    if (this.starting === undefined) {
+      return;
+    }
+    // Not unref'd: shutdown must still complete if nothing else is holding the process open.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    });
+    const outcome = await Promise.race([this.starting.then(() => 'settled' as const, () => 'settled' as const), timeout]);
+    clearTimeout(timer);
+    if (outcome === 'timeout') {
+      this.services.logger.warn('start still in progress at stop; continuing shutdown', {});
+    }
+  }
+
+  private async waitUntil(predicate: () => boolean, timeoutMs: number, onPoll: () => void = () => undefined): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
       if (Date.now() >= deadline) {
         return false;
       }
+      onPoll();
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
     }
     return true;

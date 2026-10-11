@@ -65,3 +65,46 @@ describe('restoreDayBook', () => {
     assert.equal(restoreDayBook(book, ['', '   '], SESSION_DAY).eventsApplied, 0);
   });
 });
+
+describe('restoreDayBook operator actions', () => {
+  it('restores an operator entry block after a restart, and a journalled clear lifts it', () => {
+    const blockedBook = new DayBook(Date.parse(T('10:00')), 0);
+    restoreDayBook(blockedBook, [line(T('10:20'), 'operator_entry_block', { reason: 'operator entry block (10:20)' })], SESSION_DAY);
+    assert.equal(blockedBook.snapshot().killSwitchReason, 'operator entry block (10:20)');
+
+    const clearedBook = new DayBook(Date.parse(T('10:00')), 0);
+    restoreDayBook(
+      clearedBook,
+      [line(T('10:20'), 'operator_entry_block', { reason: 'operator entry block (10:20)' }), line(T('10:30'), 'operator_entry_clear')],
+      SESSION_DAY,
+    );
+    assert.equal(clearedBook.snapshot().killSwitchReason, undefined);
+  });
+
+  it('restores a daily-loss breach as a latch, and a clear that followed it is replayed in order', () => {
+    const breached = new DayBook(Date.parse(T('10:00')), 0);
+    restoreDayBook(breached, [line(T('11:00'), 'daily_loss_breach', { dayPnlInr: -2100, limitInr: 2000 })], SESSION_DAY);
+    assert.match(breached.snapshot().dailyLossBreach ?? '', /daily loss/);
+    assert.match(breached.snapshot().killSwitchReason ?? '', /daily loss/);
+
+    const cleared = new DayBook(Date.parse(T('10:00')), 0);
+    restoreDayBook(
+      cleared,
+      [line(T('11:00'), 'daily_loss_breach', { dayPnlInr: -2100, limitInr: 2000 }), line(T('11:40'), 'operator_entry_clear')],
+      SESSION_DAY,
+    );
+    assert.equal(cleared.snapshot().dailyLossBreach, undefined, 'a clear after the breach must not re-latch on restart');
+    assert.equal(cleared.snapshot().killSwitchReason, undefined);
+  });
+});
+
+describe('DayBook breach latch', () => {
+  it('latches a breach while keeping an operator reason that already holds the kill switch', () => {
+    const book = new DayBook(Date.parse(T('10:00')), 0);
+    book.activateKillSwitch('operator entry block (10:05)');
+    book.recordDailyLossBreach('daily loss -2100.00 breached -2000.00');
+    const snapshot = book.snapshot();
+    assert.equal(snapshot.killSwitchReason, 'operator entry block (10:05)');
+    assert.equal(snapshot.dailyLossBreach, 'daily loss -2100.00 breached -2000.00');
+  });
+});

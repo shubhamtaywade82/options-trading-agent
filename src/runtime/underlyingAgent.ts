@@ -120,8 +120,9 @@ export class UnderlyingAgent {
     return this.haltReason;
   }
 
+  /** No position, no pending order, and no entry still being prepared, since that one could yet be submitted. */
   isFlat(): boolean {
-    return this.position === undefined && this.pending === undefined;
+    return this.position === undefined && this.pending === undefined && this.fsm.state !== 'SIGNAL_DETECTED';
   }
 
   /** Warmup history. Bars are upserted, so a bar that also arrives live is not duplicated. */
@@ -175,6 +176,17 @@ export class UnderlyingAgent {
 
   drain(): Promise<void> {
     return this.queue.drain();
+  }
+
+  /**
+   * Re-runs the exit check without a market event. Shutdown uses it, since a rejected exit would
+   * otherwise wait for an option tick that may never come. The rejection backoff still applies.
+   */
+  retryExit(): void {
+    if (this.position === undefined || this.fsm.state !== 'RISK_MANAGEMENT_ACTIVE' || this.now() < this.exitRetryAfterMs) {
+      return;
+    }
+    this.queue.run(() => this.checkExits(false));
   }
 
   /**
@@ -265,6 +277,14 @@ export class UnderlyingAgent {
     } catch (error) {
       prepared = { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
     }
+    // Checked after the awaits and again right before submission. An operator block, a halt, a breach
+    // or a stop can land during market data or the advisor, and nothing downstream rechecks.
+    if (prepared.ok) {
+      const blocked = this.entryBlockReason();
+      if (blocked !== undefined) {
+        prepared = { ok: false, code: 'ENTRY_BLOCKED', detail: blocked };
+      }
+    }
     if (!prepared.ok) {
       this.lastDrop = { code: prepared.code, detail: prepared.detail, at: this.now() };
       this.fsm.dispatch('SIGNAL_DROPPED');
@@ -299,6 +319,17 @@ export class UnderlyingAgent {
     } catch (error) {
       this.halt(`entry submission threw: ${describe(error)}`, 'ENTRY_UNCONFIRMED');
     }
+  }
+
+  /** Why a new entry must not be submitted right now, or undefined when none applies. */
+  private entryBlockReason(): string | undefined {
+    if (this.shuttingDown) {
+      return 'shutdown requested';
+    }
+    if (this.haltReason !== undefined) {
+      return `halted: ${this.haltReason}`;
+    }
+    return this.deps.book.snapshot().killSwitchReason;
   }
 
   /** Builds and validates one entry from a signal. Every rejection carries a stable code. */
@@ -649,7 +680,9 @@ export class UnderlyingAgent {
   }
 
   private exitReason(position: OpenPosition, now: number, shutdown: boolean): ExitReason | undefined {
-    if (shutdown) {
+    // Keyed on the flag as well as the argument: a rejected shutdown exit is retried through the
+    // ordinary tick path, and that retry must still be a shutdown exit.
+    if (shutdown || this.shuttingDown) {
       return 'SHUTDOWN';
     }
     if (this.manualExit) {

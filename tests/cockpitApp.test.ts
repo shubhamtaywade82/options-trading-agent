@@ -4,7 +4,7 @@ import { after, describe, it } from 'node:test';
 import { createElement } from 'react';
 import { render, type Instance } from 'ink';
 import type { Runtime } from '../src/runtime/createRuntime.js';
-import App from '../src/ui/App.js';
+import App, { isConfirmation } from '../src/ui/App.js';
 import { fakeRuntime } from './support/fakeRuntime.js';
 
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, '');
@@ -129,5 +129,25 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
       assert.match(stdout.text, /Terminal too small for the operator cockpit/);
       assert.doesNotMatch(stdout.text, /NSE INDEX OPTIONS/);
     });
+  });
+});
+
+describe('isConfirmation', () => {
+  const open = { action: 'stop' as const, symbol: undefined, expiresAt: 10_000 };
+
+  it('confirms the same action on the same target inside the window', () => {
+    assert.equal(isConfirmation(open, 'stop', undefined, 9_999), true);
+  });
+
+  it('does not confirm once the window has closed, even if the render still shows it armed', () => {
+    assert.equal(isConfirmation(open, 'stop', undefined, 10_000), false);
+    assert.equal(isConfirmation(open, 'stop', undefined, 10_400), false);
+  });
+
+  it('does not confirm a different action or a different underlying', () => {
+    const close = { action: 'close' as const, symbol: 'NIFTY', expiresAt: 10_000 };
+    assert.equal(isConfirmation(close, 'close', 'SENSEX', 9_000), false);
+    assert.equal(isConfirmation(close, 'block', undefined, 9_000), false);
+    assert.equal(isConfirmation(undefined, 'stop', undefined, 9_000), false);
   });
 });

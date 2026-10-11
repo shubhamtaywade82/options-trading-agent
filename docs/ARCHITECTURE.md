@@ -94,7 +94,12 @@ Two states the diagram does not show are legal and matter in operation:
 | Broker shows position that was closed by bracket | reconciliation (`netQty = 0`) | PROTECTIVE_EXIT_FILLED with reason EXTERNAL. P&L recorded. |
 | Broker shows net short | reconciliation or exit guard | BROKER_MISMATCH → HALTED → broker kill switch. |
 | Gap through the stop (paper) | `onOptionTick` with `ltp ≤ stop` | Fill at the LTP, not at the stop. Daily-loss check may trip. |
-| Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. |
+| Daily loss breached | `enforceDailyLoss` on the clock | Book kill switch. Agents flatten with DAILY_LOSS. Broker kill switch once flat. The breach is latched separately, so it is still recorded and armed when an operator block already holds the switch. |
+| Operator block, halt, breach or stop during market data or advisor review | `entryBlockReason` before `ENTRY_SUBMITTED` | Signal dropped with `ENTRY_BLOCKED`. Nothing is submitted. |
+| Stop while a signal is being prepared | `isFlat()` is false in `SIGNAL_DETECTED` | Stop waits for the signal to settle. It is then dropped, so no entry can fill after the stop reports flat. |
+| Shutdown exit rejected by the venue | `onExitRejected` during shutdown | Retried on option ticks and on each shutdown poll, within the 10 s backoff, until flat or the shutdown timeout. |
+| Stop during start | `stopRequested` checkpoints in `startInternal` | The start arms no feed, subscription or clock. Stop waits for an in-flight start, bounded by the shutdown timeout. |
+| Operator entry block or clear | `operator_entry_block` / `operator_entry_clear` journal events | Replayed in order on restart, so a block survives a restart and a clear is not undone by replay. |
 | Process restart with open broker position | `brokerOpenOptionCount` at start | Refuses to start. Operator reconciles. |
 | Dhan login rejected (wrong PIN, wrong or stale TOTP) | `AuthenticationError` from `createDhanClient` | Startup stops and prints the broker reason. Nothing is traded. |
 | Login returns no usable expiry, or an already-expired token | `assertUsableToken` at startup | Startup refused. Without an expiry the SDK would log in again on every request. |

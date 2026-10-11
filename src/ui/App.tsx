@@ -15,6 +15,14 @@ interface Pending {
   readonly expiresAt: number;
 }
 
+/**
+ * True when `pending` is the same action on the same target and its window is still open at `now`.
+ * Callers pass the press time, because a render can be up to a timer tick old.
+ */
+export function isConfirmation(pending: Pending | undefined, action: Action, symbol: string | undefined, now: number): boolean {
+  return pending !== undefined && pending.expiresAt > now && pending.action === action && pending.symbol === symbol;
+}
+
 function confirmPrompt(pending: Pending): string {
   switch (pending.action) {
     case 'close':
@@ -87,7 +95,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
 
   const request = (action: Action, symbol: string | undefined): void => {
     const now = Date.now();
-    if (armed !== undefined && armed.action === action && armed.symbol === symbol) {
+    if (isConfirmation(pending, action, symbol, now)) {
       setPending(undefined);
       execute(action, symbol);
       return;
