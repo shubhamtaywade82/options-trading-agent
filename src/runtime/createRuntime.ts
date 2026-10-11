@@ -100,6 +100,9 @@ async function compose(
   const feed = new DhanFeed(dataClient, { istShiftedTimestamps: config.feed.istShiftedTimestamps, now });
 
   const paperExchange = config.mode === 'paper' && config.paper.backend === 'exchange' ? buildPaperExchangeClient(config) : undefined;
+  if (paperExchange !== undefined) {
+    await assertInrAccount(paperExchange);
+  }
   const venue = config.mode === 'paper' && config.paper.backend === 'postgres' ? await openPaperVenue(config, session, logger, now) : undefined;
   const gateway = buildGateway(config, dataClient, paperExchange, logger, now);
 
@@ -231,6 +234,20 @@ function buildPaperExchangeClient(config: AgentConfig): PaperExchangeClient {
     throw new Error('PAPER_BACKEND=exchange without a paper_exchange configuration');
   }
   return new PaperExchangeClient({ baseUrl: exchange.url, apiKey: exchange.apiKey, accountId: exchange.accountId, timeoutMs: 5_000 });
+}
+
+/**
+ * Refuses to start against a paper_exchange account that is not INR. Indian option premiums are rupee amounts, so the
+ * server would reject every order with CURRENCY_MISMATCH and the agent would halt on its first signal.
+ */
+async function assertInrAccount(client: PaperExchangeClient): Promise<void> {
+  const { currency } = await client.account();
+  if (currency !== 'INR') {
+    throw new Error(
+      `paper_exchange account is ${currency || 'of unknown currency'}; Indian options need an INR account. ` +
+        'Create the account with currency INR on the paper_exchange server, or choose another account with PAPER_EXCHANGE_ACCOUNT_ID',
+    );
+  }
 }
 
 /**

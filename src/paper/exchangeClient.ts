@@ -56,14 +56,22 @@ export class PaperExchangeClient {
     this.fetchImpl = options.fetch ?? fetch;
   }
 
-  /** Available balance for the account. The entry sizing and the funds check read this. */
-  async availableBalance(): Promise<number> {
-    const body = await this.request('GET', '/api/account');
-    const value = Number(asRecord(body)['available_balance']);
+  /**
+   * The account's currency and available balance. The server keeps each account in one currency, and Indian
+   * instruments settle in INR, so the caller checks the currency before trading.
+   */
+  async account(): Promise<{ currency: string; availableBalance: number }> {
+    const record = asRecord(await this.request('GET', '/api/account'));
+    const value = Number(record['available_balance']);
     if (!Number.isFinite(value)) {
       throw new PaperExchangeError('paper_exchange account has no usable available_balance', 'UNCONFIRMED', undefined);
     }
-    return value;
+    return { currency: String(record['currency'] ?? ''), availableBalance: value };
+  }
+
+  /** Available balance for the account. The entry sizing and the funds check read this. */
+  async availableBalance(): Promise<number> {
+    return (await this.account()).availableBalance;
   }
 
   async positions(): Promise<PaperPosition[]> {
@@ -151,9 +159,13 @@ export class PaperExchangeClient {
   }
 }
 
-/** A 4xx that proves the server did not act. 408 (timeout) and 429 (rate limit) can happen after acting, so they are ambiguous. */
+/**
+ * A 4xx that proves the server did not act. Three are not refusals of an order. 408 and 429 can happen after the server
+ * acted. 401 and 403 mean the API key or account is wrong, so every order would fail the same way; those must stop the
+ * agent, not turn into a stream of rejected entries.
+ */
 function isDefinitiveRefusal(status: number): boolean {
-  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+  return status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status);
 }
 
 function parseOrder(body: unknown): PaperOrder {

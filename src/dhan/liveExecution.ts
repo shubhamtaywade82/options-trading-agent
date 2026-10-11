@@ -9,6 +9,7 @@ import {
 import type { InstrumentRef, Tick } from '../domain/types.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { Logger } from '../ops/logger.js';
+import { fitsBrokerLimit } from '../execution/brokerIds.js';
 
 export type LiveClient = Pick<DhanClient, 'orders' | 'superOrders' | 'positions' | 'traderControls'> & {
   readonly ws: Pick<DhanClient['ws'], 'orders'>;
@@ -123,6 +124,10 @@ export class LiveExecutionPort implements ExecutionPort {
 
   async submitEntry(order: EntryOrder): Promise<void> {
     const cid = order.correlationId;
+    if (!fitsBrokerLimit(cid)) {
+      this.emit({ kind: 'ENTRY_REJECTED', correlationId: cid, underlying: order.underlying, reason: `correlation id of ${cid.length} characters exceeds the broker limit; not sent` });
+      return;
+    }
     const waiter = this.tracker.waitFor(cid, { timeoutMs: this.options.orderTimeoutMs });
     waiter.catch(() => undefined);
 
@@ -158,6 +163,16 @@ export class LiveExecutionPort implements ExecutionPort {
   }
 
   async submitExit(order: ExitOrder): Promise<void> {
+    if (!fitsBrokerLimit(order.correlationId)) {
+      this.emit({
+        kind: 'EXIT_REJECTED',
+        correlationId: order.correlationId,
+        underlying: order.underlying,
+        positionId: order.positionId,
+        reason: `correlation id of ${order.correlationId.length} characters exceeds the broker limit; not sent`,
+      });
+      return;
+    }
     const tracked = this.tracked.get(order.positionId);
     if (tracked === undefined) {
       this.emit({

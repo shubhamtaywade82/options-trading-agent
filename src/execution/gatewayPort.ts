@@ -1,5 +1,6 @@
 import type { ExitReason, Tick } from '../domain/types.js';
 import type { Logger } from '../ops/logger.js';
+import { correlationIdFor, fitsBrokerLimit } from './brokerIds.js';
 import type { GatewayOrder, GatewayOutcome, OrderGateway } from './orderGateway.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
 
@@ -39,6 +40,7 @@ export class GatewayExecutionPort implements ExecutionPort {
   private readonly listeners = new Set<ExecutionListener>();
   private readonly positions = new Map<string, OpenPosition>();
   private readonly now: () => number;
+  private protectiveSequence = 0;
 
   constructor(
     private readonly gateway: OrderGateway,
@@ -202,8 +204,9 @@ export class GatewayExecutionPort implements ExecutionPort {
   }
 
   private async protectiveExit(position: OpenPosition, reason: ExitReason, reference: number, at: number): Promise<void> {
+    this.protectiveSequence += 1;
     const outcome = await this.send({
-      correlationId: `${position.positionId}:${reason}`,
+      correlationId: correlationIdFor('P', at, this.protectiveSequence),
       side: 'SELL',
       contract: position.contract,
       quantity: position.quantity,
@@ -234,6 +237,10 @@ export class GatewayExecutionPort implements ExecutionPort {
 
   /** Sends one order. A gateway that throws is treated as UNCONFIRMED, so the agent halts instead of retrying. */
   private async send(order: GatewayOrder): Promise<GatewayOutcome> {
+    // An id over the broker's limit is refused here, before any request, so it can never reach a venue.
+    if (!fitsBrokerLimit(order.correlationId)) {
+      return { kind: 'REJECTED', reason: `correlation id of ${order.correlationId.length} characters exceeds the broker limit; not sent` };
+    }
     try {
       return await this.gateway.place(order);
     } catch (error) {

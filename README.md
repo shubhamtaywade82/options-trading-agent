@@ -40,6 +40,23 @@ Live trading needs `MODE=live` **and** `LIVE_TRADING_ACK=I_ACCEPT_LIVE_ORDER_RIS
 both, the process exits before opening a socket. `npm run dev:sandbox` starts sandbox mode.
 Each mode holds its own trading lease, keyed `mode:clientId`, so a paper run never blocks a live run.
 
+### Running paper against paper_exchange
+
+`PAPER_BACKEND=exchange` sends paper orders to a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server, which keeps the account, margin and ledger. Set `PAPER_EXCHANGE_URL` (https, or http on loopback), `PAPER_EXCHANGE_API_KEY` and optionally `PAPER_EXCHANGE_ACCOUNT_ID`.
+
+The account must be INR. The server's reset endpoint creates USD accounts, so after a reset set the currency to INR on the server. The agent refuses to start otherwise.
+
+To run the end-to-end suite against a server (it places real paper orders on that account and leaves no position open):
+
+```bash
+PAPER_EXCHANGE_E2E_URL=http://127.0.0.1:3100 \
+PAPER_EXCHANGE_E2E_API_KEY=... \
+PAPER_EXCHANGE_E2E_ACCOUNT=<inr-account-id> \
+npx tsx --test tests/paperExchange.e2e.test.ts
+```
+
+Without those variables the suite is skipped.
+
 Node 22 or newer is required.
 
 ## Architecture

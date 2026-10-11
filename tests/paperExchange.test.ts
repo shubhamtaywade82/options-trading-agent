@@ -120,6 +120,30 @@ describe('PaperExchangeGateway', () => {
     assert.deepEqual(outcome, { kind: 'FILLED', filledQuantity: 50, averagePrice: 100 });
   });
 
+  it('nets charges into the fill, so the agent P&L matches the server wallet', async () => {
+    const buy = fakeFetch([
+      { status: 201, body: order(7, 'filled', 75) },
+      { status: 200, body: { data: [{ event_type: 'TRADE', payload: { order_id: 7, quantity: 75, price: 100, charges: { total: 30 } } }], next_cursor: null } },
+    ]);
+    assert.deepEqual(await new PaperExchangeGateway(client(buy.fetch), { logger: SILENT }).place(ORDER), {
+      kind: 'FILLED',
+      filledQuantity: 75,
+      averagePrice: (7500 + 30) / 75,
+    });
+    const sell = fakeFetch([
+      { status: 201, body: order(8, 'filled', 75) },
+      { status: 200, body: { data: [{ event_type: 'TRADE', payload: { order_id: 8, quantity: 75, price: 120, charges: { total: 30 } } }], next_cursor: null } },
+    ]);
+    const outcome = await new PaperExchangeGateway(client(sell.fetch), { logger: SILENT }).place({ ...ORDER, side: 'SELL', correlationId: 'EXT-1', referencePrice: 120, reason: 'MANUAL' });
+    assert.deepEqual(outcome, { kind: 'FILLED', filledQuantity: 75, averagePrice: (9000 - 30) / 75 });
+  });
+
+  it('treats an API key refusal as unconfirmed, so a bad key halts the agent rather than rejecting every entry', async () => {
+    const { fetch: impl } = fakeFetch([{ status: 401, body: { error: 'unauthorized' } }]);
+    const outcome = await new PaperExchangeGateway(client(impl), { logger: SILENT }).place(ORDER);
+    assert.equal(outcome.kind, 'UNCONFIRMED');
+  });
+
   it('is unconfirmed when the server says filled but the trade is not in the ledger', async () => {
     const responses = Array.from({ length: 20 }, () => ({ status: 200, body: { data: [], next_cursor: 'more' } }));
     const { fetch: impl } = fakeFetch([{ status: 201, body: order(7, 'filled', 75) }, ...responses]);

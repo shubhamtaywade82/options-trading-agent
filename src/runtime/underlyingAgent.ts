@@ -1,4 +1,5 @@
 import type { AgentConfig } from '../config.js';
+import { correlationIdFor } from '../execution/brokerIds.js';
 import { TradeStateMachine, type TradeEvent, type TradeState } from '../domain/fsm.js';
 import {
   instrumentKey,
@@ -89,6 +90,8 @@ export class UnderlyingAgent {
   private shuttingDown = false;
   private manualExit = false;
   private sequence = 0;
+  /** Counts agent exits, so a retried exit in the same millisecond still gets its own id. */
+  private exitSequence = 0;
   private lastSpot: { price: number; receivedAt: number } | undefined;
   private lastSignal: SignalView | undefined;
   private lastDrop: DropView | undefined;
@@ -522,7 +525,7 @@ export class UnderlyingAgent {
     }
 
     this.sequence += 1;
-    const correlationId = `ENT-${this.symbol}-${now.toString(36)}-${this.sequence}`;
+    const correlationId = correlationIdFor('E', now, this.sequence);
     return {
       ok: true,
       snapshot: entrySnapshot,
@@ -711,7 +714,7 @@ export class UnderlyingAgent {
 
     const order: ExitOrder = {
       side: 'SELL',
-      correlationId: `EXT-${position.positionId}-${now.toString(36)}`,
+      correlationId: correlationIdFor('X', now, this.exitSequence += 1),
       underlying: this.symbol,
       positionId: position.positionId,
       contract: position.contract,

@@ -78,7 +78,11 @@ export class PaperExchangeGateway implements OrderGateway {
     return { kind: 'REJECTED', reason: `paper_exchange order ${placed.status}` };
   }
 
-  /** The fill price and quantity from this order's TRADE ledger entries. Unconfirmed when no trade is found. */
+  /**
+   * The fill from this order's TRADE ledger entries, with charges netted in. The server debits a buy by premium plus
+   * charges and credits a sell by premium less charges. The average price carries the same net, so the agent's P&L
+   * equals the wallet's change. Unconfirmed when no trade is found.
+   */
   private async fillOutcome(orderId: number, order: GatewayOrder): Promise<GatewayOutcome> {
     const trades = await this.tradesFor(orderId);
     const filled = trades.reduce((sum, trade) => sum + trade.quantity, 0);
@@ -86,17 +90,23 @@ export class PaperExchangeGateway implements OrderGateway {
       return { kind: 'UNCONFIRMED', reason: `paper_exchange reports order ${orderId} filled but no TRADE entry was found` };
     }
     const notional = trades.reduce((sum, trade) => sum + trade.quantity * trade.price, 0);
-    return { kind: 'FILLED', filledQuantity: filled, averagePrice: notional / filled };
+    const charges = trades.reduce((sum, trade) => sum + trade.charges, 0);
+    const net = order.side === 'BUY' ? notional + charges : notional - charges;
+    return { kind: 'FILLED', filledQuantity: filled, averagePrice: net / filled };
   }
 
-  private async tradesFor(orderId: number): Promise<Array<{ quantity: number; price: number }>> {
-    const found: Array<{ quantity: number; price: number }> = [];
+  private async tradesFor(orderId: number): Promise<Array<{ quantity: number; price: number; charges: number }>> {
+    const found: Array<{ quantity: number; price: number; charges: number }> = [];
     let cursor: string | undefined;
     for (let page = 0; page < LEDGER_PAGES; page += 1) {
       const { entries, nextCursor } = await this.client.ledgerPage(cursor);
       for (const entry of entries) {
         if (entry.eventType === 'TRADE' && Number(entry.payload['order_id']) === orderId) {
-          found.push({ quantity: Number(entry.payload['quantity']), price: Number(entry.payload['price']) });
+          found.push({
+            quantity: Number(entry.payload['quantity']),
+            price: Number(entry.payload['price']),
+            charges: chargesOf(entry.payload['charges']),
+          });
         }
       }
       if (found.length > 0 || nextCursor === undefined) {
@@ -121,4 +131,13 @@ export class PaperExchangeGateway implements OrderGateway {
   async openPositionCount(): Promise<number> {
     return (await this.client.positions()).filter((position) => position.netQuantity !== 0).length;
   }
+}
+
+/** Total charges on a TRADE entry. The server stores them as a hash that includes `total`; a missing hash counts as none. */
+function chargesOf(value: unknown): number {
+  if (value === null || typeof value !== 'object') {
+    return 0;
+  }
+  const total = Number((value as Record<string, unknown>)['total'] ?? 0);
+  return Number.isFinite(total) && total > 0 ? total : 0;
 }

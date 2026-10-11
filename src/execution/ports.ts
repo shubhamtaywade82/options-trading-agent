@@ -4,7 +4,7 @@ import type { ExitReason, OptionContract, Tick } from '../domain/types.js';
 /** Entry is always a BUY of a long option. There is deliberately no SELL-to-open shape. */
 export interface EntryOrder {
   readonly side: 'BUY';
-  /** Unique per attempt, at most 128 characters. Doubles as the position id. */
+  /** Unique per attempt, at most 30 characters (the broker's limit). Doubles as the position id. */
   readonly correlationId: string;
   readonly underlying: string;
   readonly contract: OptionContract;

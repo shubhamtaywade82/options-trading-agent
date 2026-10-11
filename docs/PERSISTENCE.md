@@ -63,6 +63,12 @@ Dhan's sandbox serves no super orders and no WebSocket, and paper_exchange has n
 - `DhanSandboxGateway` places a regular INTRADAY MARKET order and polls `orders.getById` until it settles, using the SDK's typed `filledQty` and `averageTradedPrice`. A still-working order is cancelled at the deadline. A fill with no average price is unconfirmed.
 - `PaperExchangeGateway` sends a market order with `execution_price` set to the agent's premium and `reduce_only` on sells. The server fills it inside the POST. The fill price is read from the order's TRADE ledger entry, because the order response has none. An order not filled at once is cancelled.
 
+Every order id sent to a venue is at most 30 characters (`src/execution/brokerIds.ts`). That is the limit in Dhan's own OpenAPI for `OrderRequest` and `SuperOrderRequest`. Ids are one letter, the time in base36, and a counter. The port refuses any longer id before it sends anything. Before this limit was enforced, agent exit ids were about 33 characters, so live and sandbox exits would have been refused.
+
+Fills differ by venue. paper_exchange fills are net of its charges: a buy is premium plus charges, and a sell is premium less charges. The agent's P&L then matches the server's wallet. Dhan fills are gross, as the venue reports them, so the day book does not deduct brokerage or taxes on live or sandbox trades. That is recorded under Open items.
+
+On startup the paper_exchange account must be INR. The agent refuses to start otherwise, because Indian option premiums are rupee amounts. A 401 or 403 from paper_exchange is UNCONFIRMED, so a wrong key halts the agent rather than rejecting every entry.
+
 The agent's own stop is the difference from live. If the process dies with a position open on these venues, nothing stops it out until the next start. Live does not have this gap, because its legs are held by the exchange.
 
 ## Trading lease and fencing
@@ -149,6 +155,11 @@ These are known gaps. Each one is a stated requirement, not a shipped guarantee.
 0a. **Restart with open paper or sandbox positions.** The agent cannot yet re-adopt an open position into its state machine. Restart with an open paper position is refused until it is closed. Adoption needs an `UnderlyingAgent` restore path, which does not exist for live either.
 0b. **Sandbox stops are agent-side.** Sandbox fills are polled, not streamed, and stops are sent by the agent (see Gateway venues). A process that dies with a sandbox position open leaves it without a stop.
 0c. **Sandbox base URL.** `DHAN_SANDBOX_BASE_URL` is optional and defaults to the SDK's `sandbox.dhan.co`. When set, it must be https and not `api.dhan.co` or the market-data host.
+0d. **paper_exchange upstream issues** (found by running the server, not by reading it):
+   - `POST /api/account/reset` hard-codes `currency: "USD"`. Indian paper accounts therefore cannot trade until someone sets the currency to INR by hand. The reset should take a currency.
+   - `positions_count` and `GET /api/positions` include closed positions with zero quantity. The agent counts only non-zero rows.
+   - A repeated `client_order_id` returns the existing order, including a rejected one. Retries are safe, but a rejection stays sticky until a new id is used.
+0e. **P&L basis differs by venue.** paper_exchange fills include charges. Dhan fills do not, so live and sandbox day-book P&L is gross of brokerage and taxes.
 
 1. **Synchronous replication.** Live mode assumes PostgreSQL `synchronous_commit = on` with a synchronous standby. Nothing checks this at startup. Until it is enforced, a failover can lose the last committed events, and restore cannot see them.
 2. **TLS.** `validatePostgresUrl` checks scheme and host only. Live use should require `sslmode=verify-full` and `sslrootcert`, and Redis should use `rediss://`. Not enforced yet.
