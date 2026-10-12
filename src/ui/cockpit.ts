@@ -280,7 +280,11 @@ function signalColumn(agent: AgentView | undefined, width: number): string[] {
   }
   lines.push(fit(cyanBold('LAST CANDIDATE'), width));
   if (agent.lastCandidate === undefined) {
-    lines.push(fit(dim('  none passed the risk gate'), width));
+    const hint =
+      agent.lastSignal === undefined
+        ? '  none yet — contract, spread, OI and brackets appear after a signal'
+        : '  none kept — see LAST REJECTION or the event log';
+    lines.push(fit(dim(hint), width));
   } else {
     const c = agent.lastCandidate;
     lines.push(fit(`  ${c.contractSymbol} ${c.expiry}`, width));
