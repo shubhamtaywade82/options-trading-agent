@@ -78,6 +78,10 @@ export default function App({ runtime }: { runtime: Runtime }) {
   const count = snapshot.underlyings.length;
   const index = Math.max(0, Math.min(selected, count - 1));
   const selectedSymbol = snapshot.underlyings[index]?.symbol;
+
+  useEffect(() => {
+    orchestrator.setCockpitFocus(selectedSymbol);
+  }, [orchestrator, selectedSymbol]);
   const armed = pending !== undefined && pending.expiresAt > Date.now() ? pending : undefined;
 
   const stopAndExit = async (): Promise<void> => {

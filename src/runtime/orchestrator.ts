@@ -9,6 +9,7 @@ import { DayBook } from '../risk/dayBook.js';
 import { istParts, shiftDateKey } from '../time/ist.js';
 import { assertWarmupClock } from './clockGuard.js';
 import type { FeedPort, MarketPort } from './ports.js';
+import { CockpitChainWatch } from './cockpitChainWatch.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
 import type { CockpitSnapshot } from './views.js';
 import type { TradingGate } from './tradingGate.js';
@@ -71,6 +72,7 @@ export class Orchestrator {
   private phase: CockpitSnapshot['phase'] = 'IDLE';
   private phaseDetail: string | undefined;
   private readonly viewListeners = new Set<() => void>();
+  private readonly chainWatch: CockpitChainWatch;
 
   constructor(
     private readonly config: AgentConfig,
@@ -84,6 +86,19 @@ export class Orchestrator {
       this.agents.set(spec.symbol, this.createAgent(spec));
       this.spotIndex.set(instrumentKey(spec.spot), spec.symbol);
     }
+    this.chainWatch = new CockpitChainWatch(
+      config,
+      specs,
+      services.market,
+      (symbol, nowMs) => this.agents.get(symbol)?.view(nowMs),
+      this.now,
+      () => this.notifyView(),
+    );
+  }
+
+  /** Drives REST chain polling for the cockpit selection only. */
+  setCockpitFocus(symbol: string | undefined): void {
+    this.chainWatch.setFocus(symbol);
   }
 
   get dayBook(): DayBook {
@@ -239,6 +254,8 @@ export class Orchestrator {
       maxOpenPositions: this.config.capital.maxOpenPositions,
       maxHoldMinutes: this.config.exits.maxHoldMinutes,
       staleMs: this.config.feed.staleMs,
+      contractMaxSpreadPct: this.config.contract.maxSpreadPct,
+      contractMinOpenInterest: this.config.contract.minOpenInterest,
       day: {
         dayKey: day.dayKey,
         realizedPnlInr: day.realizedPnlInr,
@@ -252,6 +269,7 @@ export class Orchestrator {
         const agent = this.agents.get(spec.symbol);
         return agent === undefined ? [] : [agent.view(nowMs)];
       }),
+      chainWatch: this.chainWatch.view(nowMs),
     };
   }
 
@@ -359,6 +377,7 @@ export class Orchestrator {
     for (const agent of this.agents.values()) {
       agent.onClock(now);
     }
+    this.chainWatch.onClock(this.phase);
     this.enforceDailyLoss();
     this.maybeEngageBrokerKillSwitch();
   }

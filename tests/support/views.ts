@@ -41,6 +41,9 @@ export function snapshot(overrides: Partial<CockpitSnapshot> = {}): CockpitSnaps
     maxOpenPositions: 1,
     maxHoldMinutes: 20,
     staleMs: 5_000,
+    contractMaxSpreadPct: 2,
+    contractMinOpenInterest: 100_000,
+    chainWatch: undefined,
     day: {
       dayKey: SESSION_DAY,
       realizedPnlInr: 0,

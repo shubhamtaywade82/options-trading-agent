@@ -15,6 +15,7 @@ import {
 } from '../src/ui/cockpit.js';
 import type { LogRecord } from '../src/ops/logger.js';
 import { istEpoch, SESSION_DAY } from './support/fixtures.js';
+import type { ChainWatchView } from '../src/runtime/views.js';
 import { agentView, snapshot } from './support/views.js';
 
 const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, '');
@@ -40,7 +41,29 @@ const logs: LogRecord[] = [
   { ts: istEpoch(SESSION_DAY, '10:12'), level: 'warn', message: 'entry rejected', data: undefined },
 ];
 
+const sampleChainWatch: ChainWatchView = {
+  symbol: 'NIFTY',
+  spot: 22_461.5,
+  expiry: '2026-10-15',
+  atmStrike: 22_450,
+  bullishEntryStrike: 22_450,
+  bearishEntryStrike: 22_450,
+  fetchedAgeMs: 800,
+  status: 'ready',
+  error: undefined,
+  maxOpenInterest: 500_000,
+  rows: [
+    {
+      strike: 22_450,
+      markers: ['ATM', 'CE_ENTRY', 'PE_ENTRY'],
+      call: { bid: 100, ask: 101, spreadPct: 1, openInterest: 500_000, passesGate: true },
+      put: { bid: 40, ask: 41, spreadPct: 2.4, openInterest: 80_000, passesGate: false },
+    },
+  ],
+};
+
 const rich = snapshot({
+  chainWatch: sampleChainWatch,
   underlyings: [
     agentView({
       symbol: 'NIFTY',
@@ -117,6 +140,8 @@ describe('cockpit layout', () => {
 describe('cockpit content', () => {
   it('shows the selected underlying signal, rejection, candidate and open position', () => {
     const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 0, notice: undefined, logs }).map(plain).join('\n');
+    assert.match(text, /OPTION CHAIN · NIFTY/);
+    assert.match(text, /CE▸/);
     assert.match(text, /SELECTED NIFTY/);
     assert.match(text, /BULLISH at 10:00:00 IST/);
     assert.match(text, /NIFTY 22450 CE 2026-10-15/);
@@ -136,7 +161,7 @@ describe('cockpit content', () => {
     const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 1, notice: undefined, logs }).map(plain).join('\n');
     assert.match(text, /BANKNIFTY HALTED HALT/);
     assert.match(text, /BANKNIFTY HALTED: entry unconfirmed/);
-    assert.match(text, /until the process is restarted after review/);
+    assert.match(text, /until restart after review/);
   });
 
   it('reports the entry state and the kill-switch reason in the header and risk column', () => {
@@ -157,7 +182,7 @@ describe('cockpit content', () => {
     const text = renderOptionsCockpit(failed, { width: 170, height: 48, selected: 0, notice: undefined, logs: [] }).map(plain).join('\n');
     assert.match(text, /FAILED/);
     assert.match(text, /start failed: broker reports 1 open option position/);
-    assert.match(text, /nothing is trading/);
+    assert.match(text, /chain watch pauses until RUNNING/);
     assert.match(text, /no underlying selected/);
   });
 

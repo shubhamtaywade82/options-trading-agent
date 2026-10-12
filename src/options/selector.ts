@@ -63,6 +63,35 @@ export function directionToOptionType(direction: Direction): OptionType {
 
 const EPSILON = 1e-6;
 
+export function nearestAtmStrike(spot: number, strikes: readonly number[]): number | undefined {
+  if (strikes.length === 0) {
+    return undefined;
+  }
+  let atmStrike = strikes[0] as number;
+  for (const strike of strikes) {
+    if (Math.abs(strike - spot) < Math.abs(atmStrike - spot) - EPSILON) {
+      atmStrike = strike;
+    }
+  }
+  return atmStrike;
+}
+
+export function minStrikeStep(strikes: readonly number[]): number | undefined {
+  let strikeStep = Number.POSITIVE_INFINITY;
+  for (let i = 1; i < strikes.length; i += 1) {
+    const gap = (strikes[i] as number) - (strikes[i - 1] as number);
+    if (gap > EPSILON && gap < strikeStep) {
+      strikeStep = gap;
+    }
+  }
+  return Number.isFinite(strikeStep) ? strikeStep : undefined;
+}
+
+export function targetEntryStrike(atmStrike: number, strikeStep: number, direction: Direction, offsetSteps: number): number {
+  const sign = directionToOptionType(direction) === 'CE' ? 1 : -1;
+  return Number((atmStrike + sign * offsetSteps * strikeStep).toFixed(2));
+}
+
 /**
  * Chooses the option to buy for a directional signal: CE for bullish, PE for
  * bearish. Strike = ATM ± offset × step, where the sign follows the option
@@ -76,26 +105,16 @@ export function selectContract(input: SelectionInput): SelectionResult {
     return { ok: false, code: 'CHAIN_EMPTY', detail: `no strikes in chain for ${input.expiry}` };
   }
 
-  let atmStrike = strikes[0] as number;
-  for (const strike of strikes) {
-    if (Math.abs(strike - input.spot) < Math.abs(atmStrike - input.spot) - EPSILON) {
-      atmStrike = strike;
-    }
+  const atmStrike = nearestAtmStrike(input.spot, strikes);
+  if (atmStrike === undefined) {
+    return { ok: false, code: 'CHAIN_EMPTY', detail: `no strikes in chain for ${input.expiry}` };
   }
-
-  let strikeStep = Number.POSITIVE_INFINITY;
-  for (let i = 1; i < strikes.length; i += 1) {
-    const gap = (strikes[i] as number) - (strikes[i - 1] as number);
-    if (gap > EPSILON && gap < strikeStep) {
-      strikeStep = gap;
-    }
-  }
-  if (!Number.isFinite(strikeStep)) {
+  const strikeStep = minStrikeStep(strikes);
+  if (strikeStep === undefined) {
     return { ok: false, code: 'STRIKE_STEP_UNKNOWN', detail: 'chain has fewer than two distinct strikes' };
   }
 
-  const sign = optionType === 'CE' ? 1 : -1;
-  const targetStrike = Number((atmStrike + sign * input.offsetSteps * strikeStep).toFixed(2));
+  const targetStrike = targetEntryStrike(atmStrike, strikeStep, input.direction, input.offsetSteps);
 
   const contract = input.contracts.find(
     (candidate) =>

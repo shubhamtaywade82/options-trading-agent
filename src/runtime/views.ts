@@ -70,6 +70,35 @@ export interface IndicatorView {
   readonly orbFormed: boolean;
 }
 
+export interface ChainWatchLegView {
+  readonly bid: number | undefined;
+  readonly ask: number | undefined;
+  readonly spreadPct: number | undefined;
+  readonly openInterest: number | undefined;
+  readonly passesGate: boolean;
+}
+
+export interface ChainWatchRowView {
+  readonly strike: number;
+  readonly markers: readonly ('ATM' | 'CE_ENTRY' | 'PE_ENTRY' | 'OPEN')[];
+  readonly call: ChainWatchLegView;
+  readonly put: ChainWatchLegView;
+}
+
+export interface ChainWatchView {
+  readonly symbol: string;
+  readonly spot: number | undefined;
+  readonly expiry: string | undefined;
+  readonly atmStrike: number | undefined;
+  readonly bullishEntryStrike: number | undefined;
+  readonly bearishEntryStrike: number | undefined;
+  readonly fetchedAgeMs: number | undefined;
+  readonly status: 'idle' | 'loading' | 'waiting_spot' | 'ready' | 'error';
+  readonly error: string | undefined;
+  readonly rows: readonly ChainWatchRowView[];
+  readonly maxOpenInterest: number;
+}
+
 export interface AgentView {
   readonly symbol: string;
   readonly state: TradeState;
@@ -99,6 +128,8 @@ export interface CockpitSnapshot {
   readonly maxOpenPositions: number;
   readonly maxHoldMinutes: number;
   readonly staleMs: number;
+  readonly contractMaxSpreadPct: number;
+  readonly contractMinOpenInterest: number;
   readonly day: {
     readonly dayKey: string;
     readonly realizedPnlInr: number;
@@ -109,4 +140,6 @@ export interface CockpitSnapshot {
     readonly killSwitchReason: string | undefined;
   };
   readonly underlyings: readonly AgentView[];
+  /** ATM ladder for the cockpit-selected underlying; other underlyings are not fetched. */
+  readonly chainWatch: ChainWatchView | undefined;
 }

@@ -3,6 +3,7 @@ import stringWidth from 'string-width';
 import type { LogRecord } from '../ops/logger.js';
 import type { AgentView, CockpitSnapshot, PositionView } from '../runtime/views.js';
 import { formatMinuteOfDay, IST_OFFSET_MS, istParts } from '../time/ist.js';
+import { CHAIN_PANEL_ROWS, chainWatchLines } from './chainWatchPanel.js';
 
 /**
  * Pure renderer for the operator cockpit. It turns a read-only snapshot into lines of text.
@@ -17,7 +18,7 @@ export const COCKPIT_MIN_COLS = COL_FLOORS.c1 + COL_FLOORS.c2 + COL_FLOORS.c3 + 
 
 const HEADER_ROWS = 3;
 const TABLE_FRAME_ROWS = 4;
-const DETAIL_ROWS = 4;
+const DETAIL_ROWS = CHAIN_PANEL_ROWS;
 const DETAIL_FRAME_ROWS = 4;
 const LOG_FRAME_ROWS = 4;
 const FOOTER_ROWS = 2;
@@ -61,37 +62,8 @@ const red = (text: string) => chalk.red(text);
 const green = (text: string) => chalk.green(text);
 const yellow = (text: string) => chalk.yellow(text);
 
-const graphemes = (text: string): string[] => [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map((part) => part.segment);
-
-/**
- * Fits a line to exactly `width` columns. A line that is too long is cut to plain text with an
- * ellipsis. Measuring every grapheme with string-width keeps the frame edges aligned for symbols
- * such as ◉ and ✖, which the ANSI-aware truncation library measures differently.
- */
-export function fit(text: string, width: number): string {
-  if (width <= 0) {
-    return '';
-  }
-  const visible = stringWidth(text);
-  if (visible === width) {
-    return text;
-  }
-  if (visible < width) {
-    return text + ' '.repeat(width - visible);
-  }
-  const plainText = text.replace(/\x1b\[[0-9;]*m/g, '');
-  let out = '';
-  let used = 0;
-  for (const cell of graphemes(plainText)) {
-    const cellWidth = stringWidth(cell);
-    if (used + cellWidth > width - 1) {
-      break;
-    }
-    out += cell;
-    used += cellWidth;
-  }
-  return out + '…' + ' '.repeat(Math.max(0, width - used - 1));
-}
+export { fit } from './terminalFit.js';
+import { fit } from './terminalFit.js';
 
 /** Splits text into lines no wider than `width`, breaking on spaces; an oversize word is cut. */
 export function wrap(text: string, width: number, maxLines: number): string[] {
@@ -396,30 +368,20 @@ function table(snapshot: CockpitSnapshot, options: CockpitOptions, layout: Cockp
   return out;
 }
 
-function detail(snapshot: CockpitSnapshot, options: CockpitOptions): string[] {
-  const agent = snapshot.underlyings[Math.max(0, Math.min(options.selected, snapshot.underlyings.length - 1))];
+function chainPanel(snapshot: CockpitSnapshot, options: CockpitOptions): string[] {
+  const index = Math.max(0, Math.min(options.selected, snapshot.underlyings.length - 1));
+  const agent = snapshot.underlyings[index];
   const inner = Math.max(10, options.width - 4);
-  const lines: string[] = [];
+  const watch = agent === undefined || snapshot.chainWatch?.symbol !== agent.symbol ? undefined : snapshot.chainWatch;
+  const content = chainWatchLines(watch, agent, inner, snapshot.contractMaxSpreadPct, snapshot.contractMinOpenInterest);
   if (snapshot.phase === 'FAILED') {
-    lines.push(red(`start failed: ${snapshot.phaseDetail ?? 'unknown reason'}`));
-    lines.push(dim('nothing is trading; fix the cause and restart'));
-  } else if (agent === undefined) {
-    lines.push(dim('no underlying configured'));
-  } else if (agent.halted !== undefined) {
-    lines.push(red(`${agent.symbol} HALTED: ${agent.halted}`));
-    lines.push(dim('new entries stay blocked for this underlying until the process is restarted after review'));
-  } else if (agent.lastDrop !== undefined) {
-    lines.push(dim(`${agent.symbol} last rejection: ${agent.lastDrop.code} — ${agent.lastDrop.detail}`));
-  } else if (agent.lastSignal !== undefined) {
-    lines.push(dim(`${agent.symbol} last signal: ${agent.lastSignal.reasons.join(' · ')}`));
-  } else {
-    lines.push(dim(`${agent.symbol}: waiting for an opening-range breakout between entry start and entry end`));
+    content[1] = red(fit(`  start failed: ${snapshot.phaseDetail ?? 'unknown'}`, inner));
+    content[2] = dim(fit('  fix the cause and restart — chain watch pauses until RUNNING', inner));
+  } else if (agent?.halted !== undefined) {
+    content[1] = red(fit(`  ${agent.symbol} HALTED: ${agent.halted}`, inner));
+    content[2] = dim(fit('  new entries stay blocked until restart after review', inner));
   }
-  const wrapped = lines.flatMap((line) => wrap(line, inner, DETAIL_ROWS)).slice(0, DETAIL_ROWS);
-  while (wrapped.length < DETAIL_ROWS) {
-    wrapped.push(fit('', inner));
-  }
-  return boxed('SELECTED DETAIL', wrapped, options.width);
+  return boxed('CHAIN WATCH', content, options.width);
 }
 
 function logLine(record: LogRecord, width: number): string {
@@ -453,7 +415,7 @@ export function renderOptionsCockpit(snapshot: CockpitSnapshot, options: Cockpit
   return [
     ...header(snapshot, width),
     ...table(snapshot, { ...options, width, height }, layout),
-    ...detail(snapshot, { ...options, width, height }),
+    ...chainPanel(snapshot, { ...options, width, height }),
     ...logBox(options.logs, layout.logRows, width),
     ...footer({ ...options, width }),
   ];
