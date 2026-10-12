@@ -1,4 +1,4 @@
-import type { Candle, Signal } from '../domain/types.js';
+import type { Candle, Direction, Signal } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
 import { ema, superTrend } from '../market/indicators.js';
 
@@ -43,12 +43,64 @@ export function sessionRange(
  * Returns undefined rather than a weak signal whenever inputs are insufficient.
  */
 export function evaluateOrbSupertrend(bars: readonly Candle[], params: OrbSupertrendParams): Signal | undefined {
+  const prepared = prepareBreak(bars, params);
+  if (prepared === undefined) {
+    return undefined;
+  }
+  const cross = closeCross(prepared.close, prepared.previousClose, prepared.orbHigh, prepared.orbLow);
+  if (cross === undefined) {
+    return undefined;
+  }
+  const closes = bars.map((bar) => bar.close);
+  const fast = ema(closes, params.emaFast);
+  const slow = ema(closes, params.emaSlow);
+  const trend = superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
+  if (fast === undefined || slow === undefined || trend === undefined || !confluenceAgrees(cross, trend.trend, fast, slow)) {
+    return undefined;
+  }
+  const broken = cross === 'BULLISH' ? prepared.orbHigh : prepared.orbLow;
+  const side = cross === 'BULLISH' ? 'high' : 'low';
+  const emaSign = cross === 'BULLISH' ? '>' : '<';
+  return {
+    underlying: params.underlying,
+    direction: cross,
+    barTime: prepared.barTime,
+    spot: prepared.close,
+    reasons: [
+      `ORB ${side} ${broken} broken by close ${prepared.close}`,
+      `SuperTrend ${trend.trend} (line ${trend.line.toFixed(2)})`,
+      `EMA${params.emaFast} ${fast.toFixed(2)} ${emaSign} EMA${params.emaSlow} ${slow.toFixed(2)}`,
+    ],
+  };
+}
+
+/** Close that steps through the opening-range high or low. No indicator check. */
+export function openingRangeCross(bars: readonly Candle[], params: OrbSupertrendParams): { direction: Direction; level: number } | undefined {
+  const prepared = prepareBreak(bars, params);
+  if (prepared === undefined) {
+    return undefined;
+  }
+  const direction = closeCross(prepared.close, prepared.previousClose, prepared.orbHigh, prepared.orbLow);
+  if (direction === undefined) {
+    return undefined;
+  }
+  return { direction, level: direction === 'BULLISH' ? prepared.orbHigh : prepared.orbLow };
+}
+
+interface PreparedBreak {
+  readonly close: number;
+  readonly previousClose: number;
+  readonly orbHigh: number;
+  readonly orbLow: number;
+  readonly barTime: number;
+}
+
+function prepareBreak(bars: readonly Candle[], params: OrbSupertrendParams): PreparedBreak | undefined {
   const signalBar = bars[bars.length - 1];
   const previousBar = bars[bars.length - 2];
   if (signalBar === undefined || previousBar === undefined) {
     return undefined;
   }
-
   const signalParts = istParts(signalBar.time);
   const previousParts = istParts(previousBar.time);
   if (signalParts.date !== previousParts.date) {
@@ -57,56 +109,36 @@ export function evaluateOrbSupertrend(bars: readonly Candle[], params: OrbSupert
   if (signalParts.minuteOfDay < params.entryStartMinute || signalParts.minuteOfDay >= params.entryEndMinute) {
     return undefined;
   }
-
   const orbEndMinute = params.sessionOpenMinute + params.orbMinutes;
   if (signalParts.minuteOfDay < orbEndMinute) {
     return undefined;
   }
-
   const range = sessionRange(bars, signalParts.date, params.sessionOpenMinute, orbEndMinute);
   if (range === undefined) {
     return undefined;
   }
-  const { high: orbHigh, low: orbLow } = range;
+  return {
+    close: signalBar.close,
+    previousClose: previousBar.close,
+    orbHigh: range.high,
+    orbLow: range.low,
+    barTime: signalBar.time,
+  };
+}
 
-  const closes = bars.map((bar) => bar.close);
-  const fast = ema(closes, params.emaFast);
-  const slow = ema(closes, params.emaSlow);
-  const trend = superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
-  if (fast === undefined || slow === undefined || trend === undefined) {
-    return undefined;
+function closeCross(close: number, previousClose: number, orbHigh: number, orbLow: number): Direction | undefined {
+  if (close > orbHigh && previousClose <= orbHigh) {
+    return 'BULLISH';
   }
-
-  const breakoutUp = signalBar.close > orbHigh && previousBar.close <= orbHigh;
-  const breakoutDown = signalBar.close < orbLow && previousBar.close >= orbLow;
-
-  if (breakoutUp && trend.trend === 'UP' && fast > slow) {
-    return {
-      underlying: params.underlying,
-      direction: 'BULLISH',
-      barTime: signalBar.time,
-      spot: signalBar.close,
-      reasons: [
-        `ORB high ${orbHigh} broken by close ${signalBar.close}`,
-        `SuperTrend UP (line ${trend.line.toFixed(2)})`,
-        `EMA${params.emaFast} ${fast.toFixed(2)} > EMA${params.emaSlow} ${slow.toFixed(2)}`,
-      ],
-    };
+  if (close < orbLow && previousClose >= orbLow) {
+    return 'BEARISH';
   }
-
-  if (breakoutDown && trend.trend === 'DOWN' && fast < slow) {
-    return {
-      underlying: params.underlying,
-      direction: 'BEARISH',
-      barTime: signalBar.time,
-      spot: signalBar.close,
-      reasons: [
-        `ORB low ${orbLow} broken by close ${signalBar.close}`,
-        `SuperTrend DOWN (line ${trend.line.toFixed(2)})`,
-        `EMA${params.emaFast} ${fast.toFixed(2)} < EMA${params.emaSlow} ${slow.toFixed(2)}`,
-      ],
-    };
-  }
-
   return undefined;
+}
+
+function confluenceAgrees(direction: Direction, trend: 'UP' | 'DOWN', fast: number, slow: number): boolean {
+  if (direction === 'BULLISH') {
+    return trend === 'UP' && fast > slow;
+  }
+  return trend === 'DOWN' && fast < slow;
 }

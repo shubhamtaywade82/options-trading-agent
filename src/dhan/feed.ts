@@ -78,7 +78,7 @@ export class DhanFeed {
     }
     this.started = true;
     if (this.options.marketFeedMode !== undefined) {
-      (this.client.ws.market as { mode?: DhanMarketFeedMode }).mode = this.options.marketFeedMode;
+      (this.client.ws.market as unknown as { mode?: DhanMarketFeedMode }).mode = this.options.marketFeedMode;
     }
     const { market, orders } = this.client.ws;
     market.on('tick', (value: unknown) => this.handlePacket(value));

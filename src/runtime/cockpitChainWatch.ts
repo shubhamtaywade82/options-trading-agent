@@ -5,9 +5,19 @@ import type { ChainSnapshot } from '../options/selector.js';
 import { istParts } from '../time/ist.js';
 import { buildChainWatchView } from './chainWatchView.js';
 import type { MarketPort } from './ports.js';
-import type { AgentView, ChainWatchView } from './views.js';
+import type { AgentView, ChainWatchView, IndicatorView } from './views.js';
 
 const REFRESH_MS = 12_000;
+
+const EMPTY_INDICATORS: IndicatorView = {
+  emaFast: undefined,
+  emaSlow: undefined,
+  supertrend: undefined,
+  supertrendLine: undefined,
+  orbHigh: undefined,
+  orbLow: undefined,
+  orbFormed: false,
+};
 
 interface ChainWatchCache {
   readonly symbol: string;
@@ -91,7 +101,7 @@ export class CockpitChainWatch {
       minOpenInterest: this.config.contract.minOpenInterest,
       openPosition:
         position === undefined ? undefined : { strike: position.strike, optionType: position.optionType },
-      indicators: agent?.indicators ?? { orbFormed: false },
+      indicators: agent?.indicators ?? EMPTY_INDICATORS,
       strikeScroll: this.strikeScroll,
       nowMs,
       status,

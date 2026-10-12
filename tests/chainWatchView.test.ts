@@ -2,13 +2,30 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { buildChainWatchView } from '../src/runtime/chainWatchView.js';
 
-const chain = {
+import type { ChainLeg, ChainSnapshot } from '../src/options/selector.js';
+import type { IndicatorView } from '../src/runtime/views.js';
+
+function leg(bid: number, ask: number, oi: number): ChainLeg {
+  return { bid, ask, oi, ltp: bid, volume: 100, securityId: '1' };
+}
+
+const emptyIndicators: IndicatorView = {
+  emaFast: undefined,
+  emaSlow: undefined,
+  supertrend: undefined,
+  supertrendLine: undefined,
+  orbHigh: undefined,
+  orbLow: undefined,
+  orbFormed: false,
+};
+
+const chain: ChainSnapshot = {
   expiry: '2026-10-15',
   fetchedAt: 1_000,
   strikes: [
-    { strike: 22_400, call: { bid: 90, ask: 92, oi: 200_000 }, put: { bid: 10, ask: 11, oi: 50_000 } },
-    { strike: 22_450, call: { bid: 60, ask: 61, oi: 500_000 }, put: { bid: 30, ask: 31, oi: 80_000 } },
-    { strike: 22_500, call: { bid: 35, ask: 36, oi: 120_000 }, put: { bid: 55, ask: 56, oi: 90_000 } },
+    { strike: 22_400, call: leg(90, 92, 200_000), put: leg(10, 11, 50_000) },
+    { strike: 22_450, call: leg(60, 61, 500_000), put: leg(30, 31, 80_000) },
+    { strike: 22_500, call: leg(35, 36, 120_000), put: leg(55, 56, 90_000) },
   ],
 };
 
@@ -22,7 +39,15 @@ describe('buildChainWatchView', () => {
       maxSpreadPct: 2,
       minOpenInterest: 100_000,
       openPosition: undefined,
-      indicators: { supertrend: 'UP', emaFast: 22_500, emaSlow: 22_400, orbFormed: true },
+      indicators: {
+        supertrend: 'UP',
+        supertrendLine: 22_300,
+        emaFast: 22_500,
+        emaSlow: 22_400,
+        orbHigh: 22_500,
+        orbLow: 22_400,
+        orbFormed: true,
+      },
       strikeScroll: 0,
       nowMs: 4_000,
       status: 'ready',
@@ -40,12 +65,12 @@ describe('buildChainWatchView', () => {
   });
 
   it('shifts the visible window with strikeScroll', () => {
-    const wide = {
+    const wide: ChainSnapshot = {
       expiry: '2026-10-15',
       fetchedAt: 1,
       strikes: Array.from({ length: 9 }, (_, i) => {
         const strike = 22_300 + i * 50;
-        return { strike, call: { bid: 1, ask: 2, oi: 10_000 }, put: { bid: 1, ask: 2, oi: 10_000 } };
+        return { strike, call: leg(1, 2, 10_000), put: leg(1, 2, 10_000) };
       }),
     };
     const centered = buildChainWatchView({
@@ -56,7 +81,7 @@ describe('buildChainWatchView', () => {
       maxSpreadPct: 2,
       minOpenInterest: 100,
       openPosition: undefined,
-      indicators: { orbFormed: false },
+      indicators: emptyIndicators,
       strikeScroll: 0,
       nowMs: 2,
       status: 'ready',
@@ -70,7 +95,7 @@ describe('buildChainWatchView', () => {
       maxSpreadPct: 2,
       minOpenInterest: 100,
       openPosition: undefined,
-      indicators: { orbFormed: false },
+      indicators: emptyIndicators,
       strikeScroll: 2,
       nowMs: 2,
       status: 'ready',

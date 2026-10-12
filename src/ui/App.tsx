@@ -148,6 +148,18 @@ export default function App({ runtime }: { runtime: Runtime }) {
       }
       return;
     }
+    if (input === 'p') {
+      setNotice(orchestrator.cyclePosture());
+      return;
+    }
+    if (input === '1') {
+      setNotice(orchestrator.toggleStrategy('range'));
+      return;
+    }
+    if (input === '2') {
+      setNotice(orchestrator.toggleStrategy('trend'));
+      return;
+    }
     if (input === 'c') {
       if (selectedSymbol === undefined) {
         setNotice('no underlying selected');
@@ -165,7 +177,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === '?') {
-      setNotice('↑↓ underlying · ←→ chain · c close · k block · s stop (×2) · Ctrl+C×2 quit fast');
+      setNotice('↑↓ select · ←→ chain · p posture · 1/2 strat · c close · k block · s stop (×2) · Ctrl+C×2 quit');
     }
   });
 

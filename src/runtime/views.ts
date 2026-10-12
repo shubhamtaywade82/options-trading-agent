@@ -149,4 +149,18 @@ export interface CockpitSnapshot {
   readonly underlyings: readonly AgentView[];
   /** ATM ladder for the cockpit-selected underlying; other underlyings are not fetched. */
   readonly chainWatch: ChainWatchView | undefined;
+  /** Active session posture and enabled strategies. */
+  readonly strategy?: StrategySessionView;
 }
+
+export interface StrategyChoiceView {
+  readonly id: string;
+  readonly label: string;
+  readonly on: boolean;
+}
+
+export interface StrategySessionView {
+  readonly posture: string;
+  readonly strategies: readonly StrategyChoiceView[];
+}
+

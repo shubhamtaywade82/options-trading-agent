@@ -176,7 +176,8 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
       : snapshot.mode === 'sandbox'
         ? chalk.cyan.bold('◎ SANDBOX')
         : chalk.green.bold('● LIVE');
-  const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}`;
+  const strat = snapshot.strategy === undefined ? '' : `  ${chalk.magenta.bold(snapshot.strategy.posture.toUpperCase())} ${dim(snapshot.strategy.strategies.filter((s) => s.on).map((s) => s.label).join('+') || 'none')}`;
+  const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}${strat}`;
   const entriesOpen = snapshot.phase === 'RUNNING' && snapshot.day.killSwitchReason === undefined;
   const right = `${dim(formatIstClock(snapshot.at))} ${entriesOpen ? green('entries OPEN') : red('entries BLOCKED')} `;
   const gap = Math.max(1, inner - stringWidth(left) - stringWidth(right));
@@ -410,7 +411,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   ←→ chain   c/k/s confirm twice   Ctrl+C×2 quit   ? help');
+  const keys = dim(' ↑↓ select   ←→ chain   p posture   1/2 strat   c/k/s confirm twice   Ctrl+C×2 quit   ? help');
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }

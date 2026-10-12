@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Candle } from '../src/domain/types.js';
 import { evaluateOrbSupertrend, type OrbSupertrendParams } from '../src/strategy/orbSupertrend.js';
+import { StrategySession } from '../src/strategy/session.js';
 import { bar, istEpoch, SESSION_DAY } from './support/fixtures.js';
 
 const PREVIOUS_DAY = '2026-10-09';
@@ -77,3 +78,70 @@ describe('evaluateOrbSupertrend', () => {
     assert.equal(signal?.direction, 'BULLISH', 'a previous-day high of 103 must not raise today\'s ORB above 101.5');
   });
 });
+
+describe('StrategySession', () => {
+  it('cycles posture across scout, aligned and confirmed', () => {
+    const session = new StrategySession('aligned');
+    assert.equal(session.view().posture, 'aligned');
+    assert.match(session.cyclePosture(), /confirmed/);
+    assert.equal(session.view().posture, 'confirmed');
+    assert.match(session.cyclePosture(), /scout/);
+    assert.equal(session.view().posture, 'scout');
+    assert.match(session.cyclePosture(), /aligned/);
+    assert.equal(session.view().posture, 'aligned');
+  });
+
+  it('toggles strategies and reports state', () => {
+    const session = new StrategySession();
+    assert.equal(session.view().strategies.find((s) => s.id === 'range')?.on, true);
+    assert.match(session.toggle('range'), /Range break off/);
+    assert.equal(session.view().strategies.find((s) => s.id === 'range')?.on, false);
+    assert.match(session.toggle('range'), /Range break on/);
+    assert.equal(session.view().strategies.find((s) => s.id === 'range')?.on, true);
+  });
+
+  it('returns undefined when all strategies are disabled', () => {
+    const session = new StrategySession('aligned');
+    session.toggle('range');
+    session.toggle('trend');
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
+    const bars = [...risingWarmup(), ...today];
+    assert.equal(session.evaluate(bars, PARAMS), undefined);
+  });
+
+  it('in scout posture, fires on raw level break without requiring trend confirmation', () => {
+    const session = new StrategySession('scout');
+    const falling = Array.from({ length: 60 }, (_, i) => 110 - (i * 10) / 59);
+    const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, falling);
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
+    const signal = session.evaluate([...warmup, ...today], PARAMS);
+    assert.ok(signal !== undefined, 'scout fires aggressively without SuperTrend confluence');
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /Range break/);
+  });
+
+  it('in aligned posture, requires SuperTrend and EMA confluence', () => {
+    const session = new StrategySession('aligned');
+    const falling = Array.from({ length: 60 }, (_, i) => 110 - (i * 10) / 59);
+    const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, falling);
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
+    assert.equal(session.evaluate([...warmup, ...today], PARAMS), undefined);
+
+    const risingToday = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
+    const signal = session.evaluate([...risingWarmup(), ...risingToday], PARAMS);
+    assert.ok(signal !== undefined);
+    assert.equal(signal?.direction, 'BULLISH');
+  });
+
+  it('in confirmed posture, requires prior bar break and current bar hold beyond the range', () => {
+    const session = new StrategySession('confirmed');
+    // Today: break happens on 101.5, next bar closes at 101.8 holding beyond range
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5, 101.8]);
+    const signal = session.evaluate([...risingWarmup(), ...today], PARAMS);
+    assert.ok(signal !== undefined, 'confirmed fires after breakout holds');
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /Range break/);
+    assert.match(signal?.reasons[0] ?? '', /held beyond the range/);
+  });
+});
+

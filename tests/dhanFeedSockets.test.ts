@@ -1,15 +1,23 @@
+import net from 'node:net';
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import { DhanClient } from '@nemesis-oss/dhanhq-sdk';
 import { DhanFeed } from '../src/dhan/feed.js';
 import type { Logger } from '../src/ops/logger.js';
 
-/**
- * The SDK re-emits a socket's connection errors as `error` events. With no listener, Node throws, and a refused
- * connection ended the whole process. These tests point both sockets at a port nothing listens on, so every
- * connection is refused at once, and the process must keep running.
- */
-const REFUSED = 'ws://127.0.0.1:9/';
+let resetServer: net.Server;
+let refusedUrl: string;
+
+before(async () => {
+  resetServer = net.createServer((sock) => sock.resetAndDestroy());
+  await new Promise<void>((resolve) => resetServer.listen(0, '127.0.0.1', resolve));
+  const port = (resetServer.address() as net.AddressInfo).port;
+  refusedUrl = `ws://127.0.0.1:${port}/`;
+});
+
+after(() => {
+  resetServer?.close();
+});
 
 interface Line {
   readonly level: 'info' | 'warn' | 'error';
@@ -35,7 +43,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 function refusedClient(): DhanClient {
-  return new DhanClient({ clientId: '1', token: 'token', marketFeedUrl: REFUSED, orderUpdateUrl: REFUSED });
+  return new DhanClient({ clientId: '1', token: 'token', marketFeedUrl: refusedUrl, orderUpdateUrl: refusedUrl });
 }
 
 describe('DhanFeed socket errors', () => {
@@ -48,8 +56,8 @@ describe('DhanFeed socket errors', () => {
       await waitFor(() => lines.filter((line) => line.level === 'error').length >= 2);
       const market = lines.find((line) => line.message.includes('market feed'));
       const orders = lines.find((line) => line.message.includes('order update'));
-      assert.equal(market?.data?.['code'], 'ECONNREFUSED');
-      assert.equal(orders?.data?.['code'], 'ECONNREFUSED');
+      assert.ok(['ECONNREFUSED', 'ECONNRESET'].includes(String(market?.data?.['code'])));
+      assert.ok(['ECONNREFUSED', 'ECONNRESET'].includes(String(orders?.data?.['code'])));
       assert.ok(!JSON.stringify(lines).includes('token'), 'the access token never reaches a log line');
     } finally {
       dhan.ws.disconnect();

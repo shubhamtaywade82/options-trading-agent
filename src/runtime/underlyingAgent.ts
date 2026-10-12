@@ -19,6 +19,7 @@ import { bracketLevels } from '../options/pricing.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
+import { StrategySession } from '../strategy/session.js';
 import { ema, superTrend } from '../market/indicators.js';
 import type { AgentView, CandidateView, DropView, ExitView, PositionView, SignalView } from './views.js';
 import type { EventLog } from '../ops/eventLog.js';
@@ -52,6 +53,8 @@ export interface AgentDependencies {
   readonly now?: () => number;
   /** Process-level conditions (leader lock, unconfirmed events) that stop orders. Open when omitted. */
   readonly gate?: TradingGate;
+  /** Active session posture and strategy toggles shared across agents. */
+  readonly strategySession?: StrategySession;
 }
 
 type Preparation =
@@ -81,6 +84,7 @@ export class UnderlyingAgent {
   private readonly candles: CandleBuilder;
   private readonly now: () => number;
   private readonly orb: OrbSupertrendParams;
+  private readonly strategySession: StrategySession;
   private readonly dailyLossLimitInr: number;
   private pending: EntryOrder | undefined;
   private position: OpenPosition | undefined;
@@ -103,6 +107,7 @@ export class UnderlyingAgent {
     this.symbol = deps.spec.symbol;
     this.now = deps.now ?? Date.now;
     this.fsm = new TradeStateMachine(this.now);
+    this.strategySession = deps.strategySession ?? new StrategySession();
     this.queue = new SerialQueue((error) => {
       this.deps.logger.error('agent task failed', { underlying: this.symbol, error: describe(error) });
     });
@@ -275,7 +280,7 @@ export class UnderlyingAgent {
     if (minute < session.entryStartMinute || minute >= session.entryEndMinute) {
       return;
     }
-    const signal = evaluateOrbSupertrend(this.bars.all(), this.orb);
+    const signal = this.strategySession.evaluate(this.bars.all(), this.orb);
     if (signal === undefined) {
       return;
     }

@@ -14,6 +14,7 @@ import { UnderlyingAgent } from './underlyingAgent.js';
 import type { CockpitSnapshot } from './views.js';
 import type { TradingGate } from './tradingGate.js';
 import { withDeadline } from './deadline.js';
+import { StrategySession, type StrategyId } from '../strategy/session.js';
 
 /** The live feed as the orchestrator sees it: routing, lifecycle and freshness. */
 export interface OrchestratorFeed extends FeedPort {
@@ -78,6 +79,7 @@ export class Orchestrator {
   private phaseDetail: string | undefined;
   private readonly viewListeners = new Set<() => void>();
   private readonly chainWatch: CockpitChainWatch;
+  private readonly strategySession: StrategySession;
 
   constructor(
     private readonly config: AgentConfig,
@@ -85,6 +87,7 @@ export class Orchestrator {
     private readonly services: OrchestratorServices,
   ) {
     this.now = services.now ?? Date.now;
+    this.strategySession = new StrategySession();
     this.book = services.dayBook ?? new DayBook(this.now(), config.exits.cooldownSeconds * 1000);
     this.dailyLossLimitInr = (config.capital.inr * config.capital.maxDailyLossPct) / 100;
     for (const spec of specs) {
@@ -299,6 +302,7 @@ export class Orchestrator {
         return agent === undefined ? [] : [agent.view(nowMs)];
       }),
       chainWatch: this.chainWatch.view(nowMs),
+      strategy: this.strategySession.view(),
     };
   }
 
@@ -346,6 +350,22 @@ export class Orchestrator {
     return 'entry block cleared; new entries may resume';
   }
 
+  /** Cycles posture (scout -> aligned -> confirmed) across all underlyings without restart. */
+  cyclePosture(): string {
+    const result = this.strategySession.cyclePosture();
+    this.services.logger.info('strategy posture cycled', { posture: this.strategySession.view().posture });
+    this.notifyView();
+    return result;
+  }
+
+  /** Toggles an individual strategy on or off live during the session. */
+  toggleStrategy(id: StrategyId): string {
+    const result = this.strategySession.toggle(id);
+    this.services.logger.info('strategy toggled', { id, result });
+    this.notifyView();
+    return result;
+  }
+
   private createAgent(spec: UnderlyingSpec): UnderlyingAgent {
     const feed: FeedPort = {
       ageMs: (ref) => this.services.feed.ageMs(ref),
@@ -374,6 +394,7 @@ export class Orchestrator {
       logger: this.services.logger,
       onHalt: (underlying, reason) => this.onHalt(underlying, reason),
       now: this.now,
+      strategySession: this.strategySession,
       ...(this.services.gate === undefined ? {} : { gate: this.services.gate }),
     });
   }

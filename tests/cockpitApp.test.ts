@@ -125,6 +125,29 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
     });
   });
 
+  it('switches posture on p and toggles strategies on 1 and 2 live in the session', async () => {
+    const { runtime, stop } = fakeRuntime();
+    stops.push(stop);
+    await withTerminal(runtime, {}, async ({ stdout, press }) => {
+      assert.match(stdout.text, /ALIGNED/);
+
+      press('p');
+      await wait(40);
+      assert.match(stdout.text, /confirmed/i);
+      assert.equal(runtime.orchestrator.snapshot().strategy?.posture, 'confirmed');
+
+      press('1');
+      await wait(40);
+      assert.match(stdout.text, /Range break off/i);
+      assert.equal(runtime.orchestrator.snapshot().strategy?.strategies.find((s) => s.id === 'range')?.on, false);
+
+      press('2');
+      await wait(40);
+      assert.match(stdout.text, /Trend flip off/i);
+      assert.equal(runtime.orchestrator.snapshot().strategy?.strategies.find((s) => s.id === 'trend')?.on, false);
+    });
+  });
+
   it('shows a resize notice instead of a broken frame on a small terminal', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);
