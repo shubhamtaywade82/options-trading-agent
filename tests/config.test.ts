@@ -128,6 +128,8 @@ describe('loadConfig', () => {
   });
 
   it('rejects flags that are not explicit booleans', () => {
+    assert.equal(loadConfig(BASE).feed.marketFeedMode, 'ticker');
+    assert.throws(() => loadConfig({ ...BASE, DHAN_MARKET_FEED_MODE: 'depth' }), /DHAN_MARKET_FEED_MODE/);
     assert.throws(() => loadConfig({ ...BASE, LLM_ADVISOR: 'maybe' }), /boolean flag/);
     assert.equal(loadConfig({ ...BASE, LLM_ADVISOR: 'on' }).llm.enabled, true);
   });

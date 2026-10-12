@@ -98,6 +98,8 @@ export interface AgentConfig {
   readonly feed: {
     readonly staleMs: number;
     readonly istShiftedTimestamps: boolean;
+    /** Dhan market WebSocket subscription mode. Index spots (IDX_I) do not stream in `full` mode. */
+    readonly marketFeedMode: 'ticker' | 'quote' | 'full';
   };
   readonly paper: {
     /** Where paper orders are simulated: the local PostgreSQL venue, or the paper_exchange server. */
@@ -186,6 +188,14 @@ function minuteOfDay(env: Env, key: string, fallback: string): number {
   } catch (error) {
     throw new Error(`${key}: ${(error as Error).message}`);
   }
+}
+
+function parseMarketFeedMode(env: Env): 'ticker' | 'quote' | 'full' {
+  const raw = text(env, 'DHAN_MARKET_FEED_MODE', 'ticker').toLowerCase();
+  if (raw === 'ticker' || raw === 'quote' || raw === 'full') {
+    return raw;
+  }
+  throw new Error('DHAN_MARKET_FEED_MODE must be ticker, quote or full');
 }
 
 /**
@@ -307,6 +317,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     feed: {
       staleMs: number(env, 'FEED_STALE_MS', 5_000, { min: 500, max: 60_000, integer: true }),
       istShiftedTimestamps: flag(env, 'DHAN_EPOCH_IST_SHIFTED', false),
+      marketFeedMode: parseMarketFeedMode(env),
     },
     paper: {
       ...parsePaperBackend(env),

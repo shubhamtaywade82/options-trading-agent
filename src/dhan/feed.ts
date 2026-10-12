@@ -6,8 +6,12 @@ import { dhanEpochSecondsToMs } from '../time/ist.js';
 
 type FeedClient = Pick<DhanClient, 'ws'>;
 
+export type DhanMarketFeedMode = 'ticker' | 'quote' | 'full';
+
 export interface DhanFeedOptions {
   readonly istShiftedTimestamps: boolean;
+  /** Dhan WS RequestCode for subscriptions. Use ticker or quote for index spots (IDX_I). */
+  readonly marketFeedMode?: DhanMarketFeedMode;
   readonly now?: () => number;
   /** Where socket errors are logged. Errors are handled either way, so a missing logger never crashes the process. */
   readonly logger?: Logger;
@@ -73,6 +77,9 @@ export class DhanFeed {
       return;
     }
     this.started = true;
+    if (this.options.marketFeedMode !== undefined) {
+      (this.client.ws.market as { mode?: DhanMarketFeedMode }).mode = this.options.marketFeedMode;
+    }
     const { market, orders } = this.client.ws;
     market.on('tick', (value: unknown) => this.handlePacket(value));
     // The SDK re-emits a socket's connection errors as `error` events. With no listener, Node throws and the process
@@ -135,6 +142,7 @@ export class DhanFeed {
   }
 
   stop(): void {
+    this.started = false;
     this.client.ws.disconnect();
     this.listeners.clear();
   }

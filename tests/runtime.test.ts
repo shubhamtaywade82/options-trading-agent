@@ -223,6 +223,23 @@ function types(harness: Harness): string[] {
   return harness.events.map((event) => event.type);
 }
 
+describe('runtime: cockpit view updates', () => {
+  it('notifies listeners on each routed spot tick with the latest LTP', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    let views = 0;
+    harness.orchestrator.onViewUpdate(() => {
+      views += 1;
+    });
+    spotTick(harness, 22_512.5, '10:01:00');
+    assert.equal(views, 1);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.spot, 22_512.5);
+    spotTick(harness, 22_513.0, '10:01:01');
+    assert.equal(views, 2);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.spot, 22_513);
+  });
+});
+
 describe('runtime: winning trade end to end (paper venue)', () => {
   it('detects the breakout, buys one ATM call, and closes it at the bracket target', async () => {
     const harness = build();

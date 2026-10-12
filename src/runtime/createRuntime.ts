@@ -99,6 +99,7 @@ async function compose(
   });
   const feed = new DhanFeed(dataClient, {
     istShiftedTimestamps: config.feed.istShiftedTimestamps,
+    marketFeedMode: config.feed.marketFeedMode,
     now,
     logger,
     connectOrderUpdates: config.mode === 'live',

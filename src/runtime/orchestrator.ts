@@ -70,6 +70,7 @@ export class Orchestrator {
   private starting: Promise<void> | undefined;
   private phase: CockpitSnapshot['phase'] = 'IDLE';
   private phaseDetail: string | undefined;
+  private readonly viewListeners = new Set<() => void>();
 
   constructor(
     private readonly config: AgentConfig,
@@ -91,6 +92,14 @@ export class Orchestrator {
 
   agent(symbol: string): UnderlyingAgent | undefined {
     return this.agents.get(symbol);
+  }
+
+  /** Cockpit redraw hook. Fired on each spot or option tick routed to an agent (not on a timer). */
+  onViewUpdate(listener: () => void): () => void {
+    this.viewListeners.add(listener);
+    return () => {
+      this.viewListeners.delete(listener);
+    };
   }
 
   /** Starts the agent. A failed start is recorded in the snapshot so the cockpit can show why. */
@@ -327,12 +336,20 @@ export class Orchestrator {
     const spotSymbol = this.spotIndex.get(key);
     if (spotSymbol !== undefined) {
       this.agents.get(spotSymbol)?.onSpotTick(tick);
+      this.notifyView();
       return;
     }
     const optionSymbol = this.optionIndex.get(key);
     if (optionSymbol !== undefined) {
       this.services.execution.onOptionTick(tick);
       this.agents.get(optionSymbol)?.onOptionTick(tick);
+      this.notifyView();
+    }
+  }
+
+  private notifyView(): void {
+    for (const listener of this.viewListeners) {
+      listener();
     }
   }
 

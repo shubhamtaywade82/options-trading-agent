@@ -66,6 +66,9 @@ export default function App({ runtime }: { runtime: Runtime }) {
       .finally(() => setRefresh((n) => n + 1));
   }, [orchestrator]);
 
+  useEffect(() => orchestrator.onViewUpdate(() => setRefresh((n) => n + 1)), [orchestrator]);
+
+  // Age text and the header clock still advance when the feed is quiet (no ticks).
   useEffect(() => {
     const timer = setInterval(() => setRefresh((n) => n + 1), 1000);
     return () => clearInterval(timer);
