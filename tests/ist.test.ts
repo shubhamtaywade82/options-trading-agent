@@ -1,6 +1,13 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { dhanEpochSecondsToMs, formatMinuteOfDay, istParts, parseMinuteOfDay, shiftDateKey } from '../src/time/ist.js';
+import {
+  dhanEpochSecondsToMs,
+  formatMinuteOfDay,
+  isMarketSessionOpen,
+  istParts,
+  parseMinuteOfDay,
+  shiftDateKey,
+} from '../src/time/ist.js';
 import { dayDifference } from '../src/time/calendar.js';
 import { istEpoch } from './support/fixtures.js';
 
@@ -42,5 +49,13 @@ describe('IST clock', () => {
     assert.equal(dhanEpochSecondsToMs(utcSeconds, false), utcSeconds * 1000);
     assert.equal(dhanEpochSecondsToMs(utcSeconds + 19_800, true), utcSeconds * 1000);
     assert.equal(istEpoch('2026-10-12', '09:15'), Date.parse('2026-10-12T03:45:00Z'));
+  });
+
+  it('identifies whether regular market session is open', () => {
+    assert.equal(isMarketSessionOpen(Date.parse('2026-10-12T03:44:00Z')), false);
+    assert.equal(isMarketSessionOpen(Date.parse('2026-10-12T03:45:00Z')), true);
+    assert.equal(isMarketSessionOpen(Date.parse('2026-10-12T09:59:00Z')), true);
+    assert.equal(isMarketSessionOpen(Date.parse('2026-10-12T10:00:00Z')), false);
+    assert.equal(isMarketSessionOpen(Date.parse('2026-10-17T06:30:00Z')), false);
   });
 });

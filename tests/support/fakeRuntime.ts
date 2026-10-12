@@ -35,12 +35,12 @@ export const FAKE_SPEC: UnderlyingSpec = {
 };
 
 /** Orchestrator wired to fakes: paper venue, no market data, no network. For cockpit tests and the offline demo. */
-export function fakeRuntime(): { runtime: Runtime; stop: () => Promise<void> } {
+export function fakeRuntime(nowEpochMs = Date.parse('2026-10-12T04:30:00Z')): { runtime: Runtime; stop: () => Promise<void> } {
   const records = new RingLogger(200);
   const market = {
     intradayCandles: async (): Promise<Candle[]> => [],
     listExpiries: async (): Promise<string[]> => [],
-    optionChain: async () => ({ expiry: '2026-10-15', fetchedAt: Date.now(), strikes: [] }),
+    optionChain: async () => ({ expiry: '2026-10-15', fetchedAt: nowEpochMs, strikes: [] }),
     optionContracts: async () => [],
     availableFunds: async () => 300_000,
     brokerOpenOptionCount: async () => 0,
@@ -62,6 +62,7 @@ export function fakeRuntime(): { runtime: Runtime; stop: () => Promise<void> } {
     logger: records,
     clockIntervalMs: 1e9,
     shutdownTimeoutMs: 1_000,
+    now: () => nowEpochMs,
   });
   return { runtime: { orchestrator, logger: records, records }, stop: () => orchestrator.stop() };
 }

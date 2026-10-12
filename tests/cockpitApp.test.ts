@@ -205,4 +205,8 @@ describe('feedStatusText', () => {
   it('returns NO TICK when tick latency is undefined', () => {
     assert.match(plain(feedStatusText(undefined, 5000)), /○ NO TICK/);
   });
+
+  it('returns CLOSED when marketOpen is false regardless of tick latency', () => {
+    assert.match(plain(feedStatusText(50, 5000, false)), /■ CLOSED/);
+  });
 });

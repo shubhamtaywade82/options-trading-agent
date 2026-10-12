@@ -65,3 +65,14 @@ export function dhanEpochSecondsToMs(seconds: number, istShifted: boolean): numb
 export const NSE_SESSION_OPEN_MINUTE = 9 * 60 + 15;
 /** NSE/BSE regular session closes at 15:30 IST. */
 export const NSE_SESSION_CLOSE_MINUTE = 15 * 60 + 30;
+
+/** True when the IST instant falls within regular market hours (Monday–Friday 09:15–15:30). */
+export function isMarketSessionOpen(epochMs: number): boolean {
+  const shifted = new Date(epochMs + IST_OFFSET_MS);
+  const day = shifted.getUTCDay();
+  if (day === 0 || day === 6) {
+    return false;
+  }
+  const minute = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+  return minute >= NSE_SESSION_OPEN_MINUTE && minute < NSE_SESSION_CLOSE_MINUTE;
+}

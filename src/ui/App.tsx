@@ -75,7 +75,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
     return () => clearInterval(timer);
   }, []);
 
-  const snapshot = orchestrator.snapshot(Date.now());
+  const snapshot = orchestrator.snapshot();
   const count = snapshot.underlyings.length;
   const index = Math.max(0, Math.min(selected, count - 1));
   const selectedSymbol = snapshot.underlyings[index]?.symbol;

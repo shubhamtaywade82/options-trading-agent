@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import stringWidth from 'string-width';
 import type { LogRecord } from '../ops/logger.js';
 import type { AgentView, CockpitSnapshot, PositionView } from '../runtime/views.js';
-import { formatMinuteOfDay, IST_OFFSET_MS, istParts } from '../time/ist.js';
+import { formatMinuteOfDay, isMarketSessionOpen, IST_OFFSET_MS, istParts } from '../time/ist.js';
 import { CHAIN_PANEL_ROWS, chainWatchLines } from './chainWatchPanel.js';
 import { bad, callSide, emphasis, freshness, info, infoBold, label, muted, ok, putSide, range, selectedName, warn } from './palette.js';
 
@@ -121,7 +121,10 @@ function price(value: number | undefined): string {
   return value === undefined ? '—' : value.toFixed(2);
 }
 
-export function feedStatusText(ms: number | undefined, staleMs: number): string {
+export function feedStatusText(ms: number | undefined, staleMs: number, marketOpen = true): string {
+  if (!marketOpen) {
+    return dim('■ CLOSED');
+  }
   if (ms === undefined) {
     return bad('○ NO TICK');
   }
@@ -183,8 +186,13 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
         : chalk.green.bold('● LIVE');
   const strat = snapshot.strategy === undefined ? '' : `  ${chalk.magenta.bold(snapshot.strategy.posture.toUpperCase())} ${dim(snapshot.strategy.strategies.filter((s) => s.on).map((s) => s.label).join('+') || 'none')}`;
   const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}${strat}`;
-  const entriesOpen = snapshot.phase === 'RUNNING' && snapshot.day.killSwitchReason === undefined;
-  const right = `${dim(formatIstClock(snapshot.at))} ${entriesOpen ? green('entries OPEN') : red('entries BLOCKED')} `;
+  const sessionOpen = isMarketSessionOpen(snapshot.at);
+  const statusTag = !sessionOpen
+    ? dim('market CLOSED')
+    : snapshot.day.killSwitchReason !== undefined
+      ? red('entries BLOCKED')
+      : green('entries OPEN');
+  const right = `${dim(formatIstClock(snapshot.at))} ${statusTag} `;
   const gap = Math.max(1, inner - stringWidth(left) - stringWidth(right));
   return [
     chalk.cyan(`╭${'─'.repeat(inner)}╮`),
@@ -193,7 +201,13 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
   ];
 }
 
-function underlyingBlock(agent: AgentView, selected: boolean, width: number, staleMs: number): string[] {
+function underlyingBlock(
+  agent: AgentView,
+  selected: boolean,
+  width: number,
+  staleMs: number,
+  marketOpen = true,
+): string[] {
   const marker = selected ? info('▸') : ' ';
   const name = selected ? selectedName(agent.symbol) : emphasis(agent.symbol);
   const halt = agent.halted === undefined ? '' : ` ${bad('HALT')}`;
@@ -211,7 +225,7 @@ function underlyingBlock(agent: AgentView, selected: boolean, width: number, sta
   const spot = freshness(price(agent.spot), agent.spotAgeMs, staleMs);
   return [
     fit(`${marker} ${name} ${stateText(agent.state)}${halt}`, width),
-    fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs)}`, width),
+    fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs, marketOpen)}`, width),
     fit(`  ${trend}  ${alignment}`, width),
     fit(`  ${orb}`, width),
     fit('', width),
@@ -223,10 +237,11 @@ function underlyingColumn(snapshot: CockpitSnapshot, selected: number, width: nu
   const blocks = snapshot.underlyings.length;
   const visibleBlocks = Math.max(1, Math.floor(rows / BLOCK_ROWS));
   const shown = blocks > visibleBlocks ? visibleBlocks - 1 : blocks;
+  const marketOpen = isMarketSessionOpen(snapshot.at);
   for (let index = 0; index < shown; index += 1) {
     const agent = snapshot.underlyings[index];
     if (agent !== undefined) {
-      lines.push(...underlyingBlock(agent, index === selected, width, snapshot.staleMs));
+      lines.push(...underlyingBlock(agent, index === selected, width, snapshot.staleMs, marketOpen));
     }
   }
   if (shown < blocks) {
