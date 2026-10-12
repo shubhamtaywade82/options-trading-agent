@@ -167,6 +167,23 @@ function readings(watch: ChainWatchView): string[] {
   ];
 }
 
+function appendLadder(lines: string[], watch: ChainWatchView, inner: number): void {
+  const lens = watch.marketBias === 'BULLISH' ? 'call' : watch.marketBias === 'BEARISH' ? 'put' : 'both';
+  const other = lens === 'call' ? 'put' : lens === 'put' ? 'call' : undefined;
+  const stats = readings(watch);
+  const midHead = other === undefined ? '' : quoteHead(other).join(' ');
+  lines.push(pane(headerCells(lens).join(' '), midHead, muted('READING'), inner, other !== undefined));
+  watch.rows.forEach((row, index) => {
+    const leg = lens === 'put' ? row.put : row.call;
+    const left =
+      lens === 'both'
+        ? [strikeCell(row), marks(row.markers), ...quoteCells(row.call, watch.maxOpenInterest), ...quoteCells(row.put, watch.maxOpenInterest)]
+        : [strikeCell(row), marks(row.markers), ...quoteCells(leg, watch.maxOpenInterest)];
+    const mid = other === undefined ? '' : quoteCells(other === 'call' ? row.call : row.put, watch.maxOpenInterest).join(' ');
+    lines.push(pane(left.join(' '), mid, stats[index] ?? '', inner, other !== undefined));
+  });
+}
+
 function pane(left: string, mid: string, stat: string, inner: number, singleWing: boolean): string {
   const rule = muted(' │ ');
   if (!singleWing || inner < LADDER_W + STAT_W + 8) {
@@ -194,17 +211,8 @@ export function chainWatchLines(
     return lines;
   }
   lines.push(statusLine(watch, agent, inner));
-  const lens = watch.marketBias === 'BULLISH' ? 'call' : watch.marketBias === 'BEARISH' ? 'put' : 'both';
-  const other = lens === 'call' ? 'put' : lens === 'put' ? 'call' : undefined;
   if (watch.status === 'ready' && watch.rows.length > 0) {
-    const stats = readings(watch);
-    const midHead = other === undefined ? '' : quoteHead(other).join(' ');
-    lines.push(pane(headerCells(lens).join(' '), midHead, muted('READING'), inner, other !== undefined));
-    watch.rows.forEach((row, index) => {
-      const left = lens === 'both' ? [strikeCell(row), marks(row.markers), ...quoteCells(row.call, watch.maxOpenInterest), ...quoteCells(row.put, watch.maxOpenInterest)] : [strikeCell(row), marks(row.markers), ...quoteCells(lens === 'call' ? row.call : row.put, watch.maxOpenInterest)];
-      const mid = other === undefined ? '' : quoteCells(other === 'call' ? row.call : row.put, watch.maxOpenInterest).join(' ');
-      lines.push(pane(left.join(' '), mid, stats[index] ?? '', inner, other !== undefined));
-    });
+    appendLadder(lines, watch, inner);
     lines.push(legend(inner, maxSpreadPct, minOpenInterest));
   } else {
     lines.push(muted(fit('ladder appears once the chain loads', inner)));
