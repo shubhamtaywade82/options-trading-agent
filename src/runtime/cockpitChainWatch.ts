@@ -26,6 +26,7 @@ export class CockpitChainWatch {
   private inFlight: Promise<void> | undefined;
   private error: string | undefined;
   private loading = false;
+  private strikeScroll = 0;
 
   constructor(
     private readonly config: AgentConfig,
@@ -44,7 +45,22 @@ export class CockpitChainWatch {
     this.cache = undefined;
     this.error = undefined;
     this.lastFetchAt = 0;
+    this.strikeScroll = 0;
     void this.refresh(true);
+  }
+
+  nudgeStrikeScroll(delta: number): boolean {
+    const bounds = this.view(this.now());
+    if (bounds === undefined || bounds.status !== 'ready') {
+      return false;
+    }
+    const next = bounds.strikeScroll + delta;
+    if (next < bounds.strikeScrollMin || next > bounds.strikeScrollMax) {
+      return false;
+    }
+    this.strikeScroll = next;
+    this.onUpdated();
+    return true;
   }
 
   onClock(phase: 'RUNNING' | string): void {
@@ -66,7 +82,7 @@ export class CockpitChainWatch {
     const status =
       this.loading ? 'loading' : this.error !== undefined ? 'error' : chain === undefined ? 'idle' : 'ready';
     const position = agent?.position;
-    return buildChainWatchView({
+    const view = buildChainWatchView({
       symbol: this.focusSymbol,
       spot: agent?.spot,
       chain,
@@ -75,10 +91,16 @@ export class CockpitChainWatch {
       minOpenInterest: this.config.contract.minOpenInterest,
       openPosition:
         position === undefined ? undefined : { strike: position.strike, optionType: position.optionType },
+      indicators: agent?.indicators ?? { orbFormed: false },
+      strikeScroll: this.strikeScroll,
       nowMs,
       status,
       error: this.error,
     });
+    if (view.strikeScroll !== this.strikeScroll) {
+      this.strikeScroll = view.strikeScroll;
+    }
+    return view;
   }
 
   private async refresh(force: boolean): Promise<void> {

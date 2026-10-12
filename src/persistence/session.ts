@@ -80,7 +80,8 @@ export async function openSession(
         });
       }
       if (lease !== undefined) {
-        await lease.release().catch((error: unknown) => {
+        const immediateHandoff = reason === 'aborted' && config.mode === 'paper';
+        await lease.release(immediateHandoff).catch((error: unknown) => {
           logger.error('could not release the trading lease', { error: errorMessage(error, secrets) });
         });
       }

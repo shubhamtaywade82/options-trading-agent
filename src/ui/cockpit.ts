@@ -4,6 +4,7 @@ import type { LogRecord } from '../ops/logger.js';
 import type { AgentView, CockpitSnapshot, PositionView } from '../runtime/views.js';
 import { formatMinuteOfDay, IST_OFFSET_MS, istParts } from '../time/ist.js';
 import { CHAIN_PANEL_ROWS, chainWatchLines } from './chainWatchPanel.js';
+import { bad, callSide, emphasis, freshness, info, infoBold, label, muted, ok, putSide, range, selectedName, warn } from './palette.js';
 
 /**
  * Pure renderer for the operator cockpit. It turns a read-only snapshot into lines of text.
@@ -56,11 +57,11 @@ export interface CockpitOptions {
   readonly logs: readonly LogRecord[];
 }
 
-const dim = (text: string) => chalk.gray(text);
-const cyanBold = (text: string) => chalk.cyan.bold(text);
-const red = (text: string) => chalk.red(text);
-const green = (text: string) => chalk.green(text);
-const yellow = (text: string) => chalk.yellow(text);
+const dim = muted;
+const cyanBold = infoBold;
+const red = bad;
+const green = ok;
+const yellow = warn;
 
 export { fit } from './terminalFit.js';
 import { fit } from './terminalFit.js';
@@ -122,10 +123,10 @@ function price(value: number | undefined): string {
 
 function ageText(ms: number | undefined, staleMs: number): string {
   if (ms === undefined) {
-    return red('no tick');
+    return bad('no tick');
   }
   const text = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-  return ms > staleMs ? red(text) : text;
+  return freshness(text, ms, staleMs);
 }
 
 function stateText(state: AgentView['state']): string {
@@ -187,22 +188,24 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
 }
 
 function underlyingBlock(agent: AgentView, selected: boolean, width: number, staleMs: number): string[] {
-  const marker = selected ? chalk.cyan('▸') : ' ';
-  const halt = agent.halted === undefined ? '' : ` ${red('HALT')}`;
+  const marker = selected ? info('▸') : ' ';
+  const name = selected ? selectedName(agent.symbol) : emphasis(agent.symbol);
+  const halt = agent.halted === undefined ? '' : ` ${bad('HALT')}`;
   const { emaFast, emaSlow, supertrend, supertrendLine, orbHigh, orbLow } = agent.indicators;
   const trend =
     supertrend === undefined
-      ? dim('ST —')
+      ? muted('ST —')
       : supertrend === 'UP'
-        ? green(`ST UP ${price(supertrendLine)}`)
-        : red(`ST DOWN ${price(supertrendLine)}`);
+        ? ok(`ST UP ${price(supertrendLine)}`)
+        : bad(`ST DOWN ${price(supertrendLine)}`);
   const alignment =
-    emaFast === undefined || emaSlow === undefined ? dim('EMA warming up') : emaFast > emaSlow ? green('EMA up') : red('EMA down');
+    emaFast === undefined || emaSlow === undefined ? muted('EMA warming up') : emaFast > emaSlow ? ok('EMA up') : bad('EMA down');
   const orb =
-    orbHigh === undefined || orbLow === undefined ? dim('ORB forming') : `ORB ${price(orbLow)}–${price(orbHigh)}`;
+    orbHigh === undefined || orbLow === undefined ? muted('ORB forming') : range(`ORB ${price(orbLow)}–${price(orbHigh)}`);
+  const spot = freshness(price(agent.spot), agent.spotAgeMs, staleMs);
   return [
-    fit(`${marker} ${chalk.bold(agent.symbol)} ${stateText(agent.state)}${halt}`, width),
-    fit(`  spot ${price(agent.spot)}  age ${ageText(agent.spotAgeMs, staleMs)}`, width),
+    fit(`${marker} ${name} ${stateText(agent.state)}${halt}`, width),
+    fit(`  ${muted('spot')} ${spot}  ${muted('age')} ${ageText(agent.spotAgeMs, staleMs)}`, width),
     fit(`  ${trend}  ${alignment}`, width),
     fit(`  ${orb}`, width),
     fit('', width),
@@ -230,18 +233,18 @@ function signalColumn(agent: AgentView | undefined, width: number): string[] {
   if (agent === undefined) {
     return [fit(dim('no underlying selected'), width)];
   }
-  const lines: string[] = [fit(cyanBold(`SELECTED ${agent.symbol}`), width), fit(cyanBold('LAST SIGNAL'), width)];
+  const lines: string[] = [fit(infoBold(`SELECTED ${agent.symbol}`), width), fit(label('LAST SIGNAL'), width)];
   if (agent.lastSignal === undefined) {
     lines.push(fit(dim('  none this session'), width));
   } else {
     const signal = agent.lastSignal;
-    const direction = signal.direction === 'BULLISH' ? green('BULLISH') : red('BEARISH');
+    const direction = signal.direction === 'BULLISH' ? callSide('BULLISH') : putSide('BEARISH');
     lines.push(fit(`  ${direction} at ${formatIstClock(signal.at)} close ${price(signal.spot)}`, width));
     for (const reason of signal.reasons.slice(0, 2)) {
       lines.push(fit(`    ${dim(reason)}`, width));
     }
   }
-  lines.push(fit(cyanBold('LAST REJECTION'), width));
+  lines.push(fit(label('LAST REJECTION'), width));
   if (agent.lastDrop === undefined) {
     lines.push(fit(dim('  none'), width));
   } else {
@@ -250,7 +253,7 @@ function signalColumn(agent: AgentView | undefined, width: number): string[] {
       lines.push(fit(`    ${dim(line)}`, width));
     }
   }
-  lines.push(fit(cyanBold('LAST CANDIDATE'), width));
+  lines.push(fit(label('LAST CANDIDATE'), width));
   if (agent.lastCandidate === undefined) {
     const hint =
       agent.lastSignal === undefined
@@ -259,21 +262,23 @@ function signalColumn(agent: AgentView | undefined, width: number): string[] {
     lines.push(fit(dim(hint), width));
   } else {
     const c = agent.lastCandidate;
-    lines.push(fit(`  ${c.contractSymbol} ${c.expiry}`, width));
-    lines.push(fit(`    ask ${price(c.entryReference)} bid ${price(c.bid)} spread ${c.spreadPct.toFixed(2)}%`, width));
-    lines.push(fit(`    OI ${c.openInterest.toLocaleString('en-IN')} lots ${c.lots} qty ${c.quantity}`, width));
-    lines.push(fit(`    SL ${price(c.stopLossPrice)} TP ${price(c.targetPrice)} risk ${formatInr(c.riskInr)}`, width));
+    const side = c.optionType === 'CE' ? callSide(c.contractSymbol) : putSide(c.contractSymbol);
+    lines.push(fit(`  ${side} ${muted(c.expiry)}`, width));
+    lines.push(fit(`    ask ${emphasis(price(c.entryReference))} bid ${price(c.bid)} spread ${warn(`${c.spreadPct.toFixed(2)}%`)}`, width));
+    lines.push(fit(`    OI ${c.openInterest.toLocaleString('en-IN')} lots ${emphasis(String(c.lots))} qty ${c.quantity}`, width));
+    lines.push(fit(`    SL ${bad(price(c.stopLossPrice))} TP ${ok(price(c.targetPrice))} risk ${formatInr(c.riskInr)}`, width));
   }
   return lines;
 }
 
 function positionLines(position: PositionView, maxHoldMinutes: number, width: number): string[] {
   const pnl = position.unrealizedInr === undefined ? dim('—') : formatSignedInr(position.unrealizedInr);
+  const symbol = position.optionType === 'CE' ? callSide(position.contractSymbol) : putSide(position.contractSymbol);
   return [
-    fit(`  ${position.contractSymbol}`, width),
-    fit(`    qty ${position.quantity} avg ${price(position.averagePrice)}`, width),
-    fit(`    mark ${price(position.mark)} P&L ${pnl}`, width),
-    fit(`    SL ${price(position.stopLossPrice)} TP ${price(position.targetPrice)}`, width),
+    fit(`  ${ok('OPEN')} ${symbol}`, width),
+    fit(`    qty ${emphasis(String(position.quantity))} avg ${price(position.averagePrice)}`, width),
+    fit(`    mark ${emphasis(price(position.mark))} P&L ${pnl}`, width),
+    fit(`    SL ${bad(price(position.stopLossPrice))} TP ${ok(price(position.targetPrice))}`, width),
     fit(`    held ${position.heldMinutes}m of ${maxHoldMinutes}m${position.exitRequested ? yellow(' close requested') : ''}`, width),
   ];
 }
@@ -286,7 +291,7 @@ function positionColumn(agent: AgentView | undefined, maxHoldMinutes: number, wi
     return positionLines(agent.position, maxHoldMinutes, width);
   }
   const lines: string[] = [fit(dim('  flat'), width)];
-  lines.push(fit(cyanBold('LAST EXIT'), width));
+  lines.push(fit(label('LAST EXIT'), width));
   if (agent.lastExit === undefined) {
     lines.push(fit(dim('  none this session'), width));
   } else {
@@ -311,7 +316,10 @@ function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
     fit(`  realised ${formatSignedInr(day.realizedPnlInr)}`, width),
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
     fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
-    fit(`trades ${day.tradesToday}/${snapshot.maxTradesPerDay}  open ${day.openUnderlyings.length}/${snapshot.maxOpenPositions}`, width),
+    fit(
+      `trades ${day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`}  open ${day.openUnderlyings.length}/${snapshot.maxOpenPositions}`,
+      width,
+    ),
     fit(`capital ${formatInrWhole(snapshot.capitalInr)}`, width),
     fit(`risk/trade ${formatInrWhole(snapshot.riskBudgetInr)}`, width),
     ...(day.killSwitchReason === undefined
@@ -323,7 +331,7 @@ function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
     const remaining = Math.ceil(((agent.cooldownUntil ?? 0) - snapshot.at) / 1000);
     const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
     const ss = String(remaining % 60).padStart(2, '0');
-    lines.push(fit(`cooldown ${agent.symbol} ${mm}:${ss}`, width));
+    lines.push(fit(warn(`cooldown ${agent.symbol} ${mm}:${ss}`), width));
   }
   return lines;
 }
@@ -348,17 +356,17 @@ function table(snapshot: CockpitSnapshot, options: CockpitOptions, layout: Cockp
   };
   const cells = columns.map((lines, index) => pad(lines, layout.cols[index] ?? 0));
   const titles = [
-    `UNDERLYINGS (${snapshot.underlyings.length})`,
-    'SIGNAL & CONTRACT',
-    'POSITION',
-    'RISK & DAY',
+    infoBold(`UNDERLYINGS (${snapshot.underlyings.length})`),
+    chalk.magenta.bold('SIGNAL & CONTRACT'),
+    chalk.white.bold('POSITION'),
+    warn('RISK & DAY'),
   ];
   const cyan = (text: string) => chalk.cyan(text);
   const bar = (left: string, middle: string, right: string) =>
     cyan(left + [c1, c2, c3, c4].map((width) => '─'.repeat(width)).join(middle) + right);
   const titleRow =
     cyan('│') +
-    [c1, c2, c3, c4].map((width, index) => fit(` ${cyanBold(titles[index] ?? '')}`, width)).join(cyan('│')) +
+    [c1, c2, c3, c4].map((width, index) => fit(` ${titles[index] ?? ''}`, width)).join(cyan('│')) +
     cyan('│');
   const out = [bar('┌', '┬', '┐'), titleRow, bar('├', '┼', '┤')];
   for (let row = 0; row < rows; row += 1) {
@@ -386,7 +394,7 @@ function chainPanel(snapshot: CockpitSnapshot, options: CockpitOptions): string[
 
 function logLine(record: LogRecord, width: number): string {
   const time = dim(formatIstClock(record.ts));
-  const level = record.level === 'error' ? red('ERR ') : record.level === 'warn' ? yellow('WARN') : dim('INFO');
+  const level = record.level === 'error' ? bad('ERR ') : record.level === 'warn' ? warn('WARN') : info('INFO');
   const data = record.data === undefined ? '' : ` ${dim(JSON.stringify(record.data))}`;
   return fit(`${time} ${level} ${record.message}${data}`, width);
 }
@@ -402,7 +410,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   c close position   k entry block   s stop   ? help   (c, k, s need a second press)');
+  const keys = dim(' ↑↓ select   ←→ chain   c/k/s confirm twice   Ctrl+C×2 quit   ? help');
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }

@@ -3,14 +3,16 @@ import 'dotenv/config';
 import { render } from 'ink';
 import { loadConfig } from './config.js';
 import { buildRuntime } from './runtime/createRuntime.js';
+import { operatorInterrupt } from './runtime/operatorInterrupt.js';
+import type { StopKind } from './runtime/orchestrator.js';
 import App from './ui/App.js';
 
 /**
  * Entry point. Configuration is validated before any socket opens.
  *
  * On an interactive terminal the operator cockpit runs. Set UI=off, or pipe the output, for plain
- * log lines (useful under a process supervisor). SIGINT and SIGTERM stop the agent gracefully:
- * new entries cease and open positions are flattened, bounded by the shutdown timeout.
+ * log lines (useful under a process supervisor). SIGINT twice within 2s quits immediately (paper
+ * releases the lease for restart). SIGTERM runs a graceful stop.
  */
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -19,16 +21,23 @@ async function main(): Promise<void> {
   const { orchestrator, logger } = runtime;
 
   let stopping: Promise<void> | undefined;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = (kind: StopKind): void => {
     stopping ??= (async () => {
-      logger.warn('shutdown requested', { signal });
-      await orchestrator.stop();
+      logger.warn('shutdown requested', { kind });
+      await orchestrator.stop(kind);
       restoreScreen();
       process.exit(0);
     })();
   };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
+
+  process.once('SIGTERM', () => shutdown('graceful'));
+  process.on('SIGINT', () => {
+    if (operatorInterrupt() === 'armed') {
+      logger.warn('press Ctrl+C again within 2s to quit immediately (paper: lease released for restart)');
+      return;
+    }
+    shutdown('immediate');
+  });
 
   if (!cockpit) {
     await orchestrator.start();
@@ -41,7 +50,9 @@ async function main(): Promise<void> {
   const instance = render(<App runtime={runtime} />, { exitOnCtrlC: false });
   await instance.waitUntilExit();
   restoreScreen();
-  await orchestrator.stop().catch(() => undefined);
+  if (!orchestrator.hasStopped()) {
+    await orchestrator.stop('graceful').catch(() => undefined);
+  }
 }
 
 function restoreScreen(): void {

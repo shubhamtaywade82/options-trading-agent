@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { Runtime } from '../runtime/createRuntime.js';
+import { operatorInterrupt } from '../runtime/operatorInterrupt.js';
 import { COCKPIT_MIN_COLS, COCKPIT_MIN_ROWS, renderOptionsCockpit, resizeNotice } from './cockpit.js';
 
 /** Destructive or outward actions need a second press within this window. */
@@ -86,7 +87,13 @@ export default function App({ runtime }: { runtime: Runtime }) {
 
   const stopAndExit = async (): Promise<void> => {
     setNotice('stopping: flattening open positions before exit');
-    await orchestrator.stop();
+    await orchestrator.stop('graceful');
+    exit();
+  };
+
+  const quitImmediately = async (): Promise<void> => {
+    setNotice('quitting immediately…');
+    await orchestrator.stop('immediate');
     exit();
   };
 
@@ -114,7 +121,11 @@ export default function App({ runtime }: { runtime: Runtime }) {
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
-      request('stop', undefined);
+      if (operatorInterrupt() === 'armed') {
+        setNotice('Ctrl+C again within 2s to quit immediately (paper: lease released)');
+        return;
+      }
+      void quitImmediately();
       return;
     }
     if (key.upArrow) {
@@ -123,6 +134,18 @@ export default function App({ runtime }: { runtime: Runtime }) {
     }
     if (key.downArrow) {
       setSelected(Math.min(Math.max(0, count - 1), index + 1));
+      return;
+    }
+    if (key.leftArrow) {
+      if (!orchestrator.nudgeCockpitChainScroll(-1)) {
+        setNotice('chain window at lowest strikes');
+      }
+      return;
+    }
+    if (key.rightArrow) {
+      if (!orchestrator.nudgeCockpitChainScroll(1)) {
+        setNotice('chain window at highest strikes');
+      }
       return;
     }
     if (input === 'c') {
@@ -142,7 +165,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === '?') {
-      setNotice('↑↓ select underlying · c close its position · k toggle entry block · s stop · ctrl+c stop');
+      setNotice('↑↓ underlying · ←→ chain · c close · k block · s stop (×2) · Ctrl+C×2 quit fast');
     }
   });
 

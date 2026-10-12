@@ -46,7 +46,7 @@ describe('PostgreSQL paper store', { skip: PG_URL === undefined }, () => {
     return {
       clientId,
       fence: { clientId: account, runId, epoch: () => epoch },
-      release: () => leases.release(account, runId, epoch),
+      release: () => leases.release(account, runId, epoch!, false, 0),
     };
   }
 

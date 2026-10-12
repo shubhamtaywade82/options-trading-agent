@@ -111,14 +111,17 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
     });
   });
 
-  it('turns ctrl+c into a confirmed stop rather than an unmount', async () => {
+  it('arms immediate quit on the first ctrl+c and stops on the second', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);
     await withTerminal(runtime, {}, async ({ stdout, press }) => {
       press('\u0003');
       await wait(40);
-      assert.match(stdout.text, /press s again within 5s to stop/);
+      assert.match(stdout.text, /Ctrl\+C again within 2s/i);
       assert.equal(runtime.orchestrator.snapshot().phase, 'RUNNING', 'a single press must not stop the agent');
+      press('\u0003');
+      await wait(80);
+      assert.equal(runtime.orchestrator.snapshot().phase, 'STOPPED');
     });
   });
 

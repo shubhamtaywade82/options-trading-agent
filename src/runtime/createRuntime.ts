@@ -203,7 +203,7 @@ async function compose(
     logger,
     now,
     gate,
-    closeSession: () => session.close('stopped', events.unconfirmedEvents()),
+    closeSession: (reason) => session.close(reason, events.unconfirmedEvents()),
   });
   return { orchestrator, logger, records };
 }

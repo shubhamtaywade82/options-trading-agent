@@ -1,10 +1,10 @@
 import type { ChainSnapshot } from '../options/selector.js';
 import { minStrikeStep, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import type { OptionType } from '../domain/types.js';
-import type { ChainWatchView } from './views.js';
+import type { ChainMarketBias, ChainWatchView, IndicatorView } from './views.js';
 
 const EPSILON = 1e-6;
-const STRIKE_RADIUS = 2;
+export const CHAIN_STRIKE_RADIUS = 2;
 
 export interface ChainWatchBuildInput {
   readonly symbol: string;
@@ -14,9 +14,34 @@ export interface ChainWatchBuildInput {
   readonly maxSpreadPct: number;
   readonly minOpenInterest: number;
   readonly openPosition: { readonly strike: number; readonly optionType: OptionType } | undefined;
+  readonly indicators: IndicatorView;
+  readonly strikeScroll: number;
   readonly nowMs: number;
   readonly status: ChainWatchView['status'];
   readonly error: string | undefined;
+}
+
+export function strikeScrollBounds(strikeCount: number, atmIndex: number): { min: number; max: number } {
+  if (strikeCount <= 0) {
+    return { min: 0, max: 0 };
+  }
+  const minCenter = Math.min(atmIndex, CHAIN_STRIKE_RADIUS);
+  const maxCenter = Math.max(atmIndex, strikeCount - 1 - CHAIN_STRIKE_RADIUS);
+  return { min: minCenter - atmIndex, max: maxCenter - atmIndex };
+}
+
+export function marketBiasFromIndicators(indicators: IndicatorView): ChainMarketBias {
+  const { supertrend, emaFast, emaSlow } = indicators;
+  if (supertrend === undefined || emaFast === undefined || emaSlow === undefined) {
+    return 'NEUTRAL';
+  }
+  if (supertrend === 'UP' && emaFast > emaSlow) {
+    return 'BULLISH';
+  }
+  if (supertrend === 'DOWN' && emaFast < emaSlow) {
+    return 'BEARISH';
+  }
+  return 'NEUTRAL';
 }
 
 function spreadPct(bid: number | undefined, ask: number | undefined): number | undefined {
@@ -34,13 +59,10 @@ function legPasses(spread: number | undefined, oi: number | undefined, maxSpread
   return (oi ?? 0) >= minOi;
 }
 
-function sliceAroundAtm(strikes: readonly number[], atm: number): number[] {
-  const index = strikes.findIndex((strike) => Math.abs(strike - atm) < EPSILON);
-  if (index < 0) {
-    return [];
-  }
-  const start = Math.max(0, index - STRIKE_RADIUS);
-  const end = Math.min(strikes.length, index + STRIKE_RADIUS + 1);
+function sliceStrikeWindow(strikes: readonly number[], atmIndex: number, scroll: number): number[] {
+  const center = Math.max(0, Math.min(strikes.length - 1, atmIndex + scroll));
+  const start = Math.max(0, center - CHAIN_STRIKE_RADIUS);
+  const end = Math.min(strikes.length, center + CHAIN_STRIKE_RADIUS + 1);
   return strikes.slice(start, end);
 }
 
@@ -58,6 +80,10 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     error: input.error,
     rows: [] as ChainWatchView['rows'],
     maxOpenInterest: 0,
+    strikeScroll: 0,
+    strikeScrollMin: 0,
+    strikeScrollMax: 0,
+    marketBias: marketBiasFromIndicators(input.indicators),
   };
   if (input.spot === undefined) {
     return { ...base, status: input.status === 'ready' ? 'waiting_spot' : input.status };
@@ -73,9 +99,12 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     return { ...base, expiry: input.chain.expiry, status: 'error', error: 'chain too thin to show strikes' };
   }
 
+  const atmIndex = strikePrices.findIndex((strike) => Math.abs(strike - atm) < EPSILON);
+  const scrollBounds = strikeScrollBounds(strikePrices.length, atmIndex);
+  const strikeScroll = Math.min(scrollBounds.max, Math.max(scrollBounds.min, input.strikeScroll));
   const bullishEntryStrike = targetEntryStrike(atm, step, 'BULLISH', input.offsetSteps);
   const bearishEntryStrike = targetEntryStrike(atm, step, 'BEARISH', input.offsetSteps);
-  const visible = sliceAroundAtm(strikePrices, atm);
+  const visible = sliceStrikeWindow(strikePrices, atmIndex, strikeScroll);
   let maxOi = 1;
   const rows = visible.map((strike) => {
     const row = input.chain!.strikes.find((candidate) => Math.abs(candidate.strike - strike) < EPSILON);
@@ -126,5 +155,9 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     status: 'ready',
     rows,
     maxOpenInterest: maxOi,
+    strikeScroll,
+    strikeScrollMin: scrollBounds.min,
+    strikeScrollMax: scrollBounds.max,
+    marketBias: marketBiasFromIndicators(input.indicators),
   };
 }

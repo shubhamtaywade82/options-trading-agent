@@ -85,6 +85,9 @@ export interface ChainWatchRowView {
   readonly put: ChainWatchLegView;
 }
 
+/** ST + EMA agree → single-sided chain lens; otherwise both columns. */
+export type ChainMarketBias = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+
 export interface ChainWatchView {
   readonly symbol: string;
   readonly spot: number | undefined;
@@ -97,6 +100,10 @@ export interface ChainWatchView {
   readonly error: string | undefined;
   readonly rows: readonly ChainWatchRowView[];
   readonly maxOpenInterest: number;
+  readonly strikeScroll: number;
+  readonly strikeScrollMin: number;
+  readonly strikeScrollMax: number;
+  readonly marketBias: ChainMarketBias;
 }
 
 export interface AgentView {

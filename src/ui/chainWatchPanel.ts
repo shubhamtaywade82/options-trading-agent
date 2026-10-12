@@ -1,99 +1,151 @@
-import chalk from 'chalk';
-import type { AgentView, ChainWatchRowView, ChainWatchView } from '../runtime/views.js';
+import type { AgentView, ChainWatchLegView, ChainWatchRowView, ChainWatchView } from '../runtime/views.js';
+import { bad, callSide, infoBold, muted, ok, putSide, warn } from './palette.js';
 import { fit } from './terminalFit.js';
 
-const dim = (text: string) => chalk.gray(text);
-const cyanBold = (text: string) => chalk.cyan.bold(text);
-const green = (text: string) => chalk.green(text);
-const red = (text: string) => chalk.red(text);
-const yellow = (text: string) => chalk.yellow(text);
-
 export const CHAIN_PANEL_ROWS = 9;
+
+const STRIKE_W = 8;
+const MARKS_W = 16;
+const PX_W = 7;
+const SPR_W = 6;
+const BAR_W = 10;
+const OI_W = 6;
 
 function price(value: number | undefined): string {
   return value === undefined ? '—' : value.toFixed(1);
 }
 
-function spreadText(value: number | undefined): string {
-  return value === undefined ? '—' : `${value.toFixed(1)}%`;
-}
-
-function oiBar(oi: number | undefined, maxOi: number, width: number): string {
-  if (oi === undefined || oi <= 0 || maxOi <= 0) {
-    return dim('·'.repeat(width));
+function compactOi(oi: number | undefined): string {
+  if (oi === undefined) {
+    return '—';
   }
-  const filled = Math.max(1, Math.round((oi / maxOi) * width));
-  return green('▮'.repeat(Math.min(width, filled))) + dim('▯'.repeat(Math.max(0, width - filled)));
+  if (oi >= 100_000) {
+    return `${(oi / 100_000).toFixed(1)}L`;
+  }
+  if (oi >= 1_000) {
+    return `${(oi / 1_000).toFixed(0)}k`;
+  }
+  return String(oi);
 }
 
-function markerSuffix(markers: ChainWatchRowView['markers']): string {
+function oiBar(oi: number | undefined, maxOi: number): string {
+  if (oi === undefined || oi <= 0 || maxOi <= 0) {
+    return muted('·'.repeat(BAR_W));
+  }
+  const filled = Math.max(1, Math.min(BAR_W, Math.round((oi / maxOi) * BAR_W)));
+  return ok('▮'.repeat(filled)) + muted('▯'.repeat(BAR_W - filled));
+}
+
+function marks(markers: ChainWatchRowView['markers']): string {
   const parts: string[] = [];
   if (markers.includes('ATM')) {
-    parts.push(yellow('ATM'));
+    parts.push(warn('ATM'));
   }
   if (markers.includes('CE_ENTRY')) {
-    parts.push(green('CE▸'));
+    parts.push(callSide('CE▸'));
   }
   if (markers.includes('PE_ENTRY')) {
-    parts.push(red('PE▸'));
+    parts.push(putSide('PE▸'));
   }
   if (markers.includes('OPEN')) {
-    parts.push(cyanBold('OPEN'));
+    parts.push(infoBold('OPEN'));
   }
-  return parts.length === 0 ? '' : ` ${parts.join(' ')}`;
+  return fit(parts.length === 0 ? muted('·') : parts.join(' '), MARKS_W);
 }
 
-function legCell(leg: ChainWatchView['rows'][number]['call'], width: number): string {
-  const quote = `${price(leg.bid)}/${price(leg.ask)}`;
-  const spread = spreadText(leg.spreadPct);
-  const tone = leg.passesGate ? quote : dim(quote);
-  const spreadTone = leg.passesGate ? spread : red(spread);
-  return fit(`${tone} ${spreadTone}`, width);
+function strikeCell(row: ChainWatchRowView): string {
+  const text = row.strike.toLocaleString('en-IN');
+  return fit(row.markers.includes('ATM') ? warn(text) : text, STRIKE_W);
 }
 
-function strikeRow(row: ChainWatchView['rows'][number], maxOi: number, inner: number): string {
-  const strikeW = 9;
-  const legW = Math.max(14, Math.floor((inner - strikeW - 4) / 2));
-  const oiW = 4;
-  const strike = fit(`${row.strike.toLocaleString('en-IN')}${markerSuffix(row.markers)}`, strikeW);
-  const callOi = oiBar(row.call.openInterest, maxOi, oiW);
-  const putOi = oiBar(row.put.openInterest, maxOi, oiW);
-  return fit(`${strike} │${legCell(row.call, legW)}${callOi}│${legCell(row.put, legW)}${putOi}│`, inner);
+function tone(text: string, passes: boolean): string {
+  return passes ? ok(text) : bad(text);
+}
+
+function quoteCells(leg: ChainWatchLegView, maxOi: number): string[] {
+  return [
+    fit(tone(price(leg.bid), leg.passesGate), PX_W),
+    fit(tone(price(leg.ask), leg.passesGate), PX_W),
+    fit(tone(leg.spreadPct === undefined ? '—' : `${leg.spreadPct.toFixed(1)}%`, leg.passesGate), SPR_W),
+    oiBar(leg.openInterest, maxOi),
+    fit(tone(compactOi(leg.openInterest), leg.passesGate), OI_W),
+  ];
+}
+
+function rowLine(cells: readonly string[], inner: number): string {
+  return fit(cells.join(' '), inner);
+}
+
+function lensRow(row: ChainWatchRowView, maxOi: number, inner: number, side: 'call' | 'put'): string {
+  const leg = side === 'call' ? row.call : row.put;
+  return rowLine([strikeCell(row), marks(row.markers), ...quoteCells(leg, maxOi)], inner);
+}
+
+function dualRow(row: ChainWatchRowView, maxOi: number, inner: number): string {
+  return rowLine([strikeCell(row), marks(row.markers), ...quoteCells(row.call, maxOi), ...quoteCells(row.put, maxOi)], inner);
+}
+
+function quoteHead(side: 'call' | 'put'): string[] {
+  const bid = side === 'call' ? callSide('BID') : putSide('BID');
+  return [fit(bid, PX_W), fit(muted('ASK'), PX_W), fit(muted('SPR'), SPR_W), fit(muted('OI'), BAR_W), fit('', OI_W)];
+}
+
+function headerCells(side: 'call' | 'put' | 'both'): string[] {
+  const lead = [fit(muted('STRIKE'), STRIKE_W), fit(muted('MARKS'), MARKS_W)];
+  if (side === 'both') {
+    return [...lead, ...quoteHead('call'), ...quoteHead('put')];
+  }
+  return [...lead, ...quoteHead(side)];
+}
+
+function biasLensLabel(watch: ChainWatchView): string {
+  if (watch.marketBias === 'BULLISH') {
+    return callSide(' CE lens · ST↑ EMA↑');
+  }
+  if (watch.marketBias === 'BEARISH') {
+    return putSide(' PE lens · ST↓ EMA↓');
+  }
+  return muted(' CE + PE · trend mixed');
+}
+
+function scrollHint(watch: ChainWatchView): string {
+  if (watch.strikeScrollMin === watch.strikeScrollMax) {
+    return '';
+  }
+  if (watch.strikeScroll === 0) {
+    return muted(' · window centered');
+  }
+  const atMin = watch.strikeScroll <= watch.strikeScrollMin;
+  const atMax = watch.strikeScroll >= watch.strikeScrollMax;
+  const pos = watch.strikeScroll > 0 ? ` · +${watch.strikeScroll} strikes` : ` · ${watch.strikeScroll} strikes`;
+  const edge = atMin ? ' ⟨' : atMax ? ' ⟩' : '';
+  return muted(`${pos}${edge}`);
 }
 
 function statusLine(watch: ChainWatchView, agent: AgentView | undefined, inner: number): string {
   if (watch.status === 'loading' || watch.status === 'idle') {
-    return dim(fit('  fetching option chain from Dhan…', inner));
+    return muted(fit('fetching option chain from Dhan…', inner));
   }
   if (watch.status === 'waiting_spot') {
-    return dim(fit('  waiting for a live index tick before anchoring strikes', inner));
+    return muted(fit('waiting for a live index tick before anchoring strikes', inner));
   }
   if (watch.status === 'error') {
-    return red(fit(`  ${watch.error ?? 'chain unavailable'}`, inner));
+    return bad(fit(watch.error ?? 'chain unavailable', inner));
   }
   const age =
-    watch.fetchedAgeMs === undefined
-      ? ''
-      : watch.fetchedAgeMs < 2000
-        ? dim(' fresh')
-        : dim(` ${Math.round(watch.fetchedAgeMs / 1000)}s ago`);
-  const spot = watch.spot === undefined ? '—' : watch.spot.toFixed(2);
-  const hint =
-    agent?.lastSignal?.direction === 'BULLISH'
-      ? green(' bias CE entry')
-      : agent?.lastSignal?.direction === 'BEARISH'
-        ? red(' bias PE entry')
-        : '';
-  return fit(
-    `  spot ${spot}  ATM ${watch.atmStrike?.toLocaleString('en-IN') ?? '—'}  expiry ${watch.expiry ?? '—'}${age}${hint}`,
-    inner,
-  );
+    watch.fetchedAgeMs === undefined ? '' : watch.fetchedAgeMs < 2000 ? ok(' fresh') : warn(` ${Math.round(watch.fetchedAgeMs / 1000)}s ago`);
+  const spot = watch.spot === undefined ? '—' : emphasisSpot(watch.spot);
+  const signal =
+    agent?.lastSignal?.direction === 'BULLISH' ? callSide(' last signal ↑') : agent?.lastSignal?.direction === 'BEARISH' ? putSide(' last signal ↓') : '';
+  return fit(`spot ${spot}   ATM ${warn(watch.atmStrike?.toLocaleString('en-IN') ?? '—')}   ${watch.expiry ?? '—'}${age}${biasLensLabel(watch)}${scrollHint(watch)}${signal}`, inner);
+}
+
+function emphasisSpot(spot: number): string {
+  return ok(spot.toFixed(2));
 }
 
 function legend(inner: number, maxSpread: number, minOi: number): string {
-  return dim(
-    fit(`  CE▸/PE▸ entry strikes · quotes pass spread≤${maxSpread}% & OI≥${minOi.toLocaleString('en-IN')}`, inner),
-  );
+  return muted(fit(`green quote passes spread ≤${maxSpread}% and OI ≥${minOi.toLocaleString('en-IN')} · CE▸/PE▸ entry strikes · ←→ scroll`, inner));
 }
 
 export function chainWatchLines(
@@ -104,23 +156,24 @@ export function chainWatchLines(
   minOpenInterest: number,
 ): string[] {
   const title = watch === undefined ? 'OPTION CHAIN' : `OPTION CHAIN · ${watch.symbol}`;
-  const lines: string[] = [fit(cyanBold(title), inner)];
+  const lines: string[] = [fit(infoBold(title), inner)];
   if (watch === undefined) {
-    lines.push(dim(fit('  select an underlying with ↑↓', inner)));
+    lines.push(muted(fit('select an underlying with ↑↓', inner)));
     while (lines.length < CHAIN_PANEL_ROWS) {
       lines.push(fit('', inner));
     }
     return lines;
   }
   lines.push(statusLine(watch, agent, inner));
+  const lens = watch.marketBias === 'BULLISH' ? 'call' : watch.marketBias === 'BEARISH' ? 'put' : 'both';
   if (watch.status === 'ready' && watch.rows.length > 0) {
-    lines.push(dim(fit('      CALL bid/ask spr│OI │      PUT bid/ask spr│OI ', inner)));
+    lines.push(rowLine(headerCells(lens), inner));
     for (const row of watch.rows) {
-      lines.push(strikeRow(row, watch.maxOpenInterest, inner));
+      lines.push(lens === 'both' ? dualRow(row, watch.maxOpenInterest, inner) : lensRow(row, watch.maxOpenInterest, inner, lens));
     }
     lines.push(legend(inner, maxSpreadPct, minOpenInterest));
   } else {
-    lines.push(dim(fit('  ladder appears once the chain loads', inner)));
+    lines.push(muted(fit('ladder appears once the chain loads', inner)));
   }
   while (lines.length < CHAIN_PANEL_ROWS) {
     lines.push(fit('', inner));

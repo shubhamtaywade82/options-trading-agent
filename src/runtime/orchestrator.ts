@@ -40,11 +40,15 @@ export interface OrchestratorServices {
    * Runs once, after the final event flush. Ends the run record, releases the leader lock and closes the
    * database and Redis connections. It must not throw, and it must be safe to call twice.
    */
-  readonly closeSession?: () => Promise<void>;
+  /** `aborted` is an operator immediate quit; paper mode releases the lease for instant restart. */
+  readonly closeSession?: (reason: 'stopped' | 'aborted') => Promise<void>;
 }
+
+export type StopKind = 'graceful' | 'immediate';
 
 const DEFAULT_CLOCK_INTERVAL_MS = 1_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 60_000;
+const IMMEDIATE_DRAIN_MS = 2_000;
 
 /**
  * Wires the feed, execution venue, market data and one agent per underlying
@@ -69,6 +73,7 @@ export class Orchestrator {
   private started = false;
   private stopRequested = false;
   private starting: Promise<void> | undefined;
+  private stopPromise: Promise<void> | undefined;
   private phase: CockpitSnapshot['phase'] = 'IDLE';
   private phaseDetail: string | undefined;
   private readonly viewListeners = new Set<() => void>();
@@ -99,6 +104,10 @@ export class Orchestrator {
   /** Drives REST chain polling for the cockpit selection only. */
   setCockpitFocus(symbol: string | undefined): void {
     this.chainWatch.setFocus(symbol);
+  }
+
+  nudgeCockpitChainScroll(delta: number): boolean {
+    return this.chainWatch.nudgeStrikeScroll(delta);
   }
 
   get dayBook(): DayBook {
@@ -195,8 +204,24 @@ export class Orchestrator {
     });
   }
 
-  /** Stops new entries, flattens through the normal exit path, then waits (bounded) for flat before closing I/O. */
-  async stop(): Promise<void> {
+  /** True after a stop has finished; used so the entrypoint does not stop twice. */
+  hasStopped(): boolean {
+    return this.phase === 'STOPPED';
+  }
+
+  /**
+   * Graceful stop waits for flat positions. Immediate stop tears down I/O at once and, in paper mode,
+   * releases the trading lease so the next dev:paper can start without waiting on TTL + order timeout.
+   */
+  async stop(kind: StopKind = 'graceful'): Promise<void> {
+    if (this.stopPromise !== undefined) {
+      return this.stopPromise;
+    }
+    this.stopPromise = this.stopInternal(kind);
+    return this.stopPromise;
+  }
+
+  private async stopInternal(kind: StopKind): Promise<void> {
     this.stopRequested = true;
     this.phase = 'STOPPING';
     await this.settleStart();
@@ -204,27 +229,30 @@ export class Orchestrator {
       clearInterval(this.timer);
       this.timer = undefined;
     }
-    // Ticks and execution events stay subscribed until flat: the exit fills arrive through them.
     for (const agent of this.agents.values()) {
       agent.requestShutdown();
     }
-    const flat = await this.waitUntil(
-      () => [...this.agents.values()].every((agent) => agent.isFlat()),
-      this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
-      // A rejected exit is retried on each poll, within its backoff, so a quiet option feed cannot stall shutdown.
-      () => {
-        for (const agent of this.agents.values()) {
-          agent.retryExit();
-        }
-      },
-    );
-    if (!flat) {
-      this.services.logger.error('shutdown timed out with open positions; live brackets remain at the broker', {});
+    let flat = true;
+    if (kind === 'graceful') {
+      flat = await this.waitUntil(
+        () => [...this.agents.values()].every((agent) => agent.isFlat()),
+        this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+        () => {
+          for (const agent of this.agents.values()) {
+            agent.retryExit();
+          }
+        },
+      );
+      if (!flat) {
+        this.services.logger.error('shutdown timed out with open positions; live brackets remain at the broker', {});
+      }
+    } else {
+      this.services.logger.warn('immediate shutdown; open positions are not flattened through the agent', {});
     }
     this.unsubscribeTicks?.();
     this.unsubscribeEvents?.();
-    const timeoutMs = this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
-    const drained = await withDeadline(Promise.all([...this.agents.values()].map((agent) => agent.drain())), timeoutMs, 'drain timed out').then(
+    const drainMs = kind === 'immediate' ? IMMEDIATE_DRAIN_MS : (this.services.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    const drained = await withDeadline(Promise.all([...this.agents.values()].map((agent) => agent.drain())), drainMs, 'drain timed out').then(
       () => true,
       () => false,
     );
@@ -234,9 +262,10 @@ export class Orchestrator {
     this.services.feed.stop();
     await this.services.execution.close();
     await this.services.events.flush();
-    await this.services.closeSession?.();
+    const sessionReason = kind === 'immediate' ? 'aborted' : 'stopped';
+    await this.services.closeSession?.(sessionReason);
     this.phase = 'STOPPED';
-    this.services.logger.info('agent stopped', { flat });
+    this.services.logger.info('agent stopped', { kind, flat });
   }
 
   /** Read-only state for the operator cockpit. Building it never changes trading state. */

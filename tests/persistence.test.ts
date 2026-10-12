@@ -192,7 +192,7 @@ describe('Lease', () => {
         }
         return store.renew(c, r, e, t);
       },
-      release: (c: string, r: string, e: number) => store.release(c, r, e),
+      release: (c: string, r: string, e: number, handoff: boolean, margin: number) => store.release(c, r, e, handoff, margin),
     };
     const lease = new Lease(flaky, {
       clientId: CLIENT,
@@ -240,6 +240,14 @@ describe('Lease', () => {
     assert.equal(a.holds(), false);
     assert.equal(a.epoch(), undefined, 'a lost lease has no epoch to write under');
     assert.match(lost[0] ?? '', /held by another run|expired/);
+  });
+
+  it('lets the next holder acquire at once after an immediate handoff release', async () => {
+    const f = fixture(900, 200);
+    const a = f.run('run-a');
+    await a.acquire();
+    await a.release(true);
+    assert.equal(await f.run('run-b').acquire(), true);
   });
 
   it('releases the lease for the next holder only after the margin', async () => {

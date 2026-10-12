@@ -52,6 +52,10 @@ const sampleChainWatch: ChainWatchView = {
   status: 'ready',
   error: undefined,
   maxOpenInterest: 500_000,
+  strikeScroll: 0,
+  strikeScrollMin: -2,
+  strikeScrollMax: 2,
+  marketBias: 'BULLISH',
   rows: [
     {
       strike: 22_450,
@@ -142,6 +146,10 @@ describe('cockpit content', () => {
     const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 0, notice: undefined, logs }).map(plain).join('\n');
     assert.match(text, /OPTION CHAIN · NIFTY/);
     assert.match(text, /CE▸/);
+    assert.match(text, /100\.0/);
+    assert.match(text, /5\.0L/);
+    assert.match(text, /window centered/);
+    assert.doesNotMatch(text, /22,450 ATM CE…/);
     assert.match(text, /SELECTED NIFTY/);
     assert.match(text, /BULLISH at 10:00:00 IST/);
     assert.match(text, /NIFTY 22450 CE 2026-10-15/);
@@ -159,7 +167,7 @@ describe('cockpit content', () => {
 
   it('marks a halted underlying and explains that it stays blocked until restart', () => {
     const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 1, notice: undefined, logs }).map(plain).join('\n');
-    assert.match(text, /BANKNIFTY HALTED HALT/);
+    assert.match(text, /BANKNIFTY\s+HALTED/);
     assert.match(text, /BANKNIFTY HALTED: entry unconfirmed/);
     assert.match(text, /until restart after review/);
   });

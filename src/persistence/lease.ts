@@ -10,8 +10,11 @@ export interface LeaseStore {
   acquire(clientId: string, runId: string, ttlMs: number, marginMs: number): Promise<number | undefined>;
   /** Extends the lease only while `runId` at `epoch` holds it and it has not expired. */
   renew(clientId: string, runId: string, epoch: number, ttlMs: number): Promise<boolean>;
-  /** Ends the lease now. The margin still applies to the next acquisition, so in-flight orders can finish. */
-  release(clientId: string, runId: string, epoch: number): Promise<void>;
+  /**
+   * Ends the lease now. Unless `immediateHandoff` is true, the margin still applies to the next
+   * acquisition so in-flight orders can finish.
+   */
+  release(clientId: string, runId: string, epoch: number, immediateHandoff: boolean, marginMs: number): Promise<void>;
 }
 
 /** Thrown by a fenced write when this process no longer holds the lease at the epoch it wrote under. */
@@ -51,11 +54,14 @@ export class PostgresLeaseStore implements LeaseStore {
     return (result.rowCount ?? 0) === 1;
   }
 
-  async release(clientId: string, runId: string, epoch: number): Promise<void> {
-    await this.pool.query(
-      'UPDATE leases SET expires_at = now() WHERE client_id = $1 AND holder_run = $2 AND epoch = $3 AND expires_at > now()',
-      [clientId, runId, epoch],
-    );
+  async release(clientId: string, runId: string, epoch: number, immediateHandoff: boolean, marginMs: number): Promise<void> {
+    const sql = immediateHandoff
+      ? `UPDATE leases SET expires_at = now() - make_interval(secs => $4::double precision)
+         WHERE client_id = $1 AND holder_run = $2 AND epoch = $3 AND expires_at > now()`
+      : `UPDATE leases SET expires_at = now()
+         WHERE client_id = $1 AND holder_run = $2 AND epoch = $3 AND expires_at > now()`;
+    const params = immediateHandoff ? [clientId, runId, epoch, marginMs / 1000] : [clientId, runId, epoch];
+    await this.pool.query(sql, params);
   }
 }
 
@@ -84,10 +90,10 @@ export class MemoryLeaseStore implements LeaseStore {
     return true;
   }
 
-  async release(clientId: string, runId: string, epoch: number): Promise<void> {
+  async release(clientId: string, runId: string, epoch: number, immediateHandoff: boolean, marginMs: number): Promise<void> {
     const current = this.leases.get(clientId);
     if (current !== undefined && current.runId === runId && current.epoch === epoch) {
-      current.expiresAt = this.now();
+      current.expiresAt = immediateHandoff ? this.now() - marginMs : this.now();
     }
   }
 }
@@ -157,14 +163,20 @@ export class Lease {
     this.lostListeners.push(listener);
   }
 
-  async release(): Promise<void> {
+  async release(immediateHandoff = false): Promise<void> {
     this.stopTimer();
     const epoch = this.epochValue;
     if (epoch === undefined) {
       return;
     }
     this.epochValue = undefined;
-    await this.store.release(this.options.clientId, this.options.runId, epoch);
+    await this.store.release(
+      this.options.clientId,
+      this.options.runId,
+      epoch,
+      immediateHandoff,
+      this.options.marginMs,
+    );
   }
 
   /** Exposed for tests. The timer calls this on every interval. Overlapping ticks share one renewal. */
