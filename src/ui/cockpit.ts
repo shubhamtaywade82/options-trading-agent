@@ -121,12 +121,17 @@ function price(value: number | undefined): string {
   return value === undefined ? '—' : value.toFixed(2);
 }
 
-function ageText(ms: number | undefined, staleMs: number): string {
+export function feedStatusText(ms: number | undefined, staleMs: number): string {
   if (ms === undefined) {
-    return bad('no tick');
+    return bad('○ NO TICK');
   }
-  const text = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-  return freshness(text, ms, staleMs);
+  if (ms > staleMs) {
+    return bad('✖ STALE');
+  }
+  if (ms > staleMs / 2) {
+    return warn('◐ DELAYED');
+  }
+  return ok('● LIVE');
 }
 
 function stateText(state: AgentView['state']): string {
@@ -206,7 +211,7 @@ function underlyingBlock(agent: AgentView, selected: boolean, width: number, sta
   const spot = freshness(price(agent.spot), agent.spotAgeMs, staleMs);
   return [
     fit(`${marker} ${name} ${stateText(agent.state)}${halt}`, width),
-    fit(`  ${muted('spot')} ${spot}  ${muted('age')} ${ageText(agent.spotAgeMs, staleMs)}`, width),
+    fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs)}`, width),
     fit(`  ${trend}  ${alignment}`, width),
     fit(`  ${orb}`, width),
     fit('', width),

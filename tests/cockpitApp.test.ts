@@ -5,6 +5,7 @@ import { createElement } from 'react';
 import { render, type Instance } from 'ink';
 import type { Runtime } from '../src/runtime/createRuntime.js';
 import App, { isConfirmation } from '../src/ui/App.js';
+import { feedStatusText } from '../src/ui/cockpit.js';
 import { fakeRuntime } from './support/fakeRuntime.js';
 
 const plain = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, '');
@@ -185,5 +186,23 @@ describe('isConfirmation', () => {
     assert.equal(isConfirmation(close, 'close', 'SENSEX', 9_000), false);
     assert.equal(isConfirmation(close, 'block', undefined, 9_000), false);
     assert.equal(isConfirmation(undefined, 'stop', undefined, 9_000), false);
+  });
+});
+
+describe('feedStatusText', () => {
+  it('returns LIVE for low latency ticks within stale threshold', () => {
+    assert.match(plain(feedStatusText(50, 5000)), /● LIVE/);
+  });
+
+  it('returns DELAYED when latency exceeds half the stale threshold', () => {
+    assert.match(plain(feedStatusText(3000, 5000)), /◐ DELAYED/);
+  });
+
+  it('returns STALE when latency exceeds the stale threshold', () => {
+    assert.match(plain(feedStatusText(6000, 5000)), /✖ STALE/);
+  });
+
+  it('returns NO TICK when tick latency is undefined', () => {
+    assert.match(plain(feedStatusText(undefined, 5000)), /○ NO TICK/);
   });
 });
