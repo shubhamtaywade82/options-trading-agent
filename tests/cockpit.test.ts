@@ -148,6 +148,8 @@ describe('cockpit content', () => {
     assert.match(text, /CE▸/);
     assert.match(text, /100\.0/);
     assert.match(text, /5\.0L/);
+    assert.match(text, /40\.0/);
+    assert.match(text, /straddle 141\.0/);
     assert.match(text, /window centered/);
     assert.doesNotMatch(text, /22,450 ATM CE…/);
     assert.match(text, /SELECTED NIFTY/);

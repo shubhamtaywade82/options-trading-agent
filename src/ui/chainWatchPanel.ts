@@ -72,19 +72,6 @@ function quoteCells(leg: ChainWatchLegView, maxOi: number): string[] {
   ];
 }
 
-function rowLine(cells: readonly string[], inner: number): string {
-  return fit(cells.join(' '), inner);
-}
-
-function lensRow(row: ChainWatchRowView, maxOi: number, inner: number, side: 'call' | 'put'): string {
-  const leg = side === 'call' ? row.call : row.put;
-  return rowLine([strikeCell(row), marks(row.markers), ...quoteCells(leg, maxOi)], inner);
-}
-
-function dualRow(row: ChainWatchRowView, maxOi: number, inner: number): string {
-  return rowLine([strikeCell(row), marks(row.markers), ...quoteCells(row.call, maxOi), ...quoteCells(row.put, maxOi)], inner);
-}
-
 function quoteHead(side: 'call' | 'put'): string[] {
   const bid = side === 'call' ? callSide('BID') : putSide('BID');
   return [fit(bid, PX_W), fit(muted('ASK'), PX_W), fit(muted('SPR'), SPR_W), fit(muted('OI'), BAR_W), fit('', OI_W)];
@@ -145,7 +132,49 @@ function emphasisSpot(spot: number): string {
 }
 
 function legend(inner: number, maxSpread: number, minOi: number): string {
-  return muted(fit(`green quote passes spread ≤${maxSpread}% and OI ≥${minOi.toLocaleString('en-IN')} · CE▸/PE▸ entry strikes · ←→ scroll`, inner));
+  return muted(fit(`green quote passes spread ≤${maxSpread}% and OI ≥${minOi.toLocaleString('en-IN')} · right side is the other wing · ←→ scroll`, inner));
+}
+
+const LADDER_W = 70;
+const STAT_W = 22;
+
+function legMid(leg: ChainWatchLegView): number | undefined {
+  if (leg.bid === undefined || leg.ask === undefined) {
+    return undefined;
+  }
+  return (leg.bid + leg.ask) / 2;
+}
+
+function readings(watch: ChainWatchView): string[] {
+  const atm = watch.rows.find((row) => row.markers.includes('ATM'));
+  const callMid = atm === undefined ? undefined : legMid(atm.call);
+  const putMid = atm === undefined ? undefined : legMid(atm.put);
+  const straddle = callMid === undefined || putMid === undefined ? undefined : callMid + putMid;
+  const callOi = watch.rows.reduce((sum, row) => sum + (row.call.openInterest ?? 0), 0);
+  const putOi = watch.rows.reduce((sum, row) => sum + (row.put.openInterest ?? 0), 0);
+  const pcr = callOi > 0 ? putOi / callOi : undefined;
+  const delta = watch.spot !== undefined && watch.atmStrike !== undefined ? watch.spot - watch.atmStrike : undefined;
+  const entryStrike = watch.marketBias === 'BEARISH' ? watch.bearishEntryStrike : watch.bullishEntryStrike;
+  const entry = watch.rows.find((row) => row.strike === entryStrike);
+  const entryLeg = watch.marketBias === 'BEARISH' ? entry?.put : entry?.call;
+  const vsAtm = delta === undefined ? 'vs ATM —' : delta < 0 ? putSide(`vs ATM ${delta.toFixed(1)}`) : callSide(`vs ATM +${delta.toFixed(1)}`);
+  return [
+    straddle === undefined ? 'straddle —' : `straddle ${straddle.toFixed(1)}`,
+    pcr === undefined ? 'PCR —' : pcr >= 1 ? putSide(`PCR ${pcr.toFixed(2)}`) : callSide(`PCR ${pcr.toFixed(2)}`),
+    vsAtm,
+    entryLeg === undefined ? 'entry —' : entryLeg.passesGate ? ok('entry pass') : bad('entry fail'),
+    `OI win ${compactOi(Math.max(callOi, putOi))}`,
+  ];
+}
+
+function pane(left: string, mid: string, stat: string, inner: number, singleWing: boolean): string {
+  const rule = muted(' │ ');
+  if (!singleWing || inner < LADDER_W + STAT_W + 8) {
+    const leftW = Math.max(40, inner - STAT_W - 3);
+    return fit(fit(left, leftW) + rule + fit(stat, STAT_W), inner);
+  }
+  const midW = inner - LADDER_W - STAT_W - 6;
+  return fit(fit(left, LADDER_W) + rule + fit(mid, midW) + rule + fit(stat, STAT_W), inner);
 }
 
 export function chainWatchLines(
@@ -166,11 +195,16 @@ export function chainWatchLines(
   }
   lines.push(statusLine(watch, agent, inner));
   const lens = watch.marketBias === 'BULLISH' ? 'call' : watch.marketBias === 'BEARISH' ? 'put' : 'both';
+  const other = lens === 'call' ? 'put' : lens === 'put' ? 'call' : undefined;
   if (watch.status === 'ready' && watch.rows.length > 0) {
-    lines.push(rowLine(headerCells(lens), inner));
-    for (const row of watch.rows) {
-      lines.push(lens === 'both' ? dualRow(row, watch.maxOpenInterest, inner) : lensRow(row, watch.maxOpenInterest, inner, lens));
-    }
+    const stats = readings(watch);
+    const midHead = other === undefined ? '' : quoteHead(other).join(' ');
+    lines.push(pane(headerCells(lens).join(' '), midHead, muted('READING'), inner, other !== undefined));
+    watch.rows.forEach((row, index) => {
+      const left = lens === 'both' ? [strikeCell(row), marks(row.markers), ...quoteCells(row.call, watch.maxOpenInterest), ...quoteCells(row.put, watch.maxOpenInterest)] : [strikeCell(row), marks(row.markers), ...quoteCells(lens === 'call' ? row.call : row.put, watch.maxOpenInterest)];
+      const mid = other === undefined ? '' : quoteCells(other === 'call' ? row.call : row.put, watch.maxOpenInterest).join(' ');
+      lines.push(pane(left.join(' '), mid, stats[index] ?? '', inner, other !== undefined));
+    });
     lines.push(legend(inner, maxSpreadPct, minOpenInterest));
   } else {
     lines.push(muted(fit('ladder appears once the chain loads', inner)));
