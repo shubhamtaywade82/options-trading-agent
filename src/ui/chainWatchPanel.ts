@@ -136,6 +136,8 @@ function legend(inner: number, maxSpread: number, minOi: number): string {
 }
 
 const LADDER_W = 70;
+const DUAL_W = 111;
+const OPPOSITE_W = 40;
 const STAT_W = 22;
 
 function legMid(leg: ChainWatchLegView): number | undefined {
@@ -186,12 +188,10 @@ function appendLadder(lines: string[], watch: ChainWatchView, inner: number): vo
 
 function pane(left: string, mid: string, stat: string, inner: number, singleWing: boolean): string {
   const rule = muted(' │ ');
-  if (!singleWing || inner < LADDER_W + STAT_W + 8) {
-    const leftW = Math.max(40, inner - STAT_W - 3);
-    return fit(fit(left, leftW) + rule + fit(stat, STAT_W), inner);
-  }
-  const midW = inner - LADDER_W - STAT_W - 6;
-  return fit(fit(left, LADDER_W) + rule + fit(mid, midW) + rule + fit(stat, STAT_W), inner);
+  const leftW = singleWing ? LADDER_W : DUAL_W;
+  const body = singleWing ? fit(left, leftW) + rule + fit(mid, OPPOSITE_W) : fit(left, leftW);
+  // Spare width stays after the reading so the column is not pushed to the far edge.
+  return fit(body + rule + fit(stat, STAT_W), inner);
 }
 
 export function chainWatchLines(
