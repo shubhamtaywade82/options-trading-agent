@@ -411,7 +411,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   ←→ chain   p posture   1/2 strat   c/k/s confirm twice   Ctrl+C×2 quit   ? help');
+  const keys = dim(' ↑↓ select   ←→ chain   p posture   1/2 strat   t test trade   c/k/s confirm   Ctrl+C×2 quit');
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }

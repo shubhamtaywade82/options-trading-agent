@@ -19,6 +19,7 @@
     "start": "node dist/index.js",
     "test": "tsx --test tests/*.test.ts",
     "smoke:live": "tsx scripts/smoke-live.ts",
+    "smoke:trade": "tsx scripts/smoke-trade-cycle.ts",
     "smoke:feed": "tsx scripts/smoke-feed.ts",
     "journal:summary": "tsx scripts/journal-summary.ts",
     "cockpit:demo": "tsx scripts/cockpit-demo.ts",

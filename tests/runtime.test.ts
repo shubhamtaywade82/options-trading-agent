@@ -498,7 +498,7 @@ describe('runtime: shutdown exits', () => {
     // The venue rejects the first SELL. The 10 s backoff runs on the injected clock, so move it past
     // the backoff while stop is polling. No option tick arrives during the stop.
     const stopping = harness.orchestrator.stop();
-    setTimeout(() => harness?.setClock('10:05:00'), 300);
+    setTimeout(() => harness?.setClock('10:05:00'), 100);
     await stopping;
 
     assert.deepEqual(exits.map((order) => order.reason), ['SHUTDOWN', 'SHUTDOWN']);
@@ -770,6 +770,22 @@ describe('runtime: durable intents and the trading gate', () => {
     await triggerBreakout(harness);
     assert.ok(durableTypes.includes('halted'), 'the halt is durable');
     assert.ok(durableTypes.includes('book_kill_switch'), 'the kill switch it set is durable');
+  });
+
+  it('triggers a test trade directly on demand and executes the trade lifecycle', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
+    const msg = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    assert.match(msg, /test BULLISH signal triggered/);
+    await settle(harness.orchestrator);
+    assert.ok(harness.events.some((event) => event.type === 'entry_submitted'), 'test trade triggered entry');
+  });
+
+  it('rejects test trades in live mode', async () => {
+    const harness = build({ MODE: 'live', LIVE_TRADING_ACK: 'I_ACCEPT_LIVE_ORDER_RISK', REDIS_URL: 'redis://test.invalid' });
+    const msg = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    assert.match(msg, /disabled in live mode/);
   });
 });
 

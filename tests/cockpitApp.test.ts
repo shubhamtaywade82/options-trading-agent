@@ -148,6 +148,16 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
     });
   });
 
+  it('triggers a test trade on t keypress for the selected underlying', async () => {
+    const { runtime, stop } = fakeRuntime();
+    stops.push(stop);
+    await withTerminal(runtime, {}, async ({ stdout, press }) => {
+      press('t');
+      await wait(40);
+      assert.match(stdout.text, /no spot tick received yet/i);
+    });
+  });
+
   it('shows a resize notice instead of a broken frame on a small terminal', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);

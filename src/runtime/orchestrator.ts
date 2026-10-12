@@ -366,6 +366,21 @@ export class Orchestrator {
     return result;
   }
 
+  /** Triggers an immediate test trade on the live market for fast end-to-end verification without waiting for candle closes. */
+  triggerTestTrade(symbol: string, direction: 'BULLISH' | 'BEARISH' = 'BULLISH'): string {
+    if (this.config.mode === 'live') {
+      return `${symbol}: test trades are disabled in live mode; switch to paper or sandbox`;
+    }
+    const agent = this.agents.get(symbol);
+    if (agent === undefined) {
+      return `${symbol}: not traded by this agent`;
+    }
+    const result = agent.triggerTestSignal(direction);
+    this.services.logger.info('operator test trade triggered', { symbol, direction, result });
+    this.notifyView();
+    return result;
+  }
+
   private createAgent(spec: UnderlyingSpec): UnderlyingAgent {
     const feed: FeedPort = {
       ageMs: (ref) => this.services.feed.ageMs(ref),

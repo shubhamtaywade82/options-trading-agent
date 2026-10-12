@@ -160,6 +160,14 @@ export default function App({ runtime }: { runtime: Runtime }) {
       setNotice(orchestrator.toggleStrategy('trend'));
       return;
     }
+    if (input === 't') {
+      if (selectedSymbol === undefined) {
+        setNotice('no underlying selected');
+        return;
+      }
+      setNotice(orchestrator.triggerTestTrade(selectedSymbol));
+      return;
+    }
     if (input === 'c') {
       if (selectedSymbol === undefined) {
         setNotice('no underlying selected');
@@ -177,7 +185,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === '?') {
-      setNotice('↑↓ select · ←→ chain · p posture · 1/2 strat · c close · k block · s stop (×2) · Ctrl+C×2 quit');
+      setNotice('↑↓ select · ←→ chain · p posture · 1/2 strat · t test trade · c close · k block · s stop (×2)');
     }
   });
 

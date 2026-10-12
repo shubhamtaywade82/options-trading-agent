@@ -4,6 +4,7 @@ import { TradeStateMachine, type TradeEvent, type TradeState } from '../domain/f
 import {
   instrumentKey,
   type Candle,
+  type Direction,
   type ExitReason,
   type InstrumentRef,
   type OpenPosition,
@@ -281,36 +282,62 @@ export class UnderlyingAgent {
       return;
     }
     const signal = this.strategySession.evaluate(this.bars.all(), this.orb);
-    if (signal === undefined) {
-      return;
+    if (signal !== undefined) {
+      await this.processSignal(signal);
     }
+  }
 
+  /** Injects a test signal on the live market for fast end-to-end verification without waiting for a candle close. */
+  triggerTestSignal(direction: Direction = 'BULLISH'): string {
+    if (this.fsm.state !== 'IDLE') {
+      return `${this.symbol}: cannot test trade while state is ${this.fsm.state}`;
+    }
+    const spot = this.lastSpot?.price;
+    if (spot === undefined) {
+      return `${this.symbol}: no spot tick received yet; wait for market data`;
+    }
+    const signal: Signal = {
+      underlying: this.symbol,
+      direction,
+      barTime: this.now(),
+      spot,
+      reasons: [`operator test trade (${direction})`],
+    };
+    this.queue.run(() => this.processSignal(signal));
+    return `${this.symbol}: test ${direction} signal triggered at spot ${spot}`;
+  }
+
+  private async processSignal(signal: Signal): Promise<void> {
     this.fsm.dispatch('SIGNAL_FOUND');
     this.lastSignal = { direction: signal.direction, barTime: signal.barTime, spot: signal.spot, reasons: signal.reasons, at: this.now() };
     this.record('signal_detected', { direction: signal.direction, spot: signal.spot, reasons: signal.reasons });
     this.deps.logger.info('signal detected', { underlying: this.symbol, direction: signal.direction, spot: signal.spot });
 
-    let prepared: Preparation;
-    try {
-      prepared = await this.prepareEntry(signal);
-    } catch (error) {
-      prepared = { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
-    }
-    // Checked after the awaits and again right before submission. An operator block, a halt, a breach
-    // or a stop can land during market data or the advisor, and nothing downstream rechecks.
-    if (prepared.ok) {
-      const blocked = this.entryBlockReason();
-      if (blocked !== undefined) {
-        prepared = { ok: false, code: 'ENTRY_BLOCKED', detail: blocked };
-      }
-    }
+    const prepared = await this.validatePreparation(signal);
     if (!prepared.ok) {
       this.drop(prepared.code, prepared.detail);
       return;
     }
+    await this.submitPreparedOrder(prepared.order);
+  }
 
-    const { order } = prepared;
-    // The intent must be durable before the broker call. A crash after the call must still find it on restart.
+  private async validatePreparation(signal: Signal): Promise<Preparation> {
+    let prepared: Preparation;
+    try {
+      prepared = await this.prepareEntry(signal);
+    } catch (error) {
+      return { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
+    }
+    if (prepared.ok) {
+      const blocked = this.entryBlockReason();
+      if (blocked !== undefined) {
+        return { ok: false, code: 'ENTRY_BLOCKED', detail: blocked };
+      }
+    }
+    return prepared;
+  }
+
+  private async submitPreparedOrder(order: EntryOrder): Promise<void> {
     try {
       await withDeadline(
         this.durableRecord('entry_submitted', {
@@ -329,15 +356,16 @@ export class UnderlyingAgent {
       this.drop('INTENT_NOT_DURABLE', describe(error));
       return;
     }
-    // The durable write is an await, so the gate is read again before the state moves and the order is sent.
-    // An intent that is journalled but not sent is recorded as rejected, which restore reads as released.
     const blockedAfterIntent = this.entryBlockReason();
     if (blockedAfterIntent !== undefined) {
       this.record('entry_rejected', { correlationId: order.correlationId, reason: `ABORTED_AFTER_INTENT: ${blockedAfterIntent}` });
       this.drop('ENTRY_BLOCKED', blockedAfterIntent);
       return;
     }
+    this.dispatchEntry(order);
+  }
 
+  private dispatchEntry(order: EntryOrder): void {
     this.fsm.dispatch('ENTRY_SUBMITTED');
     this.pending = order;
     this.deps.book.recordEntry(this.symbol);
@@ -351,7 +379,7 @@ export class UnderlyingAgent {
       target: order.targetPrice,
     });
     try {
-      await this.deps.execution.submitEntry(order);
+      void this.deps.execution.submitEntry(order);
     } catch (error) {
       this.halt(`entry submission threw: ${describe(error)}`, 'ENTRY_UNCONFIRMED');
     }
