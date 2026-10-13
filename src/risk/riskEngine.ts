@@ -5,6 +5,8 @@ export type RiskCode =
   | 'TRADE_COUNT_LIMIT'
   | 'OPEN_POSITION_LIMIT'
   | 'UNDERLYING_ALREADY_OPEN'
+  | 'UNDERLYING_SIDE_ALREADY_OPEN'
+  | 'UNDERLYING_POSITION_LIMIT'
   | 'COOLDOWN_ACTIVE'
   | 'OUTSIDE_ENTRY_WINDOW'
   | 'EXPIRY_DAY_CUTOFF'
@@ -42,7 +44,10 @@ export interface PreTradeInput {
   readonly maxTradesPerDay: number;
   readonly openPositions: number;
   readonly maxOpenPositions: number;
-  readonly underlyingOpen: boolean;
+  readonly underlyingOpen?: boolean;
+  readonly sideOpen?: boolean;
+  readonly underlyingOpenPositions?: number;
+  readonly maxPositionsPerUnderlying?: number;
   readonly cooldownUntilMs: number | undefined;
 
   /** Age of the latest spot tick; undefined when no tick has ever arrived. */
@@ -90,8 +95,20 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (input.openPositions >= input.maxOpenPositions) {
     add('OPEN_POSITION_LIMIT', `${input.openPositions} open, limit ${input.maxOpenPositions}`);
   }
-  if (input.underlyingOpen) {
+  if (input.sideOpen === true) {
+    add('UNDERLYING_SIDE_ALREADY_OPEN', 'this underlying already has an open position on this side');
+  }
+  if (input.underlyingOpen === true) {
     add('UNDERLYING_ALREADY_OPEN', 'this underlying already has an open position or pending entry');
+  }
+  if (
+    input.maxPositionsPerUnderlying !== undefined &&
+    (input.underlyingOpenPositions ?? 0) >= input.maxPositionsPerUnderlying
+  ) {
+    add(
+      'UNDERLYING_POSITION_LIMIT',
+      `${input.underlyingOpenPositions ?? 0} open for underlying, limit ${input.maxPositionsPerUnderlying}`,
+    );
   }
   if (input.cooldownUntilMs !== undefined && input.nowMs < input.cooldownUntilMs) {
     add('COOLDOWN_ACTIVE', `cooldown until ${new Date(input.cooldownUntilMs).toISOString()}`);

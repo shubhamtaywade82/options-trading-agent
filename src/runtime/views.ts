@@ -120,6 +120,7 @@ export interface AgentView {
   readonly lastCandidate: CandidateView | undefined;
   readonly lastExit: ExitView | undefined;
   readonly position: PositionView | undefined;
+  readonly positions: readonly PositionView[];
   readonly cooldownUntil: number | undefined;
 }
 
@@ -144,6 +145,7 @@ export interface CockpitSnapshot {
     readonly dayPnlInr: number;
     readonly tradesToday: number;
     readonly openUnderlyings: readonly string[];
+    readonly openPositions: number;
     readonly killSwitchReason: string | undefined;
   };
   readonly underlyings: readonly AgentView[];

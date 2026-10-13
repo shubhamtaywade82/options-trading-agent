@@ -1,4 +1,9 @@
+import type { OptionType } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
+
+function sideKey(underlying: string, optionType?: OptionType): string {
+  return optionType !== undefined ? `${underlying}:${optionType}` : underlying;
+}
 
 export interface DaySnapshot {
   readonly dayKey: string;
@@ -7,6 +12,7 @@ export interface DaySnapshot {
   readonly dayPnlInr: number;
   readonly tradesToday: number;
   readonly openUnderlyings: readonly string[];
+  readonly openPositions: number;
   readonly killSwitchReason: string | undefined;
   /** Set once the day has breached its loss limit. Latched separately from killSwitchReason, which an operator block can occupy first. */
   readonly dailyLossBreach: string | undefined;
@@ -23,7 +29,7 @@ export class DayBook {
   private realized = 0;
   private trades = 0;
   private readonly openPnl = new Map<string, number>();
-  private readonly openUnderlyings = new Set<string>();
+  private readonly openSides = new Set<string>();
   private readonly cooldownUntil = new Map<string, number>();
   private killSwitchReason: string | undefined;
   private dailyLossBreach: string | undefined;
@@ -47,33 +53,49 @@ export class DayBook {
     this.cooldownUntil.clear();
   }
 
-  recordEntry(underlying: string): void {
+  recordEntry(underlying: string, optionType?: OptionType): void {
     this.trades += 1;
-    this.openUnderlyings.add(underlying);
+    this.openSides.add(sideKey(underlying, optionType));
   }
 
-  /** Marks an underlying as holding (or having a pending) position without counting an entry. */
-  markOpen(underlying: string): void {
-    this.openUnderlyings.add(underlying);
+  /** Marks an underlying or side as holding (or having a pending) position without counting an entry. */
+  markOpen(underlying: string, optionType?: OptionType): void {
+    this.openSides.add(sideKey(underlying, optionType));
   }
 
-  setOpenPnl(underlying: string, pnlInr: number): void {
-    this.openPnl.set(underlying, pnlInr);
+  setOpenPnl(underlying: string, pnlInr: number, optionType?: OptionType): void {
+    this.openPnl.set(sideKey(underlying, optionType), pnlInr);
   }
 
-  recordClose(input: { underlying: string; pnlInr: number; closedAtMs: number }): void {
+  recordClose(input: { underlying: string; optionType?: OptionType; pnlInr: number; closedAtMs: number }): void {
     this.realized += input.pnlInr;
-    this.openUnderlyings.delete(input.underlying);
-    this.openPnl.delete(input.underlying);
+    const key = sideKey(input.underlying, input.optionType);
+    this.openSides.delete(key);
+    this.openPnl.delete(key);
     if (this.cooldownMs > 0) {
       this.cooldownUntil.set(input.underlying, input.closedAtMs + this.cooldownMs);
     }
   }
 
-  /** Releases an underlying whose entry never reached the market (rejected or not filled). */
-  releaseUnfilled(underlying: string): void {
-    this.openUnderlyings.delete(underlying);
-    this.openPnl.delete(underlying);
+  /** Releases an underlying or side whose entry never reached the market (rejected or not filled). */
+  releaseUnfilled(underlying: string, optionType?: OptionType): void {
+    const key = sideKey(underlying, optionType);
+    this.openSides.delete(key);
+    this.openPnl.delete(key);
+  }
+
+  isSideOpen(underlying: string, optionType: OptionType): boolean {
+    return this.openSides.has(`${underlying}:${optionType}`) || this.openSides.has(underlying);
+  }
+
+  underlyingOpenPositions(underlying: string): number {
+    let count = 0;
+    for (const key of this.openSides) {
+      if (key === underlying || key.startsWith(`${underlying}:`)) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   activateKillSwitch(reason: string): void {
@@ -104,13 +126,22 @@ export class DayBook {
     for (const value of this.openPnl.values()) {
       unrealized += value;
     }
+    const underlyings = new Set<string>();
+    for (const key of this.openSides) {
+      const parts = key.split(':');
+      const symbol = parts[0];
+      if (symbol !== undefined) {
+        underlyings.add(symbol);
+      }
+    }
     return {
       dayKey: this.dayKey,
       realizedPnlInr: this.realized,
       unrealizedPnlInr: unrealized,
       dayPnlInr: this.realized + unrealized,
       tradesToday: this.trades,
-      openUnderlyings: [...this.openUnderlyings].sort(),
+      openUnderlyings: [...underlyings].sort(),
+      openPositions: this.openSides.size,
       killSwitchReason: this.killSwitchReason,
       dailyLossBreach: this.dailyLossBreach,
     };

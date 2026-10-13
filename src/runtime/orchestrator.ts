@@ -295,6 +295,7 @@ export class Orchestrator {
         dayPnlInr: day.dayPnlInr,
         tradesToday: day.tradesToday,
         openUnderlyings: day.openUnderlyings,
+        openPositions: day.openPositions,
         killSwitchReason: day.killSwitchReason,
       },
       underlyings: this.specs.flatMap((spec) => {

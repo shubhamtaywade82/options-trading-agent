@@ -308,8 +308,13 @@ function positionColumn(agent: AgentView | undefined, maxHoldMinutes: number, wi
   if (agent === undefined) {
     return [fit(dim('no underlying selected'), width)];
   }
-  if (agent.position !== undefined) {
-    return positionLines(agent.position, maxHoldMinutes, width);
+  const positions = agent.positions && agent.positions.length > 0 ? agent.positions : (agent.position ? [agent.position] : []);
+  if (positions.length > 0) {
+    const lines: string[] = [];
+    for (const pos of positions) {
+      lines.push(...positionLines(pos, maxHoldMinutes, width));
+    }
+    return lines;
   }
   const lines: string[] = [fit(dim('  flat'), width)];
   lines.push(fit(label('LAST EXIT'), width));
@@ -331,6 +336,7 @@ function riskBar(lossUsedPct: number, cells: number): string {
 function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
   const day = snapshot.day;
   const lossUsedPct = day.dayPnlInr < 0 && snapshot.dailyLossLimitInr > 0 ? (-day.dayPnlInr / snapshot.dailyLossLimitInr) * 100 : 0;
+  const openCount = day.openPositions ?? day.openUnderlyings.length;
   const lines: string[] = [
     fit(cyanBold(`DAY ${day.dayKey}`), width),
     fit(`P&L ${formatSignedInr(day.dayPnlInr)}`, width),
@@ -338,7 +344,7 @@ function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
     fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
     fit(
-      `trades ${day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`}  open ${day.openUnderlyings.length}/${snapshot.maxOpenPositions}`,
+      `trades ${day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`}  open ${openCount}/${snapshot.maxOpenPositions}`,
       width,
     ),
     fit(`capital ${formatInrWhole(snapshot.capitalInr)}`, width),
