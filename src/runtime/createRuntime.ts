@@ -137,6 +137,12 @@ async function compose(
       }
       return countOpenOptionLegs(dataClient);
     },
+    brokerOpenPositions: async () => {
+      if (venue !== undefined) {
+        return venue.getOpenPositions();
+      }
+      return [];
+    },
     brokerLiveOrderCount: async () => {
       if (config.mode === 'live') {
         return countLiveOrders(dataClient);

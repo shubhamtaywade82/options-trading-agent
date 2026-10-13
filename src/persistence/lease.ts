@@ -8,6 +8,8 @@ import type { Pool } from 'pg';
 export interface LeaseStore {
   /** Returns the new epoch when the lease was free, expired and past `marginMs`. Undefined otherwise. */
   acquire(clientId: string, runId: string, ttlMs: number, marginMs: number): Promise<number | undefined>;
+  /** Unconditionally claims or advances the lease epoch, used for immediate recovery in paper mode. */
+  takeover?(clientId: string, runId: string, ttlMs: number): Promise<number | undefined>;
   /** Extends the lease only while `runId` at `epoch` holds it and it has not expired. */
   renew(clientId: string, runId: string, epoch: number, ttlMs: number): Promise<boolean>;
   /**
@@ -45,6 +47,21 @@ export class PostgresLeaseStore implements LeaseStore {
     return row === undefined ? undefined : Number(row.epoch);
   }
 
+  async takeover(clientId: string, runId: string, ttlMs: number): Promise<number | undefined> {
+    const result = await this.pool.query<{ epoch: string }>(
+      `INSERT INTO leases (client_id, holder_run, epoch, expires_at)
+       VALUES ($1, $2, 1, now() + make_interval(secs => $3::double precision))
+       ON CONFLICT (client_id) DO UPDATE
+         SET holder_run = EXCLUDED.holder_run,
+             epoch = leases.epoch + 1,
+             expires_at = EXCLUDED.expires_at
+       RETURNING epoch::text AS epoch`,
+      [clientId, runId, ttlMs / 1000],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : Number(row.epoch);
+  }
+
   async renew(clientId: string, runId: string, epoch: number, ttlMs: number): Promise<boolean> {
     const result = await this.pool.query(
       `UPDATE leases SET expires_at = now() + make_interval(secs => $4::double precision)
@@ -76,6 +93,13 @@ export class MemoryLeaseStore implements LeaseStore {
     if (current !== undefined && current.expiresAt > this.now() - marginMs) {
       return undefined;
     }
+    const epoch = (current?.epoch ?? 0) + 1;
+    this.leases.set(clientId, { runId, epoch, expiresAt: this.now() + ttlMs });
+    return epoch;
+  }
+
+  async takeover(clientId: string, runId: string, ttlMs: number): Promise<number | undefined> {
+    const current = this.leases.get(clientId);
     const epoch = (current?.epoch ?? 0) + 1;
     this.leases.set(clientId, { runId, epoch, expiresAt: this.now() + ttlMs });
     return epoch;
@@ -136,10 +160,13 @@ export class Lease {
     this.clearTimer = options.clearTimer ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
   }
 
-  /** Takes the lease if it is free and past the margin. Returns false when another run holds it. */
-  async acquire(): Promise<boolean> {
+  /** Takes the lease if it is free and past the margin. When takeover is true, claims it immediately. */
+  async acquire(takeover = false): Promise<boolean> {
     const sentAt = this.now();
-    const epoch = await this.store.acquire(this.options.clientId, this.options.runId, this.options.ttlMs, this.options.marginMs);
+    const epoch =
+      takeover && this.store.takeover !== undefined
+        ? await this.store.takeover(this.options.clientId, this.options.runId, this.options.ttlMs)
+        : await this.store.acquire(this.options.clientId, this.options.runId, this.options.ttlMs, this.options.marginMs);
     if (epoch === undefined) {
       return false;
     }

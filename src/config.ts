@@ -282,12 +282,12 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     underlyings: parseUnderlyings(env),
     capital: {
       inr: number(env, 'CAPITAL_INR', 100_000, { min: 1_000, max: 1e12 }),
-      maxRiskPerTradePct: number(env, 'MAX_RISK_PER_TRADE_PCT', 1, { min: 0.01, max: 10 }),
-      maxDailyLossPct: number(env, 'MAX_DAILY_LOSS_PCT', 3, { min: 0.01, max: 50 }),
+      maxRiskPerTradePct: number(env, 'MAX_RISK_PER_TRADE_PCT', 1, { min: 0.01, max: 30 }),
+      maxDailyLossPct: number(env, 'MAX_DAILY_LOSS_PCT', 3, { min: 0.01, max: 100 }),
       maxOpenPositions: number(env, 'MAX_OPEN_POSITIONS', 6, { min: 1, max: 20, integer: true }),
       maxPositionsPerUnderlying: number(env, 'MAX_POSITIONS_PER_UNDERLYING', 2, { min: 1, max: 10, integer: true }),
       maxPositionsPerSide: number(env, 'MAX_POSITIONS_PER_SIDE', 1, { min: 1, max: 5, integer: true }),
-      maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 1, max: 50, integer: true }),
+      maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 0, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
     },
     contract: {

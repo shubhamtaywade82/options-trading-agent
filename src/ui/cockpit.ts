@@ -344,7 +344,7 @@ function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
     fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
     fit(
-      `trades ${day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`}  open ${openCount}/${snapshot.maxOpenPositions}`,
+      `trades ${snapshot.maxTradesPerDay > 0 ? (day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday} (unlimited)`}  open ${openCount}/${snapshot.maxOpenPositions}`,
       width,
     ),
     fit(`capital ${formatInrWhole(snapshot.capitalInr)}`, width),

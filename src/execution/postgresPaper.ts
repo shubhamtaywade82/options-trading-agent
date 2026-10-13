@@ -62,9 +62,14 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
     return this.store.balance(this.options.clientId);
   }
 
-  /** Open positions the venue holds. The orchestrator refuses to start while this is non-zero. */
+  /** Open positions the venue holds. */
   openPositionCount(): number {
     return this.positions.size;
+  }
+
+  /** Read-only snapshot of open positions held by the venue, used to adopt on startup. */
+  getOpenPositions(): readonly PaperPositionRecord[] {
+    return [...this.positions.values()];
   }
 
   onEvent(listener: ExecutionListener): () => void {

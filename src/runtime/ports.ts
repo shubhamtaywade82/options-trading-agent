@@ -1,6 +1,18 @@
 import type { Candle, InstrumentRef, OptionContract, OptionSegment, UnderlyingSpec } from '../domain/types.js';
 import type { ChainSnapshot } from '../options/selector.js';
 
+export interface DiscoveredOpenPosition {
+  readonly positionId: string;
+  readonly underlying: string;
+  readonly securityId: string;
+  readonly exchangeSegment: string;
+  readonly quantity: number;
+  readonly averagePrice: number;
+  readonly stopLossPrice?: number;
+  readonly targetPrice?: number;
+  readonly openedAt?: number;
+}
+
 /** Everything the agent needs from the market-data side, behind one seam for tests. */
 export interface MarketPort {
   intradayCandles(spot: InstrumentRef, barMinutes: number, fromDate: string, toDate: string): Promise<Candle[]>;
@@ -9,8 +21,10 @@ export interface MarketPort {
   optionContracts(underlying: UnderlyingSpec['symbol'], optionSegment: OptionSegment): Promise<readonly OptionContract[]>;
   /** Funds the premium can be paid from. Paper uses configured capital; live uses the broker balance. */
   availableFunds(): Promise<number>;
-  /** Live only: number of option legs with a non-zero net quantity at the broker. Paper returns 0. */
+  /** Live or paper: number of option legs with a non-zero net quantity at the broker/venue. */
   brokerOpenOptionCount(): Promise<number>;
+  /** Discovered open positions to adopt on startup if any exist. */
+  brokerOpenPositions?(): Promise<readonly DiscoveredOpenPosition[]>;
   /**
    * Live only: orders and super orders at the broker that are not in a terminal status, or whose status is
    * missing. An order the process sent before a crash shows here even before it fills. Paper returns 0.

@@ -8,7 +8,7 @@ import type { Logger } from '../ops/logger.js';
 import { DayBook } from '../risk/dayBook.js';
 import { istParts, shiftDateKey } from '../time/ist.js';
 import { assertWarmupClock } from './clockGuard.js';
-import type { FeedPort, MarketPort } from './ports.js';
+import type { DiscoveredOpenPosition, FeedPort, MarketPort } from './ports.js';
 import { CockpitChainWatch } from './cockpitChainWatch.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
 import type { CockpitSnapshot } from './views.js';
@@ -157,10 +157,14 @@ export class Orchestrator {
     this.started = true;
 
     const openLegs = await this.services.market.brokerOpenOptionCount();
+    let adoptable: readonly DiscoveredOpenPosition[] = [];
     if (openLegs > 0) {
-      throw new Error(
-        `broker reports ${openLegs} open option position(s) before start; close or adopt them before starting the agent`,
-      );
+      adoptable = (await this.services.market.brokerOpenPositions?.()) ?? [];
+      if (adoptable.length !== openLegs || adoptable.length === 0) {
+        throw new Error(
+          `broker reports ${openLegs} open option position(s) before start; close or adopt them before starting the agent`,
+        );
+      }
     }
     // An order accepted just before a crash has no position yet, so only the order book can show it.
     const liveOrders = await this.services.market.brokerLiveOrderCount();
@@ -198,6 +202,9 @@ export class Orchestrator {
       throw new Error('stop requested while the agent was starting');
     }
     this.services.feed.subscribe(this.specs.map((spec) => spec.spot));
+    if (adoptable.length > 0) {
+      await this.adoptPositions(adoptable);
+    }
 
     this.timer = setInterval(() => this.onClock(), this.services.clockIntervalMs ?? DEFAULT_CLOCK_INTERVAL_MS);
     this.timer.unref?.();
@@ -205,6 +212,37 @@ export class Orchestrator {
       mode: this.config.mode,
       underlyings: this.specs.map((spec) => spec.symbol),
     });
+  }
+
+  private async adoptPositions(positions: readonly DiscoveredOpenPosition[]): Promise<void> {
+    for (const pos of positions) {
+      const agent = this.agents.get(pos.underlying);
+      const spec = this.specs.find((s) => s.symbol === pos.underlying);
+      if (agent === undefined || spec === undefined) {
+        throw new Error(`cannot adopt position for unknown underlying: ${pos.underlying}`);
+      }
+      const contracts = await this.services.market.optionContracts(pos.underlying, spec.optionSegment);
+      const contract = contracts.find((c) => c.securityId === pos.securityId);
+      if (contract === undefined) {
+        throw new Error(`cannot adopt position: contract ${pos.securityId} not found in scrip master for ${pos.underlying}`);
+      }
+      agent.adoptPosition({
+        positionId: pos.positionId,
+        underlying: pos.underlying,
+        contract,
+        quantity: pos.quantity,
+        averagePrice: pos.averagePrice,
+        stopLossPrice: pos.stopLossPrice ?? pos.averagePrice * 0.8,
+        targetPrice: pos.targetPrice ?? pos.averagePrice * 1.4,
+        openedAt: pos.openedAt ?? this.now(),
+      });
+      this.services.logger.info('reconciled and adopted open position', {
+        underlying: pos.underlying,
+        contract: contract.symbol,
+        quantity: pos.quantity,
+        averagePrice: pos.averagePrice,
+      });
+    }
   }
 
   /** True after a stop has finished; used so the entrypoint does not stop twice. */
@@ -368,7 +406,7 @@ export class Orchestrator {
   }
 
   /** Triggers an immediate test trade on the live market for fast end-to-end verification without waiting for candle closes. */
-  triggerTestTrade(symbol: string, direction: 'BULLISH' | 'BEARISH' = 'BULLISH'): string {
+  triggerTestTrade(symbol: string, direction?: 'BULLISH' | 'BEARISH'): string {
     if (this.config.mode === 'live') {
       return `${symbol}: test trades are disabled in live mode; switch to paper or sandbox`;
     }
@@ -377,7 +415,7 @@ export class Orchestrator {
       return `${symbol}: not traded by this agent`;
     }
     const result = agent.triggerTestSignal(direction);
-    this.services.logger.info('operator test trade triggered', { symbol, direction, result });
+    this.services.logger.info('operator test trade triggered', { symbol, direction: direction ?? 'TREND', result });
     this.notifyView();
     return result;
   }

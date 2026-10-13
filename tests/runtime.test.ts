@@ -8,6 +8,7 @@ import type { AdvisoryVerdict, TradeAdvisor } from '../src/llm/advisor.js';
 import type { EventLog } from '../src/ops/eventLog.js';
 import type { Logger } from '../src/ops/logger.js';
 import { Orchestrator, type OrchestratorFeed } from '../src/runtime/orchestrator.js';
+import type { DiscoveredOpenPosition } from '../src/runtime/ports.js';
 import { ledgerAndLeaseGate, type TradingGate } from '../src/runtime/tradingGate.js';
 import type { ChainSnapshot } from '../src/options/selector.js';
 import { bar, contract, istEpoch, SESSION_DAY } from './support/fixtures.js';
@@ -109,6 +110,7 @@ function build(
     advisor?: TradeAdvisor;
     execution?: ExecutionPort;
     brokerOpen?: number;
+    brokerOpenPositions?: readonly DiscoveredOpenPosition[];
     expiriesGate?: Promise<void>;
     feedGate?: Promise<void>;
     /** When set, the paper venue records each broker kill-switch engagement here. */
@@ -153,6 +155,7 @@ function build(
     optionContracts: async () => [CE, PE],
     availableFunds: async () => 300_000,
     brokerOpenOptionCount: async () => options.brokerOpen ?? 0,
+    ...(options.brokerOpenPositions !== undefined ? { brokerOpenPositions: async () => options.brokerOpenPositions! } : {}),
     brokerLiveOrderCount: async () => options.brokerLiveOrders ?? 0,
   };
   const eventLog = {
@@ -338,6 +341,30 @@ describe('runtime: vetoes', () => {
   it('refuses to start while the broker already holds option positions', async () => {
     const harness = build({}, { brokerOpen: 1 });
     await assert.rejects(harness.orchestrator.start(), /open option position/);
+  });
+
+  it('adopts open option positions on startup and activates risk management', async () => {
+    const position: DiscoveredOpenPosition = {
+      positionId: 'recovered-1',
+      underlying: 'NIFTY',
+      securityId: CE.securityId,
+      exchangeSegment: CE.exchangeSegment,
+      quantity: 75,
+      averagePrice: 120,
+      stopLossPrice: 96,
+      targetPrice: 168,
+      openedAt: istEpoch(SESSION_DAY, '09:30'),
+    };
+    const harness = build({}, { brokerOpen: 1, brokerOpenPositions: [position] });
+    await harness.orchestrator.start();
+    assert.equal(harness.orchestrator.snapshot().phase, 'RUNNING');
+    const agent = harness.orchestrator.agent('NIFTY');
+    assert.equal(agent?.state, 'RISK_MANAGEMENT_ACTIVE');
+    assert.equal(agent?.openPositions.length, 1);
+    assert.equal(agent?.openPositions[0]?.positionId, 'recovered-1');
+    assert.equal(agent?.openPositions[0]?.contract.symbol, CE.symbol);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.positions.length, 1);
+    assert.equal(harness.orchestrator.snapshot().day.openPositions, 1);
   });
 });
 
@@ -780,6 +807,15 @@ describe('runtime: durable intents and the trading gate', () => {
     assert.match(msg, /test BULLISH signal triggered/);
     await settle(harness.orchestrator);
     assert.ok(harness.events.some((event) => event.type === 'entry_submitted'), 'test trade triggered entry');
+  });
+
+  it('triggers test trade on the current trend side when direction is omitted', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
+    // In this harness, warmup had an uptrend, so currentTrendDirection() is BULLISH
+    const msg = harness.orchestrator.triggerTestTrade('NIFTY');
+    assert.match(msg, /test BULLISH signal triggered/);
   });
 
   it('can open both CE and PE positions concurrently on the same underlying', async () => {

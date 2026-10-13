@@ -59,6 +59,10 @@ describe('evaluatePreTrade', () => {
     assert.deepEqual(found, ['KILL_SWITCH_ACTIVE', 'TRADE_COUNT_LIMIT', 'UNDERLYING_ALREADY_OPEN', 'SPOT_DATA_STALE']);
   });
 
+  it('allows unlimited trades when maxTradesPerDay is 0', () => {
+    assert.ok(!codes(approvedInput({ maxTradesPerDay: 0, tradesToday: 50 })).includes('TRADE_COUNT_LIMIT'));
+  });
+
   it('blocks entries once day P&L reaches the negative daily limit', () => {
     assert.ok(codes(approvedInput({ dailyPnlInr: -3000 })).includes('DAILY_LOSS_LIMIT'));
     assert.ok(!codes(approvedInput({ dailyPnlInr: -2999 })).includes('DAILY_LOSS_LIMIT'));

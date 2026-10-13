@@ -122,7 +122,8 @@ export async function openSession(
         runId,
         ttlMs: leaseTtlMs,
         // A new holder waits this long after expiry, so an order that was in flight can still finish.
-        marginMs: config.ops.orderTimeoutMs,
+        // Paper mode has no exchange order queues, so its margin is 0.
+        marginMs: config.mode === 'paper' ? 0 : config.ops.orderTimeoutMs,
         // Elapsed time since the last renewal is measured in this process, so it uses a monotonic clock. A wall
         // clock step backwards would otherwise keep the lease "held" after its ttl has passed.
         now: () => performance.now(),
@@ -158,7 +159,8 @@ export async function openSession(
     }
 
     if (lease !== undefined && ledger !== undefined) {
-      if (!(await lease.acquire())) {
+      const isPaper = config.mode === 'paper';
+      if (!(await lease.acquire(isPaper))) {
         throw new Error(
           `another run holds the trading lease for ${account}. A crashed run releases it when its lease expires, plus the order timeout; start again after that`,
         );
@@ -166,10 +168,20 @@ export async function openSession(
       logger.info('trading lease acquired', { account, runId });
       const review = await ledger.runsNeedingReview(clientId, config.mode, runId);
       if (review.length > 0) {
-        const list = review.map((r) => `${r.runId} (${r.instanceId}, started ${r.startedAt}, ${r.reason})`).join('; ');
-        throw new Error(
-          `${config.mode} runs for client ${clientId} need review before this one starts: ${list}. Check their positions and orders, then run npm run db:acknowledge -- --run <runId> --reason "<what you checked>"`,
-        );
+        if (isPaper) {
+          for (const unended of review) {
+            await ledger.acknowledgeRun(unended.runId, `auto-reconciled on paper restart (${unended.reason})`);
+          }
+          logger.warn('auto-reconciled unended paper runs from prior session', {
+            count: review.length,
+            runIds: review.map((r) => r.runId),
+          });
+        } else {
+          const list = review.map((r) => `${r.runId} (${r.instanceId}, started ${r.startedAt}, ${r.reason})`).join('; ');
+          throw new Error(
+            `${config.mode} runs for client ${clientId} need review before this one starts: ${list}. Check their positions and orders, then run npm run db:acknowledge -- --run <runId> --reason "<what you checked>"`,
+          );
+        }
       }
       lease.onLost((reason) => logger.error('trading lease lost; no new entries will be sent', { reason }));
     }

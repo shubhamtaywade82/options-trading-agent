@@ -129,6 +129,12 @@ export class TradeStateMachine {
     return next;
   }
 
+  /** Transitions directly to an active state when adopting a durable open position on restart. */
+  adopt(state: TradeState): void {
+    this.records.push({ from: this.current, event: 'RESET', to: state, at: this.now() });
+    this.current = state;
+  }
+
   history(): readonly TransitionRecord[] {
     return this.records;
   }

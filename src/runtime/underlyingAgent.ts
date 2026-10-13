@@ -193,6 +193,32 @@ export class UnderlyingAgent {
     );
   }
 
+  /** Adopts an existing open position into active risk management on startup. */
+  adoptPosition(position: OpenPosition): void {
+    const slot = this.slotForOptionType(position.contract.optionType);
+    if (slot.position !== undefined) {
+      this.deps.logger.warn('cannot adopt position: slot already occupied', {
+        underlying: this.symbol,
+        optionType: slot.optionType,
+        positionId: position.positionId,
+      });
+      return;
+    }
+    slot.position = position;
+    slot.lastMark = position.averagePrice;
+    slot.fsm.adopt('RISK_MANAGEMENT_ACTIVE');
+    this.deps.book.markOpen(this.symbol, slot.optionType);
+    this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
+    this.deps.feed.subscribe([instrumentRefOf(position.contract)]);
+    this.deps.logger.info('open position adopted into risk management', {
+      underlying: this.symbol,
+      optionType: slot.optionType,
+      positionId: position.positionId,
+      quantity: position.quantity,
+      averagePrice: position.averagePrice,
+    });
+  }
+
   /** Warmup history. Bars are upserted, so a bar that also arrives live is not duplicated. */
   seedBars(history: readonly Candle[]): void {
     for (const bar of history) {
@@ -404,9 +430,30 @@ export class UnderlyingAgent {
     }
   }
 
+  /** Trend direction according to SuperTrend, EMA or price action. */
+  currentTrendDirection(): Direction {
+    const bars = this.bars.all();
+    const { strategy } = this.deps.config;
+    const trend = superTrend(bars, strategy.supertrendPeriod, strategy.supertrendMultiplier);
+    if (trend?.trend === 'DOWN') {
+      return 'BEARISH';
+    }
+    if (trend?.trend === 'UP') {
+      return 'BULLISH';
+    }
+    const closes = bars.map((b) => b.close);
+    const fast = ema(closes, strategy.emaFast);
+    const slow = ema(closes, strategy.emaSlow);
+    if (fast !== undefined && slow !== undefined && fast < slow) {
+      return 'BEARISH';
+    }
+    return 'BULLISH';
+  }
+
   /** Injects a test signal on the live market for fast end-to-end verification without waiting for a candle close. */
-  triggerTestSignal(direction: Direction = 'BULLISH'): string {
-    const slot = this.slotForDirection(direction);
+  triggerTestSignal(direction?: Direction): string {
+    const dir = direction ?? this.currentTrendDirection();
+    const slot = this.slotForDirection(dir);
     if (slot.fsm.state !== 'IDLE') {
       return `${this.symbol}: cannot test trade while ${slot.optionType} state is ${slot.fsm.state}`;
     }
@@ -416,13 +463,13 @@ export class UnderlyingAgent {
     }
     const signal: Signal = {
       underlying: this.symbol,
-      direction,
+      direction: dir,
       barTime: this.now(),
       spot,
-      reasons: [`operator test trade (${direction})`],
+      reasons: [`operator test trade (${dir})`],
     };
     this.queue.run(() => this.processSignal(signal, slot));
-    return `${this.symbol}: test ${direction} signal triggered at spot ${spot}`;
+    return `${this.symbol}: test ${dir} signal triggered at spot ${spot}`;
   }
 
   private async processSignal(signal: Signal, slot: SideSlot): Promise<void> {
@@ -579,8 +626,9 @@ export class UnderlyingAgent {
     }
 
     const funds = await market.availableFunds();
+    const effectiveCapital = funds > 0 ? funds : config.capital.inr;
     const sizing = sizePosition({
-      capitalInr: config.capital.inr,
+      capitalInr: effectiveCapital,
       maxRiskPerTradePct: config.capital.maxRiskPerTradePct,
       availableFundsInr: funds,
       entryReference: bracket.entryReference,

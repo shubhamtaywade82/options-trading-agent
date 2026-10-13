@@ -89,7 +89,7 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (input.dailyPnlInr <= -input.dailyLossLimitInr) {
     add('DAILY_LOSS_LIMIT', `day P&L ${input.dailyPnlInr.toFixed(2)} at or below -${input.dailyLossLimitInr.toFixed(2)}`);
   }
-  if (input.tradesToday >= input.maxTradesPerDay) {
+  if (input.maxTradesPerDay > 0 && input.tradesToday >= input.maxTradesPerDay) {
     add('TRADE_COUNT_LIMIT', `${input.tradesToday} entries today, limit ${input.maxTradesPerDay}`);
   }
   if (input.openPositions >= input.maxOpenPositions) {
