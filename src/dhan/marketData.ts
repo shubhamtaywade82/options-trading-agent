@@ -2,7 +2,7 @@ import type { DhanClient } from '@nemesis-oss/dhanhq-sdk';
 import type { Candle, InstrumentRef } from '../domain/types.js';
 import type { ChainLeg, ChainSnapshot, ChainStrike } from '../options/selector.js';
 import { MemoryRateGate, type RateGate } from '../persistence/rateGate.js';
-import { dhanEpochSecondsToMs } from '../time/ist.js';
+import { dhanEpochSecondsToMs, istParts } from '../time/ist.js';
 
 /** Dhan rate-limits `/optionchain` to one call every three seconds. */
 export const OPTION_CHAIN_MIN_INTERVAL_MS = 3_000;
@@ -70,6 +70,8 @@ type MarketDataClient = Pick<DhanClient, 'charts' | 'optionChain' | 'funds'>;
  */
 export class DhanMarketData {
   private readonly chains = new Map<string, { fetchedAt: number; snapshot: ChainSnapshot }>();
+  /** Expiries change only between sessions, and the endpoint is option-chain family, so one read per IST day. */
+  private readonly expiries = new Map<string, { day: string; list: string[] }>();
   private readonly inFlight = new Map<string, Promise<ChainSnapshot>>();
   private chainTail: Promise<void> = Promise.resolve();
   private readonly gate: RateGate;
@@ -117,11 +119,22 @@ export class DhanMarketData {
   }
 
   async listExpiries(spot: InstrumentRef): Promise<string[]> {
+    const key = `${spot.exchangeSegment}:${spot.securityId}`;
+    const day = istParts(this.now()).date;
+    const cached = this.expiries.get(key);
+    if (cached !== undefined && cached.day === day) {
+      return cached.list;
+    }
     const response = await this.client.optionChain.expiryList({
       underlyingScrip: Number(spot.securityId),
       underlyingSeg: spot.exchangeSegment,
     });
-    return response.data ?? [];
+    const list = response.data ?? [];
+    // An empty answer is not cached: it is more likely a transient gap than a day with no expiries.
+    if (list.length > 0) {
+      this.expiries.set(key, { day, list });
+    }
+    return list;
   }
 
   async optionChain(spot: InstrumentRef, expiry: string): Promise<ChainSnapshot> {

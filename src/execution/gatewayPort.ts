@@ -37,6 +37,8 @@ export interface GatewayPortOptions {
  */
 export class GatewayExecutionPort implements ExecutionPort {
   readonly mode: 'sandbox' | 'paper';
+  /** The paper gateway is paper_exchange, which nets charges into fill prices. The Dhan sandbox reports gross. */
+  readonly chargesInFills: boolean;
   private readonly listeners = new Set<ExecutionListener>();
   private readonly positions = new Map<string, OpenPosition>();
   private readonly now: () => number;
@@ -47,6 +49,7 @@ export class GatewayExecutionPort implements ExecutionPort {
     private readonly options: GatewayPortOptions,
   ) {
     this.mode = options.mode;
+    this.chargesInFills = options.mode === 'paper';
     this.now = options.now ?? Date.now;
   }
 

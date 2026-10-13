@@ -56,6 +56,9 @@ Two states the diagram does not show are legal and matter in operation:
 
 - **Late fills while HALTED.** An entry that was unconfirmed and then fills at the broker is
   recorded as a late fill for risk accounting. The FSM stays HALTED, so the operator sees it.
+  A halt stops entries, not protection: the position still gets its time stop, daily-loss,
+  end-of-day, manual and shutdown exits, unless an exit was already sent for it and its
+  outcome is unknown (a second SELL could leave the account net short).
 - **Protective closes while HALTED.** A bracket leg that closes the position still updates day P&L
   and clears the position record. The state stays HALTED.
 
@@ -74,11 +77,13 @@ Two states the diagram does not show are legal and matter in operation:
 6. **No replay of trading writes.** The SDK sends each trading write at most once. The adapter maps
    only definitive 4xx responses (not 401, 408, 429) to REJECTED. Everything else is UNCONFIRMED.
 7. **Ordering on breach.** Daily loss blocks entries first, then flattens through normal exits. The
-   broker kill switch engages only once every agent is flat. Halts engage it immediately, because
-   there is no exit being managed in a halt.
+   broker kill switch engages only once no position is open, because Dhan refuses to activate it
+   while a position or order is open. Halts follow the same rule, and a halted agent's unresolved
+   entry does not hold it back. It is tried again each time the book goes from holding a position
+   to holding none, so a late fill that is later closed still ends with the switch engaged.
 8. **Clock sanity before trading.** `assertWarmupClock` refuses to start when bar timestamps are
    ahead of the wall clock, or a same-day series is far behind it during a session.
-9. **Stale means no entry.** Spot freshness is measured on local receipt time. Option quote freshness is the age of the chain snapshot used for selection. Missing data counts as stale.
+9. **Stale means no entry.** Spot freshness is measured on local receipt time. Option quote freshness is the age of the chain snapshot used for selection, measured when the risk gate runs, after the REST calls. Missing data counts as stale. After the advisor, the entry window and spot freshness are checked again (`STALE_AT_SUBMIT`). The quote is not re-read: the entry is a LIMIT at the gated price, so a moved market can leave it unfilled but cannot fill it above the sized risk.
 10. **Advisor is a veto.** Its output is one of two values, and its failures are SKIP.
 
 ## 4. Failure-mode matrix
@@ -87,7 +92,7 @@ Two states the diagram does not show are legal and matter in operation:
 | --- | --- | --- |
 | Feed disconnect | `ageMs` grows past `FEED_STALE_MS` | No new entries. Live positions keep their broker brackets. Paper SL and target cannot fire until ticks resume. |
 | Chart or chain request fails | exception in `prepareEntry` | Signal dropped with `DATA_UNAVAILABLE`. No position change. |
-| Entry HTTP timeout or 5xx | `classifyPlacementError` → UNCONFIRMED | Underlying HALTED. Broker kill switch. Reconciliation watches for a late fill. |
+| Entry HTTP timeout or 5xx | `classifyPlacementError` → UNCONFIRMED | Underlying HALTED. Broker kill switch once no position is open. Reconciliation watches for a late fill, which is then exited like any position. |
 | Entry never reaches a terminal status | `ORDER_TIMEOUT_MS` | ENTRY_UNCONFIRMED, as above. |
 | Exit leg cancel fails, position still long | `brokerPosition` after cancels | EXIT_UNCONFIRMED, no SELL sent. HALTED. |
 | Exit placement rejected (4xx) | `classifyPlacementError` → REJECTED | EXIT_REJECTED. Position stays open. Retry after 10 s. |
@@ -119,6 +124,9 @@ next. Two concurrent sources are safe:
 
 - **Bars** are upserted synchronously on tick. Only the signal evaluation is queued.
 - **Paper fills** are emitted from a microtask, so the agent never re-enters its own transition.
+- **Entry preparation** (expiry, chain and funds calls, then the advisor) runs off the queue, so
+  it never holds up the other side's exits. The slot stays `SIGNAL_DETECTED` until a queued step
+  re-checks every block and submits or drops the entry.
 
 The shared `DayBook` is mutated only from agent tasks and the orchestrator clock. Both run on
 the same event loop and do not interleave within a synchronous block.

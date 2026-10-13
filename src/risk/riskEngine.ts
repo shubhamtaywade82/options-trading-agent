@@ -2,6 +2,7 @@ export type RiskCode =
   | 'NOT_A_BUY_ORDER'
   | 'KILL_SWITCH_ACTIVE'
   | 'DAILY_LOSS_LIMIT'
+  | 'DAILY_LOSS_AT_RISK'
   | 'TRADE_COUNT_LIMIT'
   | 'OPEN_POSITION_LIMIT'
   | 'UNDERLYING_ALREADY_OPEN'
@@ -40,6 +41,10 @@ export interface PreTradeInput {
   readonly killSwitchActive: boolean;
   readonly dailyPnlInr: number;
   readonly dailyLossLimitInr: number;
+  /** Realised P&L today, without marks: the open positions are counted at their stops instead. */
+  readonly realizedPnlInr: number;
+  /** What every open or pending position loses if its stop is hit, across all underlyings. */
+  readonly openRiskInr: number;
   readonly tradesToday: number;
   readonly maxTradesPerDay: number;
   readonly openPositions: number;
@@ -142,6 +147,14 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   const riskInr = input.lots * input.lotSize * (input.entryReference - input.stopLossPrice);
   if (riskInr > input.maxRiskInr) {
     add('RISK_EXCEEDS_BUDGET', `risk ${riskInr.toFixed(2)} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
+  }
+  // Each trade fits its own budget, but several open at once could together lose more than the day allows.
+  const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - riskInr;
+  if (worstCaseDayPnl < -input.dailyLossLimitInr) {
+    add(
+      'DAILY_LOSS_AT_RISK',
+      `if every open stop and this one hit, day P&L would be ${worstCaseDayPnl.toFixed(2)}, beyond -${input.dailyLossLimitInr.toFixed(2)}`,
+    );
   }
 
   const premiumInr = input.lots * input.lotSize * input.entryReference;

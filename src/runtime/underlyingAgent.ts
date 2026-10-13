@@ -17,7 +17,7 @@ import {
 import type { EntryOrder, ExecutionEvent, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { EntrySnapshot, TradeAdvisor } from '../llm/advisor.js';
 import { BarSeries, CandleBuilder } from '../market/barSeries.js';
-import { bracketLevels } from '../options/pricing.js';
+import { bracketLevels, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
@@ -86,6 +86,8 @@ interface SideSlot {
   lastMark: number | undefined;
   exitRetryAfterMs: number;
   manualExit: boolean;
+  /** An exit for the current position was sent and has no known outcome yet. A halted slot never resends one. */
+  exitSent: boolean;
 }
 
 export class UnderlyingAgent {
@@ -122,6 +124,7 @@ export class UnderlyingAgent {
       lastMark: undefined,
       exitRetryAfterMs: 0,
       manualExit: false,
+      exitSent: false,
     };
     this.pe = {
       optionType: 'PE',
@@ -131,6 +134,7 @@ export class UnderlyingAgent {
       lastMark: undefined,
       exitRetryAfterMs: 0,
       manualExit: false,
+      exitSent: false,
     };
     this.strategySession = deps.strategySession ?? new StrategySession();
     this.queue = new SerialQueue((error) => {
@@ -193,6 +197,11 @@ export class UnderlyingAgent {
     );
   }
 
+  /** An entry order was sent and has not filled or been rejected. */
+  hasPendingEntry(): boolean {
+    return this.ce.pending !== undefined || this.pe.pending !== undefined;
+  }
+
   /** Adopts an existing open position into active risk management on startup. */
   adoptPosition(position: OpenPosition): void {
     const slot = this.slotForOptionType(position.contract.optionType);
@@ -209,6 +218,7 @@ export class UnderlyingAgent {
     slot.fsm.adopt('RISK_MANAGEMENT_ACTIVE');
     this.deps.book.markOpen(this.symbol, slot.optionType);
     this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, riskAtStop(position.quantity, position.averagePrice, position.stopLossPrice), slot.optionType);
     this.deps.feed.subscribe([instrumentRefOf(position.contract)]);
     this.deps.logger.info('open position adopted into risk management', {
       underlying: this.symbol,
@@ -308,7 +318,7 @@ export class UnderlyingAgent {
    */
   retryExit(): void {
     for (const slot of this.allSlots()) {
-      if (slot.position !== undefined && slot.fsm.state === 'RISK_MANAGEMENT_ACTIVE' && this.now() >= slot.exitRetryAfterMs) {
+      if (this.canExit(slot) && this.now() >= slot.exitRetryAfterMs) {
         this.queue.run(() => this.checkExitForSlot(slot, false));
       }
     }
@@ -323,18 +333,17 @@ export class UnderlyingAgent {
     if (targets.length === 0) {
       return 'NO_OPEN_POSITION';
     }
-    let accepted = false;
-    for (const slot of targets) {
-      if (slot.position !== undefined) {
-        if (slot.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
-          return 'NOT_MANAGEABLE';
-        }
-        slot.manualExit = true;
-        this.queue.run(() => this.checkExitForSlot(slot, false));
-        accepted = true;
-      }
+    const held = targets.filter((slot) => slot.position !== undefined);
+    if (held.length === 0) {
+      return 'NO_OPEN_POSITION';
     }
-    return accepted ? 'ACCEPTED' : 'NO_OPEN_POSITION';
+    // Each side is judged on its own, so one side mid-exit does not stop closing the other.
+    const closable = held.filter((slot) => this.canExit(slot));
+    for (const slot of closable) {
+      slot.manualExit = true;
+      this.queue.run(() => this.checkExitForSlot(slot, false));
+    }
+    return closable.length > 0 ? 'ACCEPTED' : 'NOT_MANAGEABLE';
   }
 
   /** Read-only snapshot for the cockpit. Computed from state; never changes it. */
@@ -478,28 +487,56 @@ export class UnderlyingAgent {
     this.record('signal_detected', { direction: signal.direction, spot: signal.spot, reasons: signal.reasons });
     this.deps.logger.info('signal detected', { underlying: this.symbol, direction: signal.direction, spot: signal.spot });
 
-    const prepared = await this.validatePreparation(signal, slot);
+    // The REST calls and the advisor take seconds. They run off the queue so the other side's exits are not held
+    // behind them. The slot stays SIGNAL_DETECTED meanwhile, and the submit step re-enters the queue to recheck.
+    void this.prepareSafely(signal, slot).then((prepared) => {
+      this.queue.run(() => this.finishSignal(prepared, slot));
+    });
+  }
+
+  private async prepareSafely(signal: Signal, slot: SideSlot): Promise<Preparation> {
+    try {
+      return await this.prepareEntry(signal, slot);
+    } catch (error) {
+      return { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
+    }
+  }
+
+  /** Runs on the queue: anything that changed while the entry was prepared is checked here, before the order. */
+  private async finishSignal(prepared: Preparation, slot: SideSlot): Promise<void> {
     if (!prepared.ok) {
       this.drop(prepared.code, prepared.detail, slot);
+      return;
+    }
+    const blocked = this.entryBlockReason();
+    if (blocked !== undefined) {
+      this.drop('ENTRY_BLOCKED', blocked, slot);
+      return;
+    }
+    const stale = this.staleAtSubmit();
+    if (stale !== undefined) {
+      this.drop('STALE_AT_SUBMIT', stale, slot);
       return;
     }
     await this.submitPreparedOrder(prepared.order, slot);
   }
 
-  private async validatePreparation(signal: Signal, slot: SideSlot): Promise<Preparation> {
-    let prepared: Preparation;
-    try {
-      prepared = await this.prepareEntry(signal, slot);
-    } catch (error) {
-      return { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
+  /**
+   * The advisor can take seconds after the risk gate passed. The entry window and the spot feed must still hold
+   * when the order goes out. The option quote is not re-read: the entry is a LIMIT at the gated price, so a moved
+   * market can only leave it unfilled, never fill it above the sized risk.
+   */
+  private staleAtSubmit(): string | undefined {
+    const { session, feed } = this.deps.config;
+    const minute = istParts(this.now()).minuteOfDay;
+    if (minute >= session.entryEndMinute) {
+      return `entry window closed at minute ${session.entryEndMinute}`;
     }
-    if (prepared.ok) {
-      const blocked = this.entryBlockReason();
-      if (blocked !== undefined) {
-        return { ok: false, code: 'ENTRY_BLOCKED', detail: blocked };
-      }
+    const spotAgeMs = this.deps.feed.ageMs(this.deps.spec.spot);
+    if (spotAgeMs === undefined || spotAgeMs > feed.staleMs) {
+      return `spot tick age ${spotAgeMs ?? 'unknown'} ms exceeds ${feed.staleMs} ms`;
     }
-    return prepared;
+    return undefined;
   }
 
   private async submitPreparedOrder(order: EntryOrder, slot: SideSlot): Promise<void> {
@@ -534,6 +571,7 @@ export class UnderlyingAgent {
     slot.fsm.dispatch('ENTRY_SUBMITTED');
     slot.pending = order;
     this.deps.book.recordEntry(this.symbol, slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, riskAtStop(order.quantity, order.entryReference, order.stopLossPrice), slot.optionType);
     this.deps.feed.subscribe([instrumentRefOf(order.contract)]);
     this.deps.logger.info('entry submitted', {
       underlying: this.symbol,
@@ -615,18 +653,23 @@ export class UnderlyingAgent {
       return fail('QUOTE_MISSING', `no two-sided quote on ${contract.symbol}`);
     }
 
+    // The entry is a LIMIT at this price, so any fill is at or below it and the realised risk stays inside the
+    // budget. Sizing off the bare ask with a MARKET order let a slipped fill widen the fixed stop distance.
+    const entryLimit = roundUpToTick(quote.ask * (1 + config.contract.entryLimitBufferPct / 100), contract.tickSize);
     const bracket = bracketLevels({
-      entryReference: quote.ask,
+      entryReference: entryLimit,
       stopLossPct: config.exits.stopLossPct,
       targetRr: config.exits.targetRr,
       tickSize: contract.tickSize,
     });
     if (bracket === undefined) {
-      return fail('BRACKET_UNREPRESENTABLE', `cannot place stop and target at premium ${quote.ask} on tick ${contract.tickSize}`);
+      return fail('BRACKET_UNREPRESENTABLE', `cannot place stop and target at premium ${entryLimit} on tick ${contract.tickSize}`);
     }
 
     const funds = await market.availableFunds();
-    const capital = Math.max(config.capital.inr, funds);
+    // CAPITAL_INR is a ceiling: the daily loss limit is a percentage of it, so sizing off a larger
+    // broker balance would let one stop-out breach the day. A smaller balance shrinks risk with it.
+    const capital = Math.min(config.capital.inr, funds);
     const sizing = sizePosition({
       capitalInr: capital,
       maxRiskPerTradePct: config.capital.maxRiskPerTradePct,
@@ -644,7 +687,9 @@ export class UnderlyingAgent {
     }
 
     // Re-read after every await: another underlying may have changed the book while this one was waiting.
+    // The clock too: the expiry, chain and funds calls took time, and the quote's age must include it.
     const snapshot = this.deps.book.snapshot();
+    const gateNow = this.now();
     const verdict = evaluatePreTrade({
       side: 'BUY',
       entryReference: bracket.entryReference,
@@ -655,8 +700,8 @@ export class UnderlyingAgent {
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
       availableFundsInr: funds,
-      nowMs: now,
-      minuteOfDay: today.minuteOfDay,
+      nowMs: gateNow,
+      minuteOfDay: istParts(gateNow).minuteOfDay,
       entryStartMinute: config.session.entryStartMinute,
       entryEndMinute: config.session.entryEndMinute,
       isExpiryDay: expiry === today.date,
@@ -664,6 +709,8 @@ export class UnderlyingAgent {
       killSwitchActive: snapshot.killSwitchReason !== undefined,
       dailyPnlInr: snapshot.dayPnlInr,
       dailyLossLimitInr: this.dailyLossLimitInr,
+      realizedPnlInr: snapshot.realizedPnlInr,
+      openRiskInr: snapshot.openRiskInr,
       tradesToday: snapshot.tradesToday,
       maxTradesPerDay: config.capital.maxTradesPerDay,
       openPositions: snapshot.openPositions,
@@ -673,7 +720,7 @@ export class UnderlyingAgent {
       maxPositionsPerUnderlying: config.capital.maxPositionsPerUnderlying,
       cooldownUntilMs: this.deps.book.cooldownUntilFor(this.symbol),
       spotTickAgeMs: this.deps.feed.ageMs(spec.spot),
-      optionQuoteAgeMs: now - quote.observedAt,
+      optionQuoteAgeMs: gateNow - quote.observedAt,
       staleMs: config.feed.staleMs,
     });
     if (!verdict.approved) {
@@ -794,6 +841,7 @@ export class UnderlyingAgent {
     slot.position = position;
     slot.lastMark = averagePrice;
     this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, riskAtStop(quantity, averagePrice, position.stopLossPrice), slot.optionType);
 
     if (slot.fsm.state === 'ENTRY_PENDING') {
       slot.fsm.dispatch('ENTRY_FILLED');
@@ -845,10 +893,15 @@ export class UnderlyingAgent {
   }
 
   private onExitRejected(event: Extract<ExecutionEvent, { kind: 'EXIT_REJECTED' }>, slot: SideSlot): void {
-    if (slot.fsm.state !== 'EXIT_PENDING' || slot.position?.positionId !== event.positionId) {
+    const state = slot.fsm.state;
+    if ((state !== 'EXIT_PENDING' && state !== 'HALTED') || slot.position?.positionId !== event.positionId) {
       return;
     }
-    slot.fsm.dispatch('EXIT_REJECTED');
+    if (state === 'EXIT_PENDING') {
+      slot.fsm.dispatch('EXIT_REJECTED');
+    }
+    // A definitive rejection means nothing reached the market, so the exit may be sent again.
+    slot.exitSent = false;
     slot.exitRetryAfterMs = this.now() + EXIT_RETRY_BACKOFF_MS;
     this.record('exit_rejected', { positionId: event.positionId, reason: event.reason });
     this.deps.logger.warn('exit rejected; position still open, will retry', { underlying: this.symbol, reason: event.reason, optionType: slot.optionType });
@@ -874,10 +927,10 @@ export class UnderlyingAgent {
     if (position === undefined) {
       return;
     }
-    // Rounded once, here, so the book, the journal and the restored day all carry the same figure.
-    const pnlInr = Number(((fill.averagePrice - position.averagePrice) * fill.quantity).toFixed(2));
+    const { grossPnlInr, chargesInr, pnlInr } = this.closedPnl(position, fill);
     this.lastExit = { reason: fill.reason, pnlInr, at: fill.at };
     slot.manualExit = false;
+    slot.exitSent = false;
     this.deps.book.recordClose({ underlying: this.symbol, optionType: slot.optionType, pnlInr, closedAtMs: fill.at });
     this.deps.feed.unsubscribe([instrumentRefOf(position.contract)]);
     slot.position = undefined;
@@ -891,6 +944,8 @@ export class UnderlyingAgent {
       quantity: fill.quantity,
       entryPrice: position.averagePrice,
       exitPrice: fill.averagePrice,
+      grossPnlInr,
+      chargesInr,
       pnlInr,
       reason: fill.reason,
       optionType: slot.optionType,
@@ -904,9 +959,42 @@ export class UnderlyingAgent {
     this.deps.logger.info('position closed', { underlying: this.symbol, reason: fill.reason, pnlInr, optionType: slot.optionType });
   }
 
+  /**
+   * Rounded once, here, so the book, the journal and the restored day all carry the same figure. Net of charges:
+   * on a small premium, brokerage, STT and exchange fees are a real share of the risk budget.
+   */
+  private closedPnl(
+    position: OpenPosition,
+    fill: { averagePrice: number; quantity: number },
+  ): { grossPnlInr: number; chargesInr: number; pnlInr: number } {
+    const grossPnlInr = Number(((fill.averagePrice - position.averagePrice) * fill.quantity).toFixed(2));
+    const chargesInr =
+      this.deps.execution.chargesInFills === true
+        ? 0
+        : roundTripChargesInr({
+            quantity: fill.quantity,
+            buyPrice: position.averagePrice,
+            sellPrice: fill.averagePrice,
+            exchangeSegment: position.contract.exchangeSegment,
+          });
+    return { grossPnlInr, chargesInr, pnlInr: Number((grossPnlInr - chargesInr).toFixed(2)) };
+  }
+
+  /**
+   * A halt stops entries, not protection. A halted slot still exits a position (a late fill, or one open on
+   * the other side when this underlying halted), unless an exit was already sent for it: that exit's fate is
+   * unknown, and a second SELL could leave the account net short.
+   */
+  private canExit(slot: SideSlot): boolean {
+    if (slot.position === undefined) {
+      return false;
+    }
+    return slot.fsm.state === 'RISK_MANAGEMENT_ACTIVE' || (slot.fsm.state === 'HALTED' && !slot.exitSent);
+  }
+
   private async checkExitForSlot(slot: SideSlot, shutdown: boolean): Promise<void> {
     const position = slot.position;
-    if (position === undefined || slot.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
+    if (position === undefined || !this.canExit(slot)) {
       return;
     }
     const now = this.now();
@@ -939,7 +1027,10 @@ export class UnderlyingAgent {
       return;
     }
     this.withheldReason = undefined;
-    slot.fsm.dispatch('EXIT_SUBMITTED');
+    slot.exitSent = true;
+    if (slot.fsm.state !== 'HALTED') {
+      slot.fsm.dispatch('EXIT_SUBMITTED');
+    }
     this.durableRecord('exit_submitted', { positionId: position.positionId, reason, referencePrice: order.referencePrice }).catch((error: unknown) => {
       this.record('audit_gap', { event: 'exit_submitted', positionId: position.positionId, error: describe(error) });
       this.deps.logger.error('exit intent is not durable; the exit is still sent', { underlying: this.symbol, error: describe(error) });
@@ -995,6 +1086,10 @@ export class UnderlyingAgent {
   private record(type: string, payload: Readonly<Record<string, unknown>>): void {
     this.deps.events.record(type, { underlying: this.symbol, ...payload });
   }
+}
+
+function riskAtStop(quantity: number, entryPrice: number, stopLossPrice: number): number {
+  return quantity * (entryPrice - stopLossPrice);
 }
 
 function instrumentRefOf(contract: OptionContract): InstrumentRef {

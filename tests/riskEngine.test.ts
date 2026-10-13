@@ -24,6 +24,8 @@ function approvedInput(overrides: Partial<PreTradeInput> = {}): PreTradeInput {
     killSwitchActive: false,
     dailyPnlInr: 0,
     dailyLossLimitInr: 3000,
+    realizedPnlInr: 0,
+    openRiskInr: 0,
     tradesToday: 0,
     maxTradesPerDay: 3,
     openPositions: 0,
@@ -46,6 +48,17 @@ describe('evaluatePreTrade', () => {
     const verdict = evaluatePreTrade(approvedInput());
     assert.equal(verdict.approved, true);
     assert.equal(verdict.riskInr, 2250);
+  });
+
+  it('should refuse an entry when the open stops plus this one could breach the daily limit', () => {
+    // This trade risks 2250. With 1000 already at risk the worst case is -3250 against a 3000 limit.
+    assert.deepEqual(codes(approvedInput({ openRiskInr: 1000 })), ['DAILY_LOSS_AT_RISK']);
+    assert.deepEqual(codes(approvedInput({ openRiskInr: 750 })), [], 'exactly at the limit is allowed');
+  });
+
+  it('should count realised losses toward the worst case, and realised gains against it', () => {
+    assert.deepEqual(codes(approvedInput({ realizedPnlInr: -1000 })), ['DAILY_LOSS_AT_RISK']);
+    assert.deepEqual(codes(approvedInput({ realizedPnlInr: 2000, openRiskInr: 2000 })), []);
   });
 
   it('never approves anything but a BUY, so option selling cannot be expressed', () => {
@@ -130,6 +143,18 @@ describe('evaluatePreTrade', () => {
 });
 
 describe('DayBook', () => {
+  it('should sum open risk across underlyings and sides, and release it on close or rejection', () => {
+    const book = new DayBook(istEpoch('2026-10-12', '09:20'), 0);
+    book.setOpenRisk('NIFTY', 2000, 'CE');
+    book.setOpenRisk('NIFTY', 1500, 'PE');
+    book.setOpenRisk('SENSEX', 1000, 'CE');
+    book.setOpenRisk('SENSEX', -50, 'PE');
+    assert.equal(book.snapshot().openRiskInr, 4500, 'a stop above entry carries no risk, not negative risk');
+    book.recordClose({ underlying: 'NIFTY', optionType: 'CE', pnlInr: -2000, closedAtMs: istEpoch('2026-10-12', '09:30') });
+    book.releaseUnfilled('SENSEX', 'CE');
+    assert.equal(book.snapshot().openRiskInr, 1500);
+  });
+
   it('accumulates realised and unrealised P&L into the day figure', () => {
     const book = new DayBook(istEpoch('2026-10-12', '09:20'), 0);
     book.recordEntry('NIFTY');

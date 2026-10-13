@@ -119,6 +119,10 @@ function build(
     durable?: (type: string) => Promise<void>;
     gate?: TradingGate;
     brokerLiveOrders?: number;
+    /** Broker available funds. Defaults to CAPITAL_INR. */
+    funds?: number;
+    /** Runs inside the funds call, the last REST call before the risk gate. */
+    onFunds?: () => void;
   } = {},
 ): Harness {
   // Start after the warmup's last bar has closed; the clock guard refuses bars stamped in the future.
@@ -131,6 +135,8 @@ function build(
     CAPITAL_INR: '300000',
     MAX_RISK_PER_TRADE_PCT: '1',
     MAX_DAILY_LOSS_PCT: '1',
+    // Fixture prices assume the entry is priced at the ask; one test below covers the buffer.
+    ENTRY_LIMIT_BUFFER_PCT: '0',
     ...env,
   });
   const feed = new FakeFeed(options.feedGate);
@@ -153,7 +159,10 @@ function build(
     },
     optionChain: async () => chain(now),
     optionContracts: async () => [CE, PE],
-    availableFunds: async () => 300_000,
+    availableFunds: async () => {
+      options.onFunds?.();
+      return options.funds ?? 300_000;
+    },
     brokerOpenOptionCount: async () => options.brokerOpen ?? 0,
     ...(options.brokerOpenPositions !== undefined ? { brokerOpenPositions: async () => options.brokerOpenPositions! } : {}),
     brokerLiveOrderCount: async () => options.brokerLiveOrders ?? 0,
@@ -265,13 +274,30 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     assert.equal(agent?.state, 'IDLE');
     const closed = harness.events.find((event) => event.type === 'trade_closed');
     assert.equal(closed?.payload['reason'], 'TARGET');
-    assert.equal(closed?.payload['pnlInr'], 4545);
+    // Gross 75 × (161.6 − 101) = 4545. Charges: brokerage 40 + exchange 6.90 + SEBI 0.02 + STT 18.18
+    // + stamp 0.23 + GST 8.45 = 73.77.
+    assert.equal(closed?.payload['grossPnlInr'], 4545);
+    assert.equal(closed?.payload['chargesInr'], 73.77);
+    assert.equal(closed?.payload['pnlInr'], 4471.23);
     const snapshot = harness.orchestrator.dayBook.snapshot();
     assert.equal(snapshot.tradesToday, 1);
-    assert.equal(snapshot.dayPnlInr, 4545);
+    assert.equal(snapshot.dayPnlInr, 4471.23, 'the day book carries the net figure');
     assert.deepEqual(snapshot.openUnderlyings, []);
     assert.ok(types(harness).includes('entry_submitted'));
     assert.ok(types(harness).includes('entry_filled'));
+  });
+
+  it('should not deduct charges again when the venue nets them into its fill prices', async () => {
+    const paper = Object.assign(new PaperExecutionPort({ slippageBps: 0 }), { chargesInFills: true });
+    const harness = build({}, { execution: paper });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    harness.setClock('10:00:00');
+    optionTick(harness, '48001', 161.7);
+    await settle(harness.orchestrator);
+    const closed = harness.events.find((event) => event.type === 'trade_closed');
+    assert.equal(closed?.payload['chargesInr'], 0);
+    assert.equal(closed?.payload['pnlInr'], 4545);
   });
 
   it('flattens an open position at the end-of-day cutoff', async () => {
@@ -299,7 +325,8 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     const closed = harness.events.find((event) => event.type === 'trade_closed');
     assert.equal(closed?.payload['reason'], 'STOP_LOSS');
     assert.equal(closed?.payload['exitPrice'], 15, 'a gap through the stop fills at the market, not at the stop');
-    assert.equal(closed?.payload['pnlInr'], -6450);
+    assert.equal(closed?.payload['grossPnlInr'], -6450);
+    assert.equal(closed?.payload['pnlInr'], -6502.72);
     assert.ok(harness.orchestrator.dayBook.snapshot().killSwitchReason?.startsWith('daily loss'));
 
     // A fresh, valid breakout after the breach must be detected and then refused by the kill switch.
@@ -313,6 +340,118 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     const refused = harness.events.filter((event) => event.type === 'signal_dropped');
     assert.equal(refused.at(-1)?.payload['code'], 'KILL_SWITCH_ACTIVE');
     assert.equal(harness.events.filter((event) => event.type === 'entry_submitted').length, 1, 'no second entry after the breach');
+  });
+});
+
+describe('runtime: risk capital', () => {
+  // One lot risks (101 - 70.7) × 75 = 2272.5. CAPITAL_INR 300000 at 1% allows 3000, so one lot.
+  it('should size from CAPITAL_INR when the broker balance is larger', async () => {
+    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { funds: 10_000_000 });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.openPosition?.quantity, 75);
+  });
+
+  it('should price, size and bracket the entry off the buffered limit, not the bare ask', async () => {
+    const entries: EntryOrder[] = [];
+    const paper = new PaperExecutionPort({ slippageBps: 0 });
+    const execution: ExecutionPort = Object.assign(Object.create(paper) as ExecutionPort, {
+      submitEntry: async (order: EntryOrder) => {
+        entries.push(order);
+      },
+    });
+    const harness = build({ ENTRY_LIMIT_BUFFER_PCT: '1' }, { execution });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    // Ask 101 × 1.01 = 102.01, rounded up to the 0.05 tick. Stop 102.05 × 0.7 = 71.435 → 71.45.
+    assert.equal(entries[0]?.entryReference, 102.05);
+    assert.equal(entries[0]?.stopLossPrice, 71.45);
+    assert.equal(entries[0]?.targetPrice, 163.25);
+  });
+
+  it('should shrink the risk budget when the broker balance is below CAPITAL_INR', async () => {
+    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { funds: 150_000 });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const dropped = harness.events.find((event) => event.type === 'signal_dropped');
+    assert.equal(dropped?.payload['code'], 'RISK_BUDGET_TOO_SMALL');
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), false);
+  });
+});
+
+describe('runtime: freshness at the gate and at submit', () => {
+  it('should count the time spent on REST calls in the option quote age', async () => {
+    let advance = (): void => undefined;
+    const harness = build({}, { onFunds: () => advance() });
+    advance = () => harness.setClock('09:45:11');
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    // The chain was read at 09:45:05 and the gate ran at 09:45:11: 6 s old against FEED_STALE_MS 5 s.
+    assert.equal(harness.events.find((event) => event.type === 'signal_dropped')?.payload['code'], 'OPTION_QUOTE_STALE');
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), false);
+  });
+
+  it('should drop the entry when the spot feed goes stale during the advisor review', async () => {
+    let harness: Harness | undefined;
+    const advisor: TradeAdvisor = {
+      review: async () => {
+        harness!.feed.age = 9_000;
+        return { decision: 'ENTER', confidence: 0.9, reason: 'ok', source: 'llm' } as AdvisoryVerdict;
+      },
+    };
+    harness = build({}, { advisor });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const dropped = harness.events.find((event) => event.type === 'signal_dropped');
+    assert.equal(dropped?.payload['code'], 'STALE_AT_SUBMIT');
+    assert.match(String(dropped?.payload['detail']), /spot tick age 9000/);
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), false);
+  });
+
+  it('should drop the entry when the advisor review runs past the entry window', async () => {
+    let harness: Harness | undefined;
+    const advisor: TradeAdvisor = {
+      review: async () => {
+        harness!.setClock('14:30:01');
+        return { decision: 'ENTER', confidence: 0.9, reason: 'ok', source: 'llm' } as AdvisoryVerdict;
+      },
+    };
+    harness = build({}, { advisor });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.events.find((event) => event.type === 'signal_dropped')?.payload['code'], 'STALE_AT_SUBMIT');
+  });
+});
+
+describe('runtime: entry preparation and exits', () => {
+  // Bounded: before the fix the queue waited on the preparation, so this test hung instead of failing.
+  it('should exit one side while an entry on the other side is still being prepared', { timeout: 5_000 }, async () => {
+    const options: Parameters<typeof build>[1] = {};
+    const harness = build({ MAX_OPEN_POSITIONS: '2' }, options);
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const agent = harness.orchestrator.agent('NIFTY');
+    assert.equal(agent?.openPositions[0]?.contract.optionType, 'CE');
+
+    let releaseChain = (): void => undefined;
+    options.expiriesGate = new Promise<void>((resolve) => {
+      releaseChain = resolve;
+    });
+    harness.setClock('15:04:50');
+    assert.match(harness.orchestrator.triggerTestTrade('NIFTY', 'BEARISH'), /test BEARISH signal/);
+    await settle(harness.orchestrator);
+
+    harness.setClock('15:05:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    const closed = harness.events.find((event) => event.type === 'trade_closed');
+    assert.equal(closed?.payload['reason'], 'EOD_FLATTEN', 'the CE exit is not queued behind the PE preparation');
+    assert.equal(closed?.payload['optionType'], 'CE');
+
+    releaseChain();
+    await settle(harness.orchestrator);
+    assert.equal(agent?.isFlat(), true, 'the late PE entry is refused, not left pending');
+    assert.equal(harness.events.filter((event) => event.type === 'entry_submitted').length, 1);
   });
 });
 
@@ -368,8 +507,47 @@ describe('runtime: vetoes', () => {
   });
 });
 
+/** Live-like venue: every entry comes back UNCONFIRMED, and `lateFill` then fills it, as reconciliation would. */
+function scriptedVenue(script: { exit: 'FILL' | 'UNCONFIRMED' }) {
+  const killSwitch: string[] = [];
+  const exits: ExitOrder[] = [];
+  let lastEntry: EntryOrder | undefined;
+  let listener: ((event: ExecutionEvent) => void) | undefined;
+  const emit = (event: ExecutionEvent) => queueMicrotask(() => listener?.(event));
+  const port: ExecutionPort = {
+    mode: 'live',
+    submitEntry: async (order) => {
+      lastEntry = order;
+      emit({ kind: 'ENTRY_UNCONFIRMED', correlationId: order.correlationId, underlying: 'NIFTY', reason: 'timeout' });
+    },
+    submitExit: async (order) => {
+      exits.push(order);
+      const base = { correlationId: order.correlationId, underlying: 'NIFTY', positionId: order.positionId };
+      emit(
+        script.exit === 'FILL'
+          ? { kind: 'EXIT_FILLED', ...base, quantity: order.quantity, averagePrice: 90, reason: order.reason, at: 0 }
+          : { kind: 'EXIT_UNCONFIRMED', ...base, reason: 'timeout' },
+      );
+    },
+    onOptionTick: () => undefined,
+    onEvent: (fn) => {
+      listener = fn;
+      return () => undefined;
+    },
+    engageBrokerKillSwitch: async (reason) => {
+      killSwitch.push(reason);
+    },
+    close: async () => undefined,
+  };
+  const lateFill = (quantity: number, averagePrice: number): void => {
+    const correlationId = lastEntry?.correlationId ?? 'missing';
+    emit({ kind: 'ENTRY_FILLED', correlationId, underlying: 'NIFTY', quantity, averagePrice, at: 0 });
+  };
+  return { port, killSwitch, exits, lateFill };
+}
+
 describe('runtime: halts', () => {
-  it('halts the underlying on an unconfirmed entry and engages the broker kill switch at once', async () => {
+  it('halts the underlying on an unconfirmed entry and engages the broker kill switch at once when nothing is open', async () => {
     const killSwitch: string[] = [];
     const entries: EntryOrder[] = [];
     let listener: ((event: ExecutionEvent) => void) | undefined;
@@ -400,6 +578,63 @@ describe('runtime: halts', () => {
     assert.equal(killSwitch.length, 1);
     assert.match(killSwitch[0] ?? '', /NIFTY: entry unconfirmed/);
     assert.ok(harness.orchestrator.dayBook.snapshot().killSwitchReason);
+  });
+
+  it('should still flatten a position filled late while halted, and engage the broker kill switch only after', async () => {
+    const venue = scriptedVenue({ exit: 'FILL' });
+    const harness = build({ BROKER_KILL_SWITCH_ON_BREACH: 'true' }, { execution: venue.port });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'HALTED');
+    assert.equal(venue.killSwitch.length, 1, 'nothing is open yet, so it is tried at once');
+
+    venue.lateFill(75, 101);
+    await settle(harness.orchestrator);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.openPositions.length, 1);
+
+    harness.setClock('15:05:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    assert.deepEqual(venue.exits.map((order) => order.reason), ['EOD_FLATTEN']);
+    assert.equal(harness.events.find((event) => event.type === 'trade_closed')?.payload['reason'], 'EOD_FLATTEN');
+    assert.equal(harness.orchestrator.agent('NIFTY')?.state, 'HALTED', 'the halt still needs an operator');
+
+    clockTick(harness.orchestrator);
+    assert.equal(venue.killSwitch.length, 2, 'tried again once the late position is closed');
+    clockTick(harness.orchestrator);
+    assert.equal(venue.killSwitch.length, 2, 'not repeated while nothing changes');
+  });
+
+  it('should accept an operator close for a position filled late while halted', async () => {
+    const venue = scriptedVenue({ exit: 'FILL' });
+    const harness = build({}, { execution: venue.port });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    venue.lateFill(75, 101);
+    await settle(harness.orchestrator);
+
+    assert.match(harness.orchestrator.requestManualExit('NIFTY'), /close requested/);
+    await settle(harness.orchestrator);
+    assert.deepEqual(venue.exits.map((order) => order.reason), ['MANUAL']);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.openPositions.length, 0);
+  });
+
+  it('should not resend an exit whose outcome is unknown while halted', async () => {
+    const venue = scriptedVenue({ exit: 'UNCONFIRMED' });
+    const harness = build({ BROKER_KILL_SWITCH_ON_BREACH: 'true' }, { execution: venue.port });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    venue.lateFill(75, 101);
+    await settle(harness.orchestrator);
+
+    harness.setClock('15:05:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    harness.setClock('15:06:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    assert.equal(venue.exits.length, 1, 'a second SELL could leave the account net short');
+    assert.equal(venue.killSwitch.length, 1, 'only the attempt made at the halt; none while a position is open');
   });
 
   it('flattens every open position on shutdown and then reports flat', async () => {
@@ -823,6 +1058,8 @@ describe('runtime: durable intents and the trading gate', () => {
       MAX_OPEN_POSITIONS: '6',
       MAX_POSITIONS_PER_UNDERLYING: '2',
       MAX_POSITIONS_PER_SIDE: '1',
+      // Two trades risk 2 × 2272.5; the day must be able to absorb both stops.
+      MAX_DAILY_LOSS_PCT: '2',
     });
     await harness.orchestrator.start();
     harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
@@ -844,6 +1081,33 @@ describe('runtime: durable intents and the trading gate', () => {
 
     const msg3 = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
     assert.match(msg3, /cannot test trade while CE state is RISK_MANAGEMENT_ACTIVE/);
+  });
+
+  it('should refuse a second position whose stop, with the first, could breach the daily limit', async () => {
+    const harness = build({ MAX_OPEN_POSITIONS: '6', MAX_POSITIONS_PER_UNDERLYING: '2' });
+    await harness.orchestrator.start();
+    harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
+    harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    await settle(harness.orchestrator);
+    harness.orchestrator.triggerTestTrade('NIFTY', 'BEARISH');
+    await settle(harness.orchestrator);
+
+    assert.equal(harness.orchestrator.snapshot().day.openPositions, 1);
+    assert.equal(harness.events.find((event) => event.type === 'signal_dropped')?.payload['code'], 'DAILY_LOSS_AT_RISK');
+  });
+
+  it('should journal posture and strategy changes', async () => {
+    const harness = build();
+    harness.orchestrator.cyclePosture();
+    harness.orchestrator.toggleStrategy('trend');
+    const changes = harness.events.filter((event) => event.type.startsWith('strategy_'));
+    assert.deepEqual(
+      changes.map((event) => [event.type, event.payload]),
+      [
+        ['strategy_posture', { posture: 'confirmed' }],
+        ['strategy_toggled', { id: 'trend', enabled: false }],
+      ],
+    );
   });
 
   it('rejects test trades in live mode', async () => {

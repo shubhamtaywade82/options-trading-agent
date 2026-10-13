@@ -89,6 +89,8 @@ export type ExecutionListener = (event: ExecutionEvent) => void;
  */
 export interface ExecutionPort {
   readonly mode: TradingMode;
+  /** Fill prices already include charges (paper_exchange nets them in). Otherwise the agent deducts an estimate. */
+  readonly chargesInFills?: boolean;
   /** Starts background work such as broker reconciliation. Optional: paper has none. */
   start?(): void;
   submitEntry(order: EntryOrder): Promise<void>;

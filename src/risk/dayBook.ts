@@ -10,6 +10,8 @@ export interface DaySnapshot {
   readonly realizedPnlInr: number;
   readonly unrealizedPnlInr: number;
   readonly dayPnlInr: number;
+  /** Loss if every open or pending position hits its stop. */
+  readonly openRiskInr: number;
   readonly tradesToday: number;
   readonly openUnderlyings: readonly string[];
   readonly openPositions: number;
@@ -29,6 +31,7 @@ export class DayBook {
   private realized = 0;
   private trades = 0;
   private readonly openPnl = new Map<string, number>();
+  private readonly openRisk = new Map<string, number>();
   private readonly openSides = new Set<string>();
   private readonly cooldownUntil = new Map<string, number>();
   private killSwitchReason: string | undefined;
@@ -67,11 +70,17 @@ export class DayBook {
     this.openPnl.set(sideKey(underlying, optionType), pnlInr);
   }
 
+  /** What this side loses at its stop. Set when the entry is sent, and again from the fill. */
+  setOpenRisk(underlying: string, riskInr: number, optionType?: OptionType): void {
+    this.openRisk.set(sideKey(underlying, optionType), Math.max(0, riskInr));
+  }
+
   recordClose(input: { underlying: string; optionType?: OptionType; pnlInr: number; closedAtMs: number }): void {
     this.realized += input.pnlInr;
     const key = sideKey(input.underlying, input.optionType);
     this.openSides.delete(key);
     this.openPnl.delete(key);
+    this.openRisk.delete(key);
     if (this.cooldownMs > 0) {
       this.cooldownUntil.set(input.underlying, input.closedAtMs + this.cooldownMs);
     }
@@ -82,6 +91,7 @@ export class DayBook {
     const key = sideKey(underlying, optionType);
     this.openSides.delete(key);
     this.openPnl.delete(key);
+    this.openRisk.delete(key);
   }
 
   isSideOpen(underlying: string, optionType: OptionType): boolean {
@@ -126,6 +136,10 @@ export class DayBook {
     for (const value of this.openPnl.values()) {
       unrealized += value;
     }
+    let openRiskInr = 0;
+    for (const value of this.openRisk.values()) {
+      openRiskInr += value;
+    }
     const underlyings = new Set<string>();
     for (const key of this.openSides) {
       const parts = key.split(':');
@@ -139,6 +153,7 @@ export class DayBook {
       realizedPnlInr: this.realized,
       unrealizedPnlInr: unrealized,
       dayPnlInr: this.realized + unrealized,
+      openRiskInr,
       tradesToday: this.trades,
       openUnderlyings: [...underlyings].sort(),
       openPositions: this.openSides.size,

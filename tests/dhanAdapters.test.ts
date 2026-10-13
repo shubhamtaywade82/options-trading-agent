@@ -120,6 +120,25 @@ describe('scrip master mapping', () => {
 });
 
 describe('market data', () => {
+  it('should read the expiry list once per IST day, and not cache an empty answer', async () => {
+    let calls = 0;
+    let answer: string[] = [];
+    const client = { optionChain: { expiryList: async () => ((calls += 1), { data: answer }) } };
+    let now = istEpoch('2026-10-13', '09:30');
+    const data = new DhanMarketData(client as never, { istShiftedTimestamps: false, now: () => now });
+    const spot = { exchangeSegment: 'IDX_I', securityId: '13' };
+
+    assert.deepEqual(await data.listExpiries(spot), []);
+    answer = ['2026-10-13', '2026-10-20'];
+    assert.deepEqual(await data.listExpiries(spot), answer, 'the empty answer was not kept');
+    now = istEpoch('2026-10-13', '14:00');
+    await data.listExpiries(spot);
+    assert.equal(calls, 2, 'served from the day cache');
+    now = istEpoch('2026-10-14', '09:20');
+    await data.listExpiries(spot);
+    assert.equal(calls, 3, 'read again on the next IST day');
+  });
+
   it('reuses a fresh option chain and throttles to the Dhan rate limit', async () => {
     let now = 1_000_000;
     let calls = 0;

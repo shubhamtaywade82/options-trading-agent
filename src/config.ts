@@ -8,6 +8,8 @@ import { parseRedisUrl, validatePostgresUrl } from './persistence/urls.js';
 import { parseMinuteOfDay } from './time/ist.js';
 
 /** Index symbols this agent knows how to trade, with the segment their options list on. */
+const LATEST_FLATTEN_MINUTE = 15 * 60 + 15;
+
 export const KNOWN_UNDERLYINGS: Readonly<Record<string, OptionSegment>> = {
   NIFTY: 'NSE_FNO',
   BANKNIFTY: 'NSE_FNO',
@@ -76,6 +78,8 @@ export interface AgentConfig {
     readonly maxSpreadPct: number;
     readonly minOpenInterest: number;
     readonly minVolume: number;
+    /** Live entries are LIMIT orders at ask × (1 + this %), and are sized and bracketed off that limit. */
+    readonly entryLimitBufferPct: number;
   };
   readonly exits: {
     readonly stopLossPct: number;
@@ -281,13 +285,15 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     sandbox: mode === 'sandbox' ? parseSandbox(env, dhanBaseUrl) : undefined,
     underlyings: parseUnderlyings(env),
     capital: {
-      inr: number(env, 'CAPITAL_INR', 100_000, { min: 1_000, max: 1e12 }),
+      // One ATM lot risks premium × STOP_LOSS_PCT × lot size (₹120 × 30% × 65 ≈ ₹2,340). At 1% risk that needs
+      // about ₹2.5L of capital; a smaller default would refuse every ATM entry with RISK_BUDGET_TOO_SMALL.
+      inr: number(env, 'CAPITAL_INR', 300_000, { min: 1_000, max: 1e12 }),
       maxRiskPerTradePct: number(env, 'MAX_RISK_PER_TRADE_PCT', 1, { min: 0.01, max: 30 }),
       maxDailyLossPct: number(env, 'MAX_DAILY_LOSS_PCT', 3, { min: 0.01, max: 100 }),
-      maxOpenPositions: number(env, 'MAX_OPEN_POSITIONS', 6, { min: 1, max: 20, integer: true }),
+      maxOpenPositions: number(env, 'MAX_OPEN_POSITIONS', 1, { min: 1, max: 20, integer: true }),
       maxPositionsPerUnderlying: number(env, 'MAX_POSITIONS_PER_UNDERLYING', 2, { min: 1, max: 10, integer: true }),
       maxPositionsPerSide: number(env, 'MAX_POSITIONS_PER_SIDE', 1, { min: 1, max: 5, integer: true }),
-      maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 0, { min: 0, max: 1000, integer: true }),
+      maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
     },
     contract: {
@@ -297,6 +303,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       maxSpreadPct: number(env, 'MAX_SPREAD_PCT', 2, { min: 0.01, max: 20 }),
       minOpenInterest: number(env, 'MIN_OPEN_INTEREST', 10_000, { min: 0, max: 1e12, integer: true }),
       minVolume: number(env, 'MIN_VOLUME', 1_000, { min: 0, max: 1e12, integer: true }),
+      entryLimitBufferPct: number(env, 'ENTRY_LIMIT_BUFFER_PCT', 1, { min: 0, max: 10 }),
     },
     exits: {
       stopLossPct: number(env, 'STOP_LOSS_PCT', 30, { min: 1, max: 90 }),
@@ -325,7 +332,9 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     },
     paper: {
       ...parsePaperBackend(env),
-      slippageBps: number(env, 'PAPER_SLIPPAGE_BPS', 0, { min: 0, max: 500 }),
+      // Paper exits fill at the last price, but a real SELL meets the bid: about half the spread on liquid ATM index
+      // options. Zero made paper results look better than live.
+      slippageBps: number(env, 'PAPER_SLIPPAGE_BPS', 25, { min: 0, max: 500 }),
     },
     llm: {
       enabled: flag(env, 'LLM_ADVISOR', false),
@@ -470,8 +479,10 @@ function validateCrossFields(config: AgentConfig): void {
   if (!(session.entryEndMinute <= exits.flattenByMinute)) {
     throw new Error('FLATTEN_BY must not be earlier than ENTRY_END');
   }
-  if (!(exits.flattenByMinute < 15 * 60 + 30)) {
-    throw new Error('FLATTEN_BY must be before the 15:30 IST close');
+  // Dhan squares off intraday F&O itself from about 15:18 IST (its pages say 15:18 to 15:25), with a charge and
+  // at its own price. The agent's own flatten must come first.
+  if (!(exits.flattenByMinute <= LATEST_FLATTEN_MINUTE)) {
+    throw new Error('FLATTEN_BY must be 15:15 IST or earlier, before Dhan auto-squares intraday positions');
   }
   if (![1, 5, 15, 25, 60].includes(strategy.barMinutes)) {
     throw new Error('BAR_MINUTES must be one of 1, 5, 15, 25, 60 (Dhan intraday chart intervals)');

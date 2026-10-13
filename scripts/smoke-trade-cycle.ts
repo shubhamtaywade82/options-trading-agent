@@ -216,7 +216,7 @@ function runRiskCheck(plan: NonNullable<ReturnType<typeof testPricing>>, contrac
     maxRiskInr: plan.sizing.riskBudgetInr, availableFundsInr: 200_000,
     nowMs: now, minuteOfDay: istParts(now).minuteOfDay,
     entryStartMinute: 0, entryEndMinute: 24 * 60, isExpiryDay: false, expiryDayCutoffMinute: 24 * 60,
-    killSwitchActive, dailyPnlInr: 0, dailyLossLimitInr: 50_000, tradesToday: 0, maxTradesPerDay: 10,
+    killSwitchActive, dailyPnlInr: 0, dailyLossLimitInr: 50_000, realizedPnlInr: 0, openRiskInr: 0, tradesToday: 0, maxTradesPerDay: 10,
     openPositions: 0, maxOpenPositions: 1, underlyingOpen: false, cooldownUntilMs: undefined,
     spotTickAgeMs: 100, optionQuoteAgeMs: 100, staleMs: 5_000,
   });

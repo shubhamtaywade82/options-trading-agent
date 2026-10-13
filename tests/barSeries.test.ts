@@ -51,6 +51,52 @@ describe('CandleBuilder', () => {
     assert.equal(builder.flush(istEpoch('2026-10-12', '09:20'))?.close, 100);
     assert.equal(builder.flush(istEpoch('2026-10-12', '09:25')), undefined, 'a flushed bar is not emitted twice');
   });
+
+  it('should anchor 25- and 60-minute buckets at the 09:15 open, as Dhan history does', () => {
+    const twentyFive = new CandleBuilder(25 * 60_000);
+    assert.equal(twentyFive.bucketStart(istEpoch('2026-10-12', '09:39')), istEpoch('2026-10-12', '09:15'));
+    assert.equal(twentyFive.bucketStart(istEpoch('2026-10-12', '09:40')), istEpoch('2026-10-12', '09:40'));
+    const hourly = new CandleBuilder(60 * 60_000);
+    assert.equal(hourly.bucketStart(istEpoch('2026-10-12', '10:14')), istEpoch('2026-10-12', '09:15'));
+    assert.equal(hourly.bucketStart(istEpoch('2026-10-12', '15:20')), istEpoch('2026-10-12', '15:15'));
+  });
+
+  it('should ignore pre-open and post-close ticks', () => {
+    const builder = new CandleBuilder(FIVE_MIN);
+    assert.equal(builder.onTick({ ltp: 99, ltt: istEpoch('2026-10-12', '09:08') }), undefined);
+    builder.onTick({ ltp: 100, ltt: istEpoch('2026-10-12', '09:15') });
+    const first = builder.onTick({ ltp: 101, ltt: istEpoch('2026-10-12', '09:20') });
+    assert.equal(first?.time, istEpoch('2026-10-12', '09:15'));
+    assert.equal(first?.open, 100, 'the 09:08 pre-open value is not part of the first bar');
+    builder.onTick({ ltp: 102, ltt: istEpoch('2026-10-12', '15:29') });
+    assert.equal(builder.onTick({ ltp: 103, ltt: istEpoch('2026-10-12', '15:31') }), undefined, 'no post-close bar opens');
+  });
+
+  it('should drop a tick stamped inside an already flushed bar', () => {
+    const builder = new CandleBuilder(FIVE_MIN);
+    builder.onTick({ ltp: 100, ltt: istEpoch('2026-10-12', '09:15') });
+    builder.onTick({ ltp: 120, ltt: istEpoch('2026-10-12', '09:17') });
+    builder.onTick({ ltp: 90, ltt: istEpoch('2026-10-12', '09:18') });
+    const flushed = builder.flush(istEpoch('2026-10-12', '09:20') + 100);
+    assert.deepEqual([flushed?.high, flushed?.low, flushed?.close], [120, 90, 90]);
+
+    // Stamped 09:19:59, received after the flush.
+    assert.equal(builder.onTick({ ltp: 105, ltt: istEpoch('2026-10-12', '09:20') - 1_000 }), undefined);
+    assert.equal(builder.droppedLateTicks, 1);
+    builder.onTick({ ltp: 106, ltt: istEpoch('2026-10-12', '09:20') + 2_000 });
+    const next = builder.onTick({ ltp: 107, ltt: istEpoch('2026-10-12', '09:25') + 1_000 });
+    assert.equal(next?.time, istEpoch('2026-10-12', '09:20'), 'the next bar closes, not a second copy of 09:15');
+    assert.equal(next?.open, 106);
+  });
+
+  it('should drop a tick stamped inside a bar closed by a newer tick', () => {
+    const builder = new CandleBuilder(FIVE_MIN);
+    builder.onTick({ ltp: 100, ltt: istEpoch('2026-10-12', '09:15') });
+    builder.onTick({ ltp: 101, ltt: istEpoch('2026-10-12', '09:20') });
+    builder.flush(istEpoch('2026-10-12', '09:25'));
+    assert.equal(builder.onTick({ ltp: 99, ltt: istEpoch('2026-10-12', '09:16') }), undefined);
+    assert.equal(builder.droppedLateTicks, 1);
+  });
 });
 
 describe('BarSeries', () => {

@@ -119,7 +119,15 @@ function port(broker: ReturnType<typeof fakeBroker>, orderTimeoutMs = 200, recon
 }
 
 function brokerRow(netQty: number, extra: Record<string, unknown> = {}) {
-  return { securityId: '48001', exchangeSegment: SEG, netQty, ...extra };
+  return { securityId: '48001', exchangeSegment: SEG, productType: 'INTRADAY', netQty, ...extra };
+}
+
+function dayTotals(dayBuyQty: number, dayBuyValue: number, daySellQty: number, daySellValue: number) {
+  return { dayBuyQty, dayBuyValue, daySellQty, daySellValue };
+}
+
+function setPositions(broker: ReturnType<typeof fakeBroker>, rows: Array<Record<string, unknown>>): void {
+  (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => rows;
 }
 
 describe('classifyPlacementError', () => {
@@ -189,8 +197,53 @@ describe('LiveExecutionPort entries', () => {
     await live.close();
   });
 
-  it('reports ENTRY_UNCONFIRMED when no terminal status arrives before the timeout', async () => {
-    const { live, events } = port(fakeBroker(), 30);
+  it('should send the entry as a LIMIT at the entry reference so a fill cannot exceed the sized risk', async () => {
+    const broker = fakeBroker();
+    const { live } = port(broker);
+    await live.submitEntry(entry());
+    assert.equal(broker.calls.superPlace[0]?.['orderType'], 'LIMIT');
+    assert.equal(broker.calls.superPlace[0]?.['price'], 101);
+    await live.close();
+  });
+
+  it('reports ENTRY_UNCONFIRMED when the entry neither settles nor confirms its cancel', async () => {
+    const broker = fakeBroker();
+    const { live, events } = port(broker, 30);
+    await live.submitEntry(entry());
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(broker.calls.superCancel, [{ orderId: 'SUPER-1', orderLeg: 'ENTRY_LEG' }]);
+    assert.equal(events.at(-1)?.kind, 'ENTRY_UNCONFIRMED');
+    await live.close();
+  });
+
+  it('should cancel an unfilled limit entry at the timeout and report it rejected', async () => {
+    const broker = fakeBroker();
+    const { live, events } = port(broker, 30);
+    await live.submitEntry(entry());
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+    assert.deepEqual(broker.calls.superCancel, [{ orderId: 'SUPER-1', orderLeg: 'ENTRY_LEG' }]);
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'CANCELLED', tradedQty: 0, securityId: '48001', raw: {} });
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'ENTRY_REJECTED');
+    await live.close();
+  });
+
+  it('should report the filled part of a limit entry cancelled at the timeout', async () => {
+    const broker = fakeBroker();
+    const { live, events } = port(broker, 30);
+    await live.submitEntry(entry());
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'CANCELLED', tradedQty: 25, averageTradedPrice: 100.5, securityId: '48001', raw: {} });
+    await settle();
+    const filled = events.at(-1);
+    assert.equal(filled?.kind, 'ENTRY_FILLED');
+    assert.equal((filled as { quantity: number }).quantity, 25);
+    await live.close();
+  });
+
+  it('reports ENTRY_UNCONFIRMED when the cancel of an unfilled entry fails', async () => {
+    const broker = fakeBroker({ cancelError: new ApiResponseError('gateway timeout', 504) });
+    const { live, events } = port(broker, 30);
     await live.submitEntry(entry());
     await new Promise<void>((resolve) => setTimeout(resolve, 60));
     assert.equal(events.at(-1)?.kind, 'ENTRY_UNCONFIRMED');
@@ -227,11 +280,12 @@ describe('LiveExecutionPort exits', () => {
   });
 
   it('never sends a SELL when the broker reports no long quantity, and records the external close instead', async () => {
-    const broker = fakeBroker({ positions: [brokerRow(0, { sellAvg: 70.1, sellQty: 75 })] });
+    const broker = fakeBroker();
     const { live, events } = port(broker);
     await live.submitEntry(entry());
     broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
     await settle();
+    setPositions(broker, [brokerRow(0, dayTotals(75, 7575, 75, 5257.5))]);
     await live.submitExit(exit());
     assert.equal(broker.calls.place.length, 0, 'a SELL here would open a short option');
     assert.deepEqual(events.at(-1), {
@@ -239,7 +293,7 @@ describe('LiveExecutionPort exits', () => {
       underlying: 'NIFTY',
       positionId: 'ENT-1',
       quantity: 75,
-      averagePrice: 70.1,
+      averagePrice: 5257.5 / 75,
       reason: 'EXTERNAL',
       at: (events.at(-1) as { at: number }).at,
     });
@@ -290,6 +344,63 @@ describe('LiveExecutionPort exits', () => {
   });
 });
 
+describe('LiveExecutionPort broker position rows', () => {
+  /** Rows before the entry, while the position is open, and after the bracket closed it. */
+  async function bracketCloseAfter(
+    before: Array<Record<string, unknown>>,
+    open: Array<Record<string, unknown>>,
+    after: Array<Record<string, unknown>>,
+  ) {
+    const broker = fakeBroker({ positions: before });
+    const { live, events } = port(broker, 200, 10);
+    live.start();
+    await live.submitEntry(entry());
+    setPositions(broker, open);
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
+    await settle();
+    setPositions(broker, after);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await live.close();
+    return events.find((event) => event.kind === 'PROTECTIVE_EXIT_FILLED') as Extract<ExecutionEvent, { kind: 'PROTECTIVE_EXIT_FILLED' }> | undefined;
+  }
+
+  it('should price a close from this trade only when the contract was already traded today', async () => {
+    // Earlier today: bought 75 @ 100, sold 75 @ 120. This trade: bought 75 @ 101, stopped out 75 @ 70.
+    const earlier = dayTotals(75, 7_500, 75, 9_000);
+    const close = await bracketCloseAfter(
+      [brokerRow(0, earlier)],
+      [brokerRow(75, dayTotals(150, 15_075, 75, 9_000))],
+      [brokerRow(0, dayTotals(150, 15_075, 150, 14_250))],
+    );
+    assert.equal(close?.quantity, 75);
+    assert.equal(close?.averagePrice, 70, 'not the blended day average of 95');
+  });
+
+  it('should ignore a position in the same contract held under another product', async () => {
+    const manual = { ...brokerRow(75, dayTotals(75, 7_500, 0, 0)), productType: 'MARGIN' };
+    const close = await bracketCloseAfter(
+      [manual],
+      [manual, brokerRow(75, dayTotals(75, 7_575, 0, 0))],
+      [manual, brokerRow(0, dayTotals(75, 7_575, 75, 12_150))],
+    );
+    assert.equal(close?.averagePrice, 162, 'the INTRADAY row is read, and its bracket close is seen');
+  });
+
+  it('should book a close with no visible sell at the stop price, not as a total loss', async () => {
+    const close = await bracketCloseAfter([], [brokerRow(75)], [brokerRow(0)]);
+    assert.equal(close?.averagePrice, 70.05);
+    assert.equal(close?.quantity, 75);
+  });
+
+  it('should still enter when the positions read before the entry fails', async () => {
+    const broker = fakeBroker({ positionsError: new Error('read timeout') });
+    const { live } = port(broker);
+    await live.submitEntry(entry());
+    assert.equal(broker.calls.superPlace.length, 1);
+    await live.close();
+  });
+});
+
 describe('LiveExecutionPort reconciliation', () => {
   it('reports an external (bracket) close seen only in positions, exactly once', async () => {
     const broker = fakeBroker({ positions: [brokerRow(75)] });
@@ -298,7 +409,7 @@ describe('LiveExecutionPort reconciliation', () => {
     await live.submitEntry(entry());
     broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
     await settle();
-    (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => [brokerRow(0, { sellAvg: 162, sellQty: 75 })];
+    setPositions(broker, [brokerRow(0, dayTotals(75, 7575, 75, 12_150))]);
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     const closes = events.filter((event) => event.kind === 'PROTECTIVE_EXIT_FILLED');
     assert.equal(closes.length, 1);
@@ -311,10 +422,11 @@ describe('LiveExecutionPort reconciliation', () => {
     const { live, events } = port(broker, 200, 10);
     live.start();
     await live.submitEntry(entry());
-    (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => [brokerRow(75, { buyAvg: 101.2 })];
+    setPositions(broker, [brokerRow(75, dayTotals(75, 7_590, 0, 0))]);
     await new Promise<void>((resolve) => setTimeout(resolve, 60));
     const fills = events.filter((event) => event.kind === 'ENTRY_FILLED');
     assert.equal(fills.length, 1);
+    assert.equal(fills[0]?.kind === 'ENTRY_FILLED' && fills[0].averagePrice, 101.2);
     assert.equal(events[0]?.kind, 'ENTRY_UNCONFIRMED');
     await live.close();
   });

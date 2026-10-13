@@ -70,7 +70,9 @@ export class Orchestrator {
   private timer: ReturnType<typeof setInterval> | undefined;
   private unsubscribeTicks: (() => void) | undefined;
   private unsubscribeEvents: (() => void) | undefined;
-  private brokerKillPending: string | undefined;
+  /** Why the broker kill switch is wanted. Kept for the day: a late fill can reopen a position after an attempt. */
+  private brokerKillReason: string | undefined;
+  private brokerKillSent = false;
   private started = false;
   private stopRequested = false;
   private starting: Promise<void> | undefined;
@@ -392,6 +394,8 @@ export class Orchestrator {
   /** Cycles posture (scout -> aligned -> confirmed) across all underlyings without restart. */
   cyclePosture(): string {
     const result = this.strategySession.cyclePosture();
+    // Posture changes which signals fire, so it is journalled like any other operator action on trading.
+    this.services.events.record('strategy_posture', { posture: this.strategySession.view().posture });
     this.services.logger.info('strategy posture cycled', { posture: this.strategySession.view().posture });
     this.notifyView();
     return result;
@@ -400,6 +404,8 @@ export class Orchestrator {
   /** Toggles an individual strategy on or off live during the session. */
   toggleStrategy(id: StrategyId): string {
     const result = this.strategySession.toggle(id);
+    const enabled = this.strategySession.view().strategies.find((row) => row.id === id)?.on;
+    this.services.events.record('strategy_toggled', { id, enabled });
     this.services.logger.info('strategy toggled', { id, result });
     this.notifyView();
     return result;
@@ -497,31 +503,43 @@ export class Orchestrator {
     this.book.recordDailyLossBreach(reason);
     this.services.logger.error('daily loss limit breached; flattening', { reason });
     this.durableEvent('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
-    this.brokerKillPending = reason;
+    this.brokerKillReason ??= reason;
   }
 
   /**
-   * A halt means an order's fate is unknown or the broker disagrees with us.
-   * No exit is being managed in that state, so the broker switch engages at once.
+   * A halt means an order's fate is unknown or the broker disagrees with us. Entries stop at once in the book.
+   * The broker switch waits like a breach does: Dhan refuses to activate it while any position is open, and
+   * halted positions are still being exited.
    */
   private onHalt(underlying: string, reason: string): void {
     const fullReason = `${underlying}: ${reason}`;
     this.book.activateKillSwitch(fullReason);
     this.durableEvent('book_kill_switch', { reason: fullReason });
-    this.engageBrokerKillSwitch(fullReason);
+    this.brokerKillReason ??= fullReason;
+    this.maybeEngageBrokerKillSwitch();
   }
 
-  /** Engages the broker kill switch only once every position is flat, so it cannot block the exits themselves. */
+  /**
+   * Engages the broker kill switch whenever the book goes from holding a position to holding none, so it cannot
+   * block the exits themselves. It can take more than one attempt: Dhan refuses it while an order is pending,
+   * and a halted entry may fill late, so the switch is tried again once that late position is closed.
+   * A halted agent's unresolved entry does not hold it back: that order's fate may never be known.
+   */
   private maybeEngageBrokerKillSwitch(): void {
-    if (this.brokerKillPending === undefined) {
+    if (this.brokerKillReason === undefined) {
       return;
     }
-    if (![...this.agents.values()].every((agent) => agent.isFlat())) {
+    const settled = (agent: UnderlyingAgent): boolean =>
+      agent.openPositions.length === 0 && (agent.haltedBecause !== undefined || !agent.hasPendingEntry());
+    if (![...this.agents.values()].every(settled)) {
+      this.brokerKillSent = false;
       return;
     }
-    const reason = this.brokerKillPending;
-    this.brokerKillPending = undefined;
-    this.engageBrokerKillSwitch(reason);
+    if (this.brokerKillSent) {
+      return;
+    }
+    this.brokerKillSent = true;
+    this.engageBrokerKillSwitch(this.brokerKillReason);
   }
 
   private engageBrokerKillSwitch(reason: string): void {

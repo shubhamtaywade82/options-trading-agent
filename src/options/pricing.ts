@@ -60,3 +60,34 @@ export function bracketLevels(input: {
   }
   return { entryReference, stopLossPrice, targetPrice, riskPerUnit };
 }
+
+/**
+ * Statutory and broker charges for one option round trip (buy, then sell), as a percentage of premium unless named
+ * in rupees. An estimate for the day book: the contract note is authoritative, and these rates change by budget
+ * and exchange circular (STT on the options sell side rose from 0.10% to 0.15% on 2026-04-01).
+ */
+const BROKERAGE_PER_ORDER_INR = 20;
+const STT_SELL_PCT = 0.15;
+const EXCHANGE_TXN_PCT: Readonly<Record<string, number>> = { NSE_FNO: 0.03503, BSE_FNO: 0.0325 };
+const SEBI_FEE_PCT = 0.0001;
+const STAMP_DUTY_BUY_PCT = 0.003;
+const GST_PCT = 18;
+
+export function roundTripChargesInr(input: {
+  quantity: number;
+  buyPrice: number;
+  sellPrice: number;
+  exchangeSegment: string;
+}): number {
+  const buyPremium = input.quantity * input.buyPrice;
+  const sellPremium = input.quantity * input.sellPrice;
+  const turnover = buyPremium + sellPremium;
+  const exchangeTxnPct = EXCHANGE_TXN_PCT[input.exchangeSegment] ?? EXCHANGE_TXN_PCT['NSE_FNO'] ?? 0;
+  const brokerage = 2 * BROKERAGE_PER_ORDER_INR;
+  const exchangeTxn = (turnover * exchangeTxnPct) / 100;
+  const sebiFee = (turnover * SEBI_FEE_PCT) / 100;
+  const stt = (sellPremium * STT_SELL_PCT) / 100;
+  const stampDuty = (buyPremium * STAMP_DUTY_BUY_PCT) / 100;
+  const gst = ((brokerage + exchangeTxn + sebiFee) * GST_PCT) / 100;
+  return Number((brokerage + exchangeTxn + sebiFee + stt + stampDuty + gst).toFixed(2));
+}

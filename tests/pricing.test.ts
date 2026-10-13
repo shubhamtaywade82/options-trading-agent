@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { bracketLevels, roundDownToTick, roundUpToTick } from '../src/options/pricing.js';
+import { bracketLevels, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../src/options/pricing.js';
 import { sizePosition } from '../src/options/sizing.js';
 
 describe('tick rounding', () => {
@@ -67,5 +67,24 @@ describe('sizePosition', () => {
 
   it('refuses to size a degenerate stop instead of dividing by zero', () => {
     assert.equal(sizePosition({ ...base, stopLossPrice: 100 }).lots, 0);
+  });
+});
+
+describe('roundTripChargesInr', () => {
+  it('should total brokerage, exchange, SEBI, STT, stamp duty and GST for an NSE round trip', () => {
+    // Buy 7575, sell 12120: 40 + 6.899 + 0.020 + 18.18 + 0.227 + 8.445 = 73.77.
+    assert.equal(roundTripChargesInr({ quantity: 75, buyPrice: 101, sellPrice: 161.6, exchangeSegment: 'NSE_FNO' }), 73.77);
+  });
+
+  it('should charge STT on the sell premium only, so a worthless exit pays none', () => {
+    const worthless = roundTripChargesInr({ quantity: 75, buyPrice: 100, sellPrice: 0, exchangeSegment: 'NSE_FNO' });
+    // 40 brokerage + 2.627 exchange + 0.0075 SEBI + 0.225 stamp + GST 7.674 on (40 + 2.627 + 0.0075).
+    assert.equal(worthless, 50.53);
+  });
+
+  it('should use the BSE exchange rate for SENSEX options', () => {
+    const nse = roundTripChargesInr({ quantity: 20, buyPrice: 200, sellPrice: 200, exchangeSegment: 'NSE_FNO' });
+    const bse = roundTripChargesInr({ quantity: 20, buyPrice: 200, sellPrice: 200, exchangeSegment: 'BSE_FNO' });
+    assert.ok(bse < nse);
   });
 });

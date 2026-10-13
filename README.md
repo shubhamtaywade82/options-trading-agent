@@ -135,9 +135,14 @@ Every check fails closed: a missing leg, a missing quote, a crossed quote, a sec
 mismatch with the scrip master, a spread above `MAX_SPREAD_PCT`, or OI/volume below the
 minimums rejects the signal.
 
-**Brackets and sizing:** entry reference is the ask. Stop = ask × (1 − `STOP_LOSS_PCT`),
+**Brackets and sizing:** entry reference is the ask × (1 + `ENTRY_LIMIT_BUFFER_PCT`), rounded up to
+tick. Live entries are LIMIT super orders at that price, so a fill can never be above it and the
+realised risk never exceeds the sized risk. A limit not filled within `ORDER_TIMEOUT_MS` is cancelled;
+a partial fill keeps what filled. Stop = entry × (1 − `STOP_LOSS_PCT`),
 rounded up to tick. Target = entry + `TARGET_RR` × risk, rounded down to tick. Lots are
-floored so that `lots × lotSize × (entry − stop)` fits `CAPITAL_INR × MAX_RISK_PER_TRADE_PCT`.
+floored so that `lots × lotSize × (entry − stop)` fits `min(CAPITAL_INR, available funds) ×
+MAX_RISK_PER_TRADE_PCT`. `CAPITAL_INR` is a ceiling, never raised by a larger broker balance, so
+one stop-out stays inside the daily loss limit (also a percentage of `CAPITAL_INR`).
 If one lot does not fit the budget, the trade is skipped. The agent never rounds risk up.
 
 ## Risk controls
@@ -146,15 +151,17 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | --- | --- | --- |
 | Mandatory stop loss | `bracketLevels`, `evaluatePreTrade`, SDK super-order schema | Every entry carries a stop and target. An entry cannot be built without them, and the SDK rejects a super order that lacks either. |
 | Max risk per trade | `sizePosition`, re-checked in `evaluatePreTrade` | Lots floored to budget. Zero lots means skip. |
-| Max daily loss | `DayBook`, `Orchestrator.enforceDailyLoss` | Realised + unrealised day P&L ≤ −limit: entries blocked, all positions flattened, then broker kill switch. |
-| Trades per day, open positions, one per underlying | `evaluatePreTrade` | Hard limits. |
+| Max daily loss | `DayBook`, `Orchestrator.enforceDailyLoss` | Realised + unrealised day P&L ≤ −limit: entries blocked, all positions flattened, then broker kill switch. Realised P&L is net of estimated charges (`roundTripChargesInr`: ₹20/order brokerage, STT 0.15% on the sell premium, exchange and SEBI fees, stamp duty, GST); the journal records gross, charges and net. The contract note is authoritative. |
+| Max daily loss at risk | `DayBook.openRiskInr`, `evaluatePreTrade` | Realised P&L − every open or pending stop − this trade's stop must stay above −limit, across all underlyings and both sides. Otherwise `DAILY_LOSS_AT_RISK`. |
+| Trades per day, open positions, one per underlying | `evaluatePreTrade` | Hard limits. Defaults: 3 trades, 1 open position. |
 | Cooldown per underlying | `DayBook` | `COOLDOWN_SECONDS` after each exit. |
 | Entry window and expiry-day cutoff | `evaluatePreTrade` | Outside the window, or after `EXPIRY_DAY_ENTRY_CUTOFF` on expiry day: no entry. |
 | Stale data | `evaluatePreTrade`, `DhanFeed.ageMs` | Spot tick older than `FEED_STALE_MS` (or never received) on local receipt time, or a chain snapshot older than `FEED_STALE_MS`: no entry. |
 | Time stop, EOD flatten | `UnderlyingAgent.exitReason` | `MAX_HOLD_MINUTES`, and every position flattened at `FLATTEN_BY` IST. |
-| Kill switch | `DayBook`, `engageBrokerKillSwitch` | Local block on entries; broker kill switch on halts and on daily-loss breach once flat. |
+| Kill switch | `DayBook`, `engageBrokerKillSwitch` | Local block on entries at once. Broker kill switch on halts and on daily-loss breach once no position is open (Dhan refuses it otherwise), tried again if a late fill reopens and closes one. |
 | Clock alignment | `assertWarmupClock` | Startup refuses if bar timestamps are inconsistent with the wall clock (wrong epoch convention). |
-| Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. |
+| Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. Until then only the position's bracket legs and Dhan's own intraday square-off (from about 15:18 IST, with a charge) protect it: no agent exit runs. |
+| Flatten before the broker does | `loadConfig` | `FLATTEN_BY` must be 15:15 IST or earlier, before Dhan auto-squares intraday positions. |
 | Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal file (`data/journal/events-YYYY-MM-DD.jsonl`). A malformed line in that file refuses startup. |
 
 ## Execution invariants (live)

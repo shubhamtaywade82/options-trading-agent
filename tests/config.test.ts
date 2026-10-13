@@ -142,7 +142,10 @@ describe('loadConfig', () => {
   it('enforces the session ordering: entry window, then flatten, before the close', () => {
     assert.throws(() => loadConfig({ ...BASE, ENTRY_START: '10:00', ENTRY_END: '09:30' }), /ENTRY_START/);
     assert.throws(() => loadConfig({ ...BASE, ENTRY_END: '15:10', FLATTEN_BY: '15:05' }), /FLATTEN_BY/);
-    assert.throws(() => loadConfig({ ...BASE, FLATTEN_BY: '15:45' }), /15:30/);
+    assert.equal(loadConfig(BASE).paper.slippageBps, 25, 'paper exits pay about half the spread by default');
+    assert.throws(() => loadConfig({ ...BASE, FLATTEN_BY: '15:45' }), /15:15/);
+    assert.throws(() => loadConfig({ ...BASE, FLATTEN_BY: '15:16' }), /before Dhan auto-squares/);
+    assert.equal(loadConfig({ ...BASE, FLATTEN_BY: '15:15' }).exits.flattenByMinute, 15 * 60 + 15);
   });
 
   it('never lets a single trade risk more than the daily loss budget allows', () => {
