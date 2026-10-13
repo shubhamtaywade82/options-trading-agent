@@ -626,9 +626,9 @@ export class UnderlyingAgent {
     }
 
     const funds = await market.availableFunds();
-    const effectiveCapital = funds > 0 ? funds : config.capital.inr;
+    const capital = Math.max(config.capital.inr, funds);
     const sizing = sizePosition({
-      capitalInr: effectiveCapital,
+      capitalInr: capital,
       maxRiskPerTradePct: config.capital.maxRiskPerTradePct,
       availableFundsInr: funds,
       entryReference: bracket.entryReference,
