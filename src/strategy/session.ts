@@ -77,7 +77,7 @@ export class StrategySession {
       }
       const signal = row.id === 'range' ? rangeSignal(bars, params, this.posture) : trendSignal(bars, params, this.posture);
       if (signal !== undefined) {
-        return signal;
+        return { ...signal, strategy: row.id };
       }
     }
     return undefined;

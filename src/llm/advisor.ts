@@ -34,6 +34,7 @@ export interface EntrySnapshot {
   readonly openInterest: number;
   readonly lots: number;
   readonly riskInr: number;
+  readonly strategy: string;
   readonly signalReasons: readonly string[];
 }
 

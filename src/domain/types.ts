@@ -68,6 +68,8 @@ export interface Signal {
   readonly barTime: number;
   readonly spot: number;
   readonly reasons: readonly string[];
+  /** Which strategy fired, so results can be judged per strategy. `test` for an operator test trade. */
+  readonly strategy?: string;
 }
 
 export interface OpenPosition {

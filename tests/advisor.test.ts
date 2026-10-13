@@ -18,6 +18,7 @@ const SNAPSHOT: EntrySnapshot = {
   openInterest: 500_000,
   lots: 1,
   riskInr: 2_000,
+  strategy: 'range',
   signalReasons: ['ORB high broken'],
 };
 

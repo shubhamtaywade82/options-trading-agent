@@ -106,3 +106,35 @@ export function summarizeJournal(journalLines: readonly string[]): JournalSummar
     killSwitchEvents,
   };
 }
+
+export interface JournalScope {
+  readonly mode: string;
+  readonly clientId: string;
+}
+
+/**
+ * Keeps the lines of one mode and client, so paper and live never mix in a report. Untagged lines predate tagging:
+ * they are counted, not kept. Unparseable lines are kept, so the summary can report them as malformed.
+ */
+export function linesInScope(lines: readonly string[], scope: JournalScope): { kept: string[]; untagged: number } {
+  const kept: string[] = [];
+  let untagged = 0;
+  for (const line of lines) {
+    if (line.trim() === '') {
+      continue;
+    }
+    let event: { mode?: unknown; client?: unknown };
+    try {
+      event = JSON.parse(line) as typeof event;
+    } catch {
+      kept.push(line);
+      continue;
+    }
+    if (typeof event.mode !== 'string' || typeof event.client !== 'string') {
+      untagged += 1;
+    } else if (event.mode === scope.mode && event.client === scope.clientId) {
+      kept.push(line);
+    }
+  }
+  return { kept, untagged };
+}

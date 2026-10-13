@@ -22,6 +22,7 @@
     "smoke:trade": "tsx scripts/smoke-trade-cycle.ts",
     "smoke:feed": "tsx scripts/smoke-feed.ts",
     "journal:summary": "tsx scripts/journal-summary.ts",
+    "report:performance": "tsx scripts/performance-report.ts",
     "cockpit:demo": "tsx scripts/cockpit-demo.ts",
     "db:status": "tsx scripts/db.ts status",
     "db:migrate": "tsx scripts/db.ts migrate",

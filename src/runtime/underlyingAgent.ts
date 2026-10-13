@@ -476,6 +476,7 @@ export class UnderlyingAgent {
       barTime: this.now(),
       spot,
       reasons: [`operator test trade (${dir})`],
+      strategy: 'test',
     };
     this.queue.run(() => this.processSignal(signal, slot));
     return `${this.symbol}: test ${dir} signal triggered at spot ${spot}`;
@@ -518,7 +519,7 @@ export class UnderlyingAgent {
       this.drop('STALE_AT_SUBMIT', stale, slot);
       return;
     }
-    await this.submitPreparedOrder(prepared.order, slot);
+    await this.submitPreparedOrder(prepared.order, prepared.snapshot, slot);
   }
 
   /**
@@ -539,7 +540,7 @@ export class UnderlyingAgent {
     return undefined;
   }
 
-  private async submitPreparedOrder(order: EntryOrder, slot: SideSlot): Promise<void> {
+  private async submitPreparedOrder(order: EntryOrder, snapshot: EntrySnapshot, slot: SideSlot): Promise<void> {
     try {
       await withDeadline(
         this.durableRecord('entry_submitted', {
@@ -549,6 +550,14 @@ export class UnderlyingAgent {
           entryReference: order.entryReference,
           stopLossPrice: order.stopLossPrice,
           targetPrice: order.targetPrice,
+          // The setup behind the trade, so the performance report can judge each one on its own results.
+          strategy: snapshot.strategy,
+          posture: this.strategySession.view().posture,
+          direction: snapshot.direction,
+          optionType: order.contract.optionType,
+          expiry: snapshot.expiry,
+          daysToExpiry: snapshot.daysToExpiry,
+          minuteOfDayIst: snapshot.minuteOfDayIst,
         }),
         INTENT_DEADLINE_MS,
         `entry intent was not durable within ${INTENT_DEADLINE_MS} ms`,
@@ -746,6 +755,7 @@ export class UnderlyingAgent {
       openInterest: quote.oi ?? 0,
       lots: sizing.lots,
       riskInr: verdict.riskInr,
+      strategy: signal.strategy ?? 'unknown',
       signalReasons: signal.reasons,
     };
 

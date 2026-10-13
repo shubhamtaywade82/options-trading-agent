@@ -229,8 +229,12 @@ before relying on it. The first check it runs is the login.
 | `npm run cockpit:demo` | Opens the operator cockpit on fakes, to see the screen. | none |
 | `npm run smoke:live` | Read-only check of the open assumptions against live Dhan data: scrip master, expiries, option-chain fields, warmup bars and clock, funds, open broker positions. Places no orders. | Dhan |
 | `npm run journal:summary [YYYY-MM-DD]` | Summarises a day's journal: trades, wins and losses, realised P&L, exit reasons, dropped-signal reasons, halts. | none |
+| `npm run report:performance [-- --from YYYY-MM-DD --to YYYY-MM-DD --json]` | Results across every journal day, overall and by strategy, posture, underlying, option type, exit reason, entry hour, days to expiry and day: trades, win rate, net P&L, expectancy per trade, profit factor, average R, charges. Plus the signal funnel and every drop reason. Groups under 30 trades are flagged as too few to judge. One mode and client only. | none |
 
-Run `smoke:live` before a live session, and `journal:summary` after every paper session.
+Run `smoke:live` before a live session, and `journal:summary` after every paper session. Use
+`report:performance` to judge settings, and change a setting only on a group with enough trades. Each entry
+journals its strategy, posture, direction, option type, expiry, days to expiry and entry minute for this report.
+Operator test trades are journalled as strategy `test`, so they never count as a strategy's results.
 
 ## Testing
 

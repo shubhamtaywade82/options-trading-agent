@@ -12,7 +12,7 @@ import 'dotenv/config';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { journalFileName } from '../src/ops/eventLog.js';
-import { summarizeJournal } from '../src/ops/journalSummary.js';
+import { linesInScope, summarizeJournal, type JournalScope } from '../src/ops/journalSummary.js';
 import { PostgresLedger } from '../src/persistence/ledger.js';
 import { createPostgresPool } from '../src/persistence/postgres.js';
 import { errorMessage, secretsOf } from '../src/persistence/redact.js';
@@ -23,41 +23,12 @@ function argument(name: string): string | undefined {
   return index === -1 ? undefined : process.argv[index + 1];
 }
 
-interface Scope {
-  readonly mode: string;
-  readonly clientId: string;
-}
-
-/** Keeps the lines of this scope. Untagged lines are returned separately, so the caller can say how many there were. */
-function inScope(lines: readonly string[], scope: Scope): { kept: string[]; untagged: number } {
-  const kept: string[] = [];
-  let untagged = 0;
-  for (const line of lines) {
-    if (line.trim() === '') {
-      continue;
-    }
-    let event: { mode?: unknown; client?: unknown };
-    try {
-      event = JSON.parse(line) as typeof event;
-    } catch {
-      kept.push(line);
-      continue;
-    }
-    if (typeof event.mode !== 'string' || typeof event.client !== 'string') {
-      untagged += 1;
-    } else if (event.mode === scope.mode && event.client === scope.clientId) {
-      kept.push(line);
-    }
-  }
-  return { kept, untagged };
-}
-
 async function main(): Promise<void> {
   const dayKey = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : istParts(Date.now()).date;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) {
     throw new Error(`day must be YYYY-MM-DD, got "${dayKey}"`);
   }
-  const scope: Scope = { mode: (process.env['MODE'] ?? 'paper').trim().toLowerCase(), clientId: process.env['DHAN_CLIENT_ID']?.trim() ?? '' };
+  const scope: JournalScope = { mode: (process.env['MODE'] ?? 'paper').trim().toLowerCase(), clientId: process.env['DHAN_CLIENT_ID']?.trim() ?? '' };
   if (scope.clientId === '') {
     throw new Error('DHAN_CLIENT_ID is required: the summary reads one client\'s events only');
   }
@@ -82,7 +53,7 @@ async function main(): Promise<void> {
   } else {
     const directory = process.env['EVENT_LOG_DIR']?.trim() || 'data/journal';
     const path = join(directory, journalFileName(dayKey));
-    const scoped = inScope((await readFile(path, 'utf8')).split('\n'), scope);
+    const scoped = linesInScope((await readFile(path, 'utf8')).split('\n'), scope);
     lines = scoped.kept;
     location = path;
     if (scoped.untagged > 0) {

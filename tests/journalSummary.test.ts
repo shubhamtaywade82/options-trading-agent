@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { summarizeJournal } from '../src/ops/journalSummary.js';
+import { linesInScope, summarizeJournal } from '../src/ops/journalSummary.js';
 
 const line = (type: string, extra: Record<string, unknown> = {}): string => JSON.stringify({ ts: '2026-10-12T10:00:00.000Z', type, ...extra });
 
@@ -43,5 +43,21 @@ describe('summarizeJournal', () => {
     assert.equal(summary.lines, 2);
     assert.equal(summary.malformed, 1);
     assert.equal(summary.realizedPnlInr, 10);
+  });
+});
+
+describe('linesInScope', () => {
+  it('should keep one mode and client only, count untagged lines, and keep unparseable lines for the malformed count', () => {
+    const lines = [
+      JSON.stringify({ type: 'a', mode: 'paper', client: '1' }),
+      JSON.stringify({ type: 'b', mode: 'live', client: '1' }),
+      JSON.stringify({ type: 'c', mode: 'paper', client: '2' }),
+      JSON.stringify({ type: 'd' }),
+      'not json',
+      '',
+    ];
+    const scoped = linesInScope(lines, { mode: 'paper', clientId: '1' });
+    assert.deepEqual(scoped.kept, [lines[0], 'not json']);
+    assert.equal(scoped.untagged, 1);
   });
 });

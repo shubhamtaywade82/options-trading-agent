@@ -300,6 +300,20 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     assert.equal(closed?.payload['pnlInr'], 4545);
   });
 
+  it('should journal the setup behind each entry for the performance report', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const entry = harness.events.find((event) => event.type === 'entry_submitted')?.payload;
+    assert.equal(entry?.['strategy'], 'range');
+    assert.equal(entry?.['posture'], 'aligned');
+    assert.equal(entry?.['direction'], 'BULLISH');
+    assert.equal(entry?.['optionType'], 'CE');
+    assert.equal(entry?.['expiry'], '2026-10-15');
+    assert.equal(typeof entry?.['daysToExpiry'], 'number');
+    assert.equal(typeof entry?.['minuteOfDayIst'], 'number');
+  });
+
   it('flattens an open position at the end-of-day cutoff', async () => {
     const harness = build();
     await harness.orchestrator.start();
@@ -1094,6 +1108,15 @@ describe('runtime: durable intents and the trading gate', () => {
 
     assert.equal(harness.orchestrator.snapshot().day.openPositions, 1);
     assert.equal(harness.events.find((event) => event.type === 'signal_dropped')?.payload['code'], 'DAILY_LOSS_AT_RISK');
+  });
+
+  it('should journal an operator test trade as strategy test, apart from real signals', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
+    harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    await settle(harness.orchestrator);
+    assert.equal(harness.events.find((event) => event.type === 'entry_submitted')?.payload['strategy'], 'test');
   });
 
   it('should journal posture and strategy changes', async () => {
