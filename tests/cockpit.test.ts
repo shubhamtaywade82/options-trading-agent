@@ -104,7 +104,7 @@ const rich = snapshot({
       lastDrop: { code: 'SPREAD_TOO_WIDE', detail: 'spread 3.10% exceeds 2% on BANKNIFTY 48000 CE', at: istEpoch(SESSION_DAY, '10:12') },
     }),
   ],
-  day: { dayKey: SESSION_DAY, realizedPnlInr: -1200, unrealizedPnlInr: 1283.75, dayPnlInr: 83.75, tradesToday: 2, openUnderlyings: ['NIFTY'], killSwitchReason: undefined },
+  day: { dayKey: SESSION_DAY, realizedPnlInr: -1200, unrealizedPnlInr: 1283.75, dayPnlInr: 83.75, tradesToday: 2, openUnderlyings: ['NIFTY'], openPositions: 1, killSwitchReason: undefined },
 });
 
 describe('cockpit layout', () => {

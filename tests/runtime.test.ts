@@ -97,7 +97,7 @@ function chain(now: () => number): ChainSnapshot {
     fetchedAt: now(),
     strikes: [
       { strike: 100, call: leg('48003', 102, 102.5), put: leg('48004', 0.8, 1) },
-      { strike: 101, call: leg('48001', 100.5, 101), put: leg('48002', 0.9, 1.1) },
+      { strike: 101, call: leg('48001', 100.5, 101), put: leg('48002', 100.5, 101) },
       { strike: 102, call: leg('48005', 0.8, 1), put: leg('48006', 102, 102.5) },
     ],
   };
@@ -780,6 +780,34 @@ describe('runtime: durable intents and the trading gate', () => {
     assert.match(msg, /test BULLISH signal triggered/);
     await settle(harness.orchestrator);
     assert.ok(harness.events.some((event) => event.type === 'entry_submitted'), 'test trade triggered entry');
+  });
+
+  it('can open both CE and PE positions concurrently on the same underlying', async () => {
+    const harness = build({
+      MAX_OPEN_POSITIONS: '6',
+      MAX_POSITIONS_PER_UNDERLYING: '2',
+      MAX_POSITIONS_PER_SIDE: '1',
+    });
+    await harness.orchestrator.start();
+    harness.feed.emit({ exchangeSegment: 'IDX_I', securityId: '13', ltp: 101.2, ltt: harness.now() });
+
+    const msg1 = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    assert.match(msg1, /test BULLISH signal triggered/);
+    await settle(harness.orchestrator);
+
+    const msg2 = harness.orchestrator.triggerTestTrade('NIFTY', 'BEARISH');
+    assert.match(msg2, /test BEARISH signal triggered/);
+    await settle(harness.orchestrator);
+
+    const snapshot = harness.orchestrator.snapshot();
+    const nifty = snapshot.underlyings[0];
+    assert.ok(nifty !== undefined);
+    assert.equal(nifty.positions.length, 2);
+    assert.deepEqual(nifty.positions.map((p) => p.optionType).sort(), ['CE', 'PE']);
+    assert.equal(snapshot.day.openPositions, 2);
+
+    const msg3 = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
+    assert.match(msg3, /cannot test trade while CE state is RISK_MANAGEMENT_ACTIVE/);
   });
 
   it('rejects test trades in live mode', async () => {

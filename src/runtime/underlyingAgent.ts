@@ -9,6 +9,7 @@ import {
   type InstrumentRef,
   type OpenPosition,
   type OptionContract,
+  type OptionType,
   type Signal,
   type Tick,
   type UnderlyingSpec,
@@ -77,9 +78,20 @@ function describe(error: unknown): string {
  * SerialQueue, so each transition completes before the next begins. The strategy
  * runs only on closed bars; the risk gate and advisor can only stop an entry.
  */
+interface SideSlot {
+  readonly optionType: OptionType;
+  readonly fsm: TradeStateMachine;
+  pending: EntryOrder | undefined;
+  position: OpenPosition | undefined;
+  lastMark: number | undefined;
+  exitRetryAfterMs: number;
+  manualExit: boolean;
+}
+
 export class UnderlyingAgent {
   readonly symbol: string;
-  private readonly fsm: TradeStateMachine;
+  private readonly ce: SideSlot;
+  private readonly pe: SideSlot;
   private readonly queue: SerialQueue;
   private readonly bars = new BarSeries();
   private readonly candles: CandleBuilder;
@@ -87,13 +99,8 @@ export class UnderlyingAgent {
   private readonly orb: OrbSupertrendParams;
   private readonly strategySession: StrategySession;
   private readonly dailyLossLimitInr: number;
-  private pending: EntryOrder | undefined;
-  private position: OpenPosition | undefined;
-  private lastMark: number | undefined;
-  private exitRetryAfterMs = 0;
   private haltReason: string | undefined;
   private shuttingDown = false;
-  private manualExit = false;
   private sequence = 0;
   /** Counts agent exits, so a retried exit in the same millisecond still gets its own id. */
   private exitSequence = 0;
@@ -107,7 +114,24 @@ export class UnderlyingAgent {
   constructor(private readonly deps: AgentDependencies) {
     this.symbol = deps.spec.symbol;
     this.now = deps.now ?? Date.now;
-    this.fsm = new TradeStateMachine(this.now);
+    this.ce = {
+      optionType: 'CE',
+      fsm: new TradeStateMachine(this.now),
+      pending: undefined,
+      position: undefined,
+      lastMark: undefined,
+      exitRetryAfterMs: 0,
+      manualExit: false,
+    };
+    this.pe = {
+      optionType: 'PE',
+      fsm: new TradeStateMachine(this.now),
+      pending: undefined,
+      position: undefined,
+      lastMark: undefined,
+      exitRetryAfterMs: 0,
+      manualExit: false,
+    };
     this.strategySession = deps.strategySession ?? new StrategySession();
     this.queue = new SerialQueue((error) => {
       this.deps.logger.error('agent task failed', { underlying: this.symbol, error: describe(error) });
@@ -129,20 +153,44 @@ export class UnderlyingAgent {
   }
 
   get state(): TradeState {
-    return this.fsm.state;
+    if (this.ce.fsm.state === 'HALTED' || this.pe.fsm.state === 'HALTED') {
+      return 'HALTED';
+    }
+    if (this.ce.fsm.state !== 'IDLE') {
+      return this.ce.fsm.state;
+    }
+    return this.pe.fsm.state;
   }
 
   get openPosition(): OpenPosition | undefined {
-    return this.position;
+    return this.ce.position ?? this.pe.position;
+  }
+
+  get openPositions(): readonly OpenPosition[] {
+    const list: OpenPosition[] = [];
+    if (this.ce.position !== undefined) {
+      list.push(this.ce.position);
+    }
+    if (this.pe.position !== undefined) {
+      list.push(this.pe.position);
+    }
+    return list;
   }
 
   get haltedBecause(): string | undefined {
     return this.haltReason;
   }
 
-  /** No position, no pending order, and no entry still being prepared, since that one could yet be submitted. */
+  /** Flat only when both CE and PE sides have no open position, pending order or in-flight signal. */
   isFlat(): boolean {
-    return this.position === undefined && this.pending === undefined && this.fsm.state !== 'SIGNAL_DETECTED';
+    return (
+      this.ce.position === undefined &&
+      this.ce.pending === undefined &&
+      this.ce.fsm.state !== 'SIGNAL_DETECTED' &&
+      this.pe.position === undefined &&
+      this.pe.pending === undefined &&
+      this.pe.fsm.state !== 'SIGNAL_DETECTED'
+    );
   }
 
   /** Warmup history. Bars are upserted, so a bar that also arrives live is not duplicated. */
@@ -169,29 +217,59 @@ export class UnderlyingAgent {
     if (closed !== undefined) {
       this.acceptClosedBar(closed);
     }
-    this.queue.run(() => this.checkExits(false));
+    this.queue.run(async () => {
+      await this.checkExitForSlot(this.ce, false);
+      await this.checkExitForSlot(this.pe, false);
+    });
   }
 
   onOptionTick(tick: Tick): void {
-    const position = this.position;
-    if (position === undefined || instrumentKey(tick) !== instrumentKey(position.contract)) {
-      return;
+    for (const slot of this.allSlots()) {
+      const position = slot.position;
+      if (position !== undefined && instrumentKey(tick) === instrumentKey(position.contract)) {
+        slot.lastMark = tick.ltp;
+        this.deps.book.setOpenPnl(this.symbol, (tick.ltp - position.averagePrice) * position.quantity, slot.optionType);
+        this.queue.run(() => this.checkExitForSlot(slot, false));
+      }
     }
-    this.lastMark = tick.ltp;
-    this.deps.book.setOpenPnl(this.symbol, (tick.ltp - position.averagePrice) * position.quantity);
-    this.queue.run(() => this.checkExits(false));
   }
 
   onExecutionEvent(event: ExecutionEvent): void {
     if (event.underlying !== this.symbol) {
       return;
     }
-    this.queue.run(() => this.handleExecution(event));
+    let slot: SideSlot | undefined;
+    if ('correlationId' in event && event.correlationId !== undefined) {
+      slot = this.slotForCorrelationId(event.correlationId);
+    }
+    if (slot === undefined && 'positionId' in event && event.positionId !== undefined) {
+      slot = this.slotForPositionId(event.positionId);
+    }
+    if (slot === undefined) {
+      if (event.kind === 'BROKER_MISMATCH') {
+        this.halt(`broker mismatch (${event.positionId}): ${event.reason}`, 'HALT');
+        return;
+      }
+      if (event.kind === 'ENTRY_UNCONFIRMED') {
+        this.halt(`entry unconfirmed (${event.correlationId}): ${event.reason}`, 'ENTRY_UNCONFIRMED');
+        return;
+      }
+      if (event.kind === 'EXIT_UNCONFIRMED') {
+        this.halt(`exit unconfirmed (${event.positionId}): ${event.reason}`, 'EXIT_UNCONFIRMED');
+        return;
+      }
+      this.deps.logger.warn('execution event for unknown order/position', { underlying: this.symbol, event });
+      return;
+    }
+    this.queue.run(() => this.handleExecution(event, slot!));
   }
 
   requestShutdown(): void {
     this.shuttingDown = true;
-    this.queue.run(() => this.checkExits(true));
+    this.queue.run(async () => {
+      await this.checkExitForSlot(this.ce, true);
+      await this.checkExitForSlot(this.pe, true);
+    });
   }
 
   drain(): Promise<void> {
@@ -203,26 +281,34 @@ export class UnderlyingAgent {
    * otherwise wait for an option tick that may never come. The rejection backoff still applies.
    */
   retryExit(): void {
-    if (this.position === undefined || this.fsm.state !== 'RISK_MANAGEMENT_ACTIVE' || this.now() < this.exitRetryAfterMs) {
-      return;
+    for (const slot of this.allSlots()) {
+      if (slot.position !== undefined && slot.fsm.state === 'RISK_MANAGEMENT_ACTIVE' && this.now() >= slot.exitRetryAfterMs) {
+        this.queue.run(() => this.checkExitForSlot(slot, false));
+      }
     }
-    this.queue.run(() => this.checkExits(false));
   }
 
   /**
-   * Operator request to close the open position. It goes through the normal exit path, so
+   * Operator request to close the open position(s). It goes through the normal exit path, so
    * the same order checks apply. Returns why it was not accepted, if it was not.
    */
-  requestManualExit(): 'ACCEPTED' | 'NO_OPEN_POSITION' | 'NOT_MANAGEABLE' {
-    if (this.position === undefined) {
+  requestManualExit(optionType?: OptionType): 'ACCEPTED' | 'NO_OPEN_POSITION' | 'NOT_MANAGEABLE' {
+    const targets = optionType !== undefined ? [this.slotForOptionType(optionType)] : this.allSlots().filter((s) => s.position !== undefined);
+    if (targets.length === 0) {
       return 'NO_OPEN_POSITION';
     }
-    if (this.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
-      return 'NOT_MANAGEABLE';
+    let accepted = false;
+    for (const slot of targets) {
+      if (slot.position !== undefined) {
+        if (slot.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
+          return 'NOT_MANAGEABLE';
+        }
+        slot.manualExit = true;
+        this.queue.run(() => this.checkExitForSlot(slot, false));
+        accepted = true;
+      }
     }
-    this.manualExit = true;
-    this.queue.run(() => this.checkExits(false));
-    return 'ACCEPTED';
+    return accepted ? 'ACCEPTED' : 'NO_OPEN_POSITION';
   }
 
   /** Read-only snapshot for the cockpit. Computed from state; never changes it. */
@@ -237,12 +323,15 @@ export class UnderlyingAgent {
       lastParts === undefined
         ? undefined
         : sessionRange(bars, lastParts.date, NSE_SESSION_OPEN_MINUTE, NSE_SESSION_OPEN_MINUTE + strategy.orbMinutes);
-    const position = this.position;
-    const mark = position === undefined ? undefined : this.lastMark;
+    const openPositions = this.openPositions;
+    const positions = openPositions.map((p) => {
+      const slot = this.slotForOptionType(p.contract.optionType);
+      return positionView(p, slot.lastMark, nowMs, slot.manualExit);
+    });
     const cooldownUntil = this.deps.book.cooldownUntilFor(this.symbol);
     return {
       symbol: this.symbol,
-      state: this.fsm.state,
+      state: this.state,
       halted: this.haltReason,
       spot: this.lastSpot?.price,
       spotAgeMs: this.lastSpot === undefined ? this.deps.feed.ageMs(this.deps.spec.spot) : nowMs - this.lastSpot.receivedAt,
@@ -261,9 +350,34 @@ export class UnderlyingAgent {
       lastDrop: this.lastDrop,
       lastCandidate: this.lastCandidate,
       lastExit: this.lastExit,
-      position: position === undefined ? undefined : positionView(position, mark, nowMs, this.manualExit),
+      position: positions[0],
+      positions,
       cooldownUntil,
     };
+  }
+
+  private slotForDirection(direction: Direction): SideSlot {
+    return direction === 'BULLISH' ? this.ce : this.pe;
+  }
+
+  private slotForOptionType(optionType: OptionType): SideSlot {
+    return optionType === 'CE' ? this.ce : this.pe;
+  }
+
+  private slotForCorrelationId(correlationId: string): SideSlot | undefined {
+    if (this.ce.pending?.correlationId === correlationId) return this.ce;
+    if (this.pe.pending?.correlationId === correlationId) return this.pe;
+    return undefined;
+  }
+
+  private slotForPositionId(positionId: string): SideSlot | undefined {
+    if (this.ce.position?.positionId === positionId) return this.ce;
+    if (this.pe.position?.positionId === positionId) return this.pe;
+    return undefined;
+  }
+
+  private allSlots(): readonly SideSlot[] {
+    return [this.ce, this.pe];
   }
 
   private acceptClosedBar(bar: Candle): void {
@@ -273,7 +387,7 @@ export class UnderlyingAgent {
   }
 
   private async evaluateSignal(): Promise<void> {
-    if (this.fsm.state !== 'IDLE' || this.shuttingDown || this.haltReason !== undefined) {
+    if (this.shuttingDown || this.haltReason !== undefined) {
       return;
     }
     const { session } = this.deps.config;
@@ -283,14 +397,18 @@ export class UnderlyingAgent {
     }
     const signal = this.strategySession.evaluate(this.bars.all(), this.orb);
     if (signal !== undefined) {
-      await this.processSignal(signal);
+      const slot = this.slotForDirection(signal.direction);
+      if (slot.fsm.state === 'IDLE') {
+        await this.processSignal(signal, slot);
+      }
     }
   }
 
   /** Injects a test signal on the live market for fast end-to-end verification without waiting for a candle close. */
   triggerTestSignal(direction: Direction = 'BULLISH'): string {
-    if (this.fsm.state !== 'IDLE') {
-      return `${this.symbol}: cannot test trade while state is ${this.fsm.state}`;
+    const slot = this.slotForDirection(direction);
+    if (slot.fsm.state !== 'IDLE') {
+      return `${this.symbol}: cannot test trade while ${slot.optionType} state is ${slot.fsm.state}`;
     }
     const spot = this.lastSpot?.price;
     if (spot === undefined) {
@@ -303,28 +421,28 @@ export class UnderlyingAgent {
       spot,
       reasons: [`operator test trade (${direction})`],
     };
-    this.queue.run(() => this.processSignal(signal));
+    this.queue.run(() => this.processSignal(signal, slot));
     return `${this.symbol}: test ${direction} signal triggered at spot ${spot}`;
   }
 
-  private async processSignal(signal: Signal): Promise<void> {
-    this.fsm.dispatch('SIGNAL_FOUND');
+  private async processSignal(signal: Signal, slot: SideSlot): Promise<void> {
+    slot.fsm.dispatch('SIGNAL_FOUND');
     this.lastSignal = { direction: signal.direction, barTime: signal.barTime, spot: signal.spot, reasons: signal.reasons, at: this.now() };
     this.record('signal_detected', { direction: signal.direction, spot: signal.spot, reasons: signal.reasons });
     this.deps.logger.info('signal detected', { underlying: this.symbol, direction: signal.direction, spot: signal.spot });
 
-    const prepared = await this.validatePreparation(signal);
+    const prepared = await this.validatePreparation(signal, slot);
     if (!prepared.ok) {
-      this.drop(prepared.code, prepared.detail);
+      this.drop(prepared.code, prepared.detail, slot);
       return;
     }
-    await this.submitPreparedOrder(prepared.order);
+    await this.submitPreparedOrder(prepared.order, slot);
   }
 
-  private async validatePreparation(signal: Signal): Promise<Preparation> {
+  private async validatePreparation(signal: Signal, slot: SideSlot): Promise<Preparation> {
     let prepared: Preparation;
     try {
-      prepared = await this.prepareEntry(signal);
+      prepared = await this.prepareEntry(signal, slot);
     } catch (error) {
       return { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
     }
@@ -337,7 +455,7 @@ export class UnderlyingAgent {
     return prepared;
   }
 
-  private async submitPreparedOrder(order: EntryOrder): Promise<void> {
+  private async submitPreparedOrder(order: EntryOrder, slot: SideSlot): Promise<void> {
     try {
       await withDeadline(
         this.durableRecord('entry_submitted', {
@@ -353,22 +471,22 @@ export class UnderlyingAgent {
       );
     } catch (error) {
       this.deps.logger.error('entry not submitted: its intent is not durable', { underlying: this.symbol, error: describe(error) });
-      this.drop('INTENT_NOT_DURABLE', describe(error));
+      this.drop('INTENT_NOT_DURABLE', describe(error), slot);
       return;
     }
     const blockedAfterIntent = this.entryBlockReason();
     if (blockedAfterIntent !== undefined) {
       this.record('entry_rejected', { correlationId: order.correlationId, reason: `ABORTED_AFTER_INTENT: ${blockedAfterIntent}` });
-      this.drop('ENTRY_BLOCKED', blockedAfterIntent);
+      this.drop('ENTRY_BLOCKED', blockedAfterIntent, slot);
       return;
     }
-    this.dispatchEntry(order);
+    this.dispatchEntry(order, slot);
   }
 
-  private dispatchEntry(order: EntryOrder): void {
-    this.fsm.dispatch('ENTRY_SUBMITTED');
-    this.pending = order;
-    this.deps.book.recordEntry(this.symbol);
+  private dispatchEntry(order: EntryOrder, slot: SideSlot): void {
+    slot.fsm.dispatch('ENTRY_SUBMITTED');
+    slot.pending = order;
+    this.deps.book.recordEntry(this.symbol, slot.optionType);
     this.deps.feed.subscribe([instrumentRefOf(order.contract)]);
     this.deps.logger.info('entry submitted', {
       underlying: this.symbol,
@@ -397,9 +515,11 @@ export class UnderlyingAgent {
   }
 
   /** Ends a signal without an order. The state returns to IDLE, and the reason is journalled and shown. */
-  private drop(code: string, detail: string): void {
+  private drop(code: string, detail: string, slot?: SideSlot): void {
     this.lastDrop = { code, detail, at: this.now() };
-    this.fsm.dispatch('SIGNAL_DROPPED');
+    if (slot !== undefined && slot.fsm.can('SIGNAL_DROPPED')) {
+      slot.fsm.dispatch('SIGNAL_DROPPED');
+    }
     this.record('signal_dropped', { code, detail });
     this.deps.logger.info('signal dropped', { underlying: this.symbol, code, detail });
   }
@@ -410,7 +530,7 @@ export class UnderlyingAgent {
   }
 
   /** Builds and validates one entry from a signal. Every rejection carries a stable code. */
-  private async prepareEntry(signal: Signal): Promise<Preparation> {
+  private async prepareEntry(signal: Signal, slot: SideSlot): Promise<Preparation> {
     const { config, spec, market } = this.deps;
     const now = this.now();
     const today = istParts(now);
@@ -498,9 +618,11 @@ export class UnderlyingAgent {
       dailyLossLimitInr: this.dailyLossLimitInr,
       tradesToday: snapshot.tradesToday,
       maxTradesPerDay: config.capital.maxTradesPerDay,
-      openPositions: snapshot.openUnderlyings.length,
+      openPositions: snapshot.openPositions,
       maxOpenPositions: config.capital.maxOpenPositions,
-      underlyingOpen: snapshot.openUnderlyings.includes(this.symbol),
+      sideOpen: this.deps.book.isSideOpen(this.symbol, slot.optionType) || slot.position !== undefined,
+      underlyingOpenPositions: this.deps.book.underlyingOpenPositions(this.symbol),
+      maxPositionsPerUnderlying: config.capital.maxPositionsPerUnderlying,
       cooldownUntilMs: this.deps.book.cooldownUntilFor(this.symbol),
       spotTickAgeMs: this.deps.feed.ageMs(spec.spot),
       optionQuoteAgeMs: now - quote.observedAt,
@@ -575,28 +697,28 @@ export class UnderlyingAgent {
     };
   }
 
-  private async handleExecution(event: ExecutionEvent): Promise<void> {
+  private async handleExecution(event: ExecutionEvent, slot: SideSlot): Promise<void> {
     switch (event.kind) {
       case 'ENTRY_FILLED':
-        this.onEntryFilled(event.correlationId, event.quantity, event.averagePrice, event.at);
+        this.onEntryFilled(event, slot);
         return;
       case 'ENTRY_REJECTED':
-        this.onEntryRejected(event.correlationId, event.reason);
+        this.onEntryRejected(event, slot);
         return;
       case 'ENTRY_UNCONFIRMED':
         this.halt(`entry unconfirmed (${event.correlationId}): ${event.reason}`, 'ENTRY_UNCONFIRMED');
         return;
       case 'EXIT_FILLED':
-        this.onExitFilled(event.positionId, event.averagePrice, event.quantity, event.reason, event.at);
+        this.onExitFilled(event, slot);
         return;
       case 'EXIT_REJECTED':
-        this.onExitRejected(event.positionId, event.reason);
+        this.onExitRejected(event, slot);
         return;
       case 'EXIT_UNCONFIRMED':
         this.halt(`exit unconfirmed (${event.positionId}): ${event.reason}`, 'EXIT_UNCONFIRMED');
         return;
       case 'PROTECTIVE_EXIT_FILLED':
-        this.onProtectiveExit(event.positionId, event.averagePrice, event.quantity, event.reason, event.at);
+        this.onProtectiveExit(event, slot);
         return;
       case 'BROKER_MISMATCH':
         this.halt(`broker mismatch (${event.positionId}): ${event.reason}`, 'HALT');
@@ -604,8 +726,9 @@ export class UnderlyingAgent {
     }
   }
 
-  private onEntryFilled(correlationId: string, quantity: number, averagePrice: number, at: number): void {
-    const pending = this.pending;
+  private onEntryFilled(event: Extract<ExecutionEvent, { kind: 'ENTRY_FILLED' }>, slot: SideSlot): void {
+    const { correlationId, quantity, averagePrice, at } = event;
+    const pending = slot.pending;
     if (pending === undefined || pending.correlationId !== correlationId) {
       this.deps.logger.warn('entry fill for unknown order ignored', { underlying: this.symbol, correlationId });
       return;
@@ -620,18 +743,18 @@ export class UnderlyingAgent {
       targetPrice: pending.targetPrice,
       openedAt: at,
     };
-    this.position = position;
-    this.lastMark = averagePrice;
-    this.deps.book.setOpenPnl(this.symbol, 0);
+    slot.position = position;
+    slot.lastMark = averagePrice;
+    this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
 
-    if (this.fsm.state === 'ENTRY_PENDING') {
-      this.fsm.dispatch('ENTRY_FILLED');
-      this.fsm.dispatch('PROTECTION_ARMED');
-      this.pending = undefined;
+    if (slot.fsm.state === 'ENTRY_PENDING') {
+      slot.fsm.dispatch('ENTRY_FILLED');
+      slot.fsm.dispatch('PROTECTION_ARMED');
+      slot.pending = undefined;
       this.record('entry_filled', { correlationId, quantity, averagePrice, stopLossPrice: position.stopLossPrice, targetPrice: position.targetPrice });
-      this.deps.logger.info('position open', { underlying: this.symbol, quantity, averagePrice });
+      this.deps.logger.info('position open', { underlying: this.symbol, quantity, averagePrice, optionType: slot.optionType });
       if (this.shuttingDown) {
-        this.queue.run(() => this.checkExits(true));
+        this.queue.run(() => this.checkExitForSlot(slot, true));
       }
       return;
     }
@@ -644,83 +767,85 @@ export class UnderlyingAgent {
     this.record('late_entry_fill', { correlationId, quantity, averagePrice });
   }
 
-  private onEntryRejected(correlationId: string, reason: string): void {
-    if (this.fsm.state !== 'ENTRY_PENDING' || this.pending?.correlationId !== correlationId) {
+  private onEntryRejected(event: Extract<ExecutionEvent, { kind: 'ENTRY_REJECTED' }>, slot: SideSlot): void {
+    const { correlationId, reason } = event;
+    if (slot.fsm.state !== 'ENTRY_PENDING' || slot.pending?.correlationId !== correlationId) {
       this.deps.logger.warn('entry rejection for unknown order ignored', { underlying: this.symbol, correlationId });
       return;
     }
-    const pending = this.pending;
-    this.fsm.dispatch('ENTRY_REJECTED');
-    this.pending = undefined;
-    this.deps.book.releaseUnfilled(this.symbol);
+    const pending = slot.pending;
+    slot.fsm.dispatch('ENTRY_REJECTED');
+    slot.pending = undefined;
+    this.deps.book.releaseUnfilled(this.symbol, slot.optionType);
     this.deps.feed.unsubscribe([instrumentRefOf(pending.contract)]);
     this.record('entry_rejected', { correlationId, reason });
-    this.deps.logger.warn('entry rejected', { underlying: this.symbol, reason });
+    this.deps.logger.warn('entry rejected', { underlying: this.symbol, reason, optionType: slot.optionType });
   }
 
-  private onExitFilled(positionId: string, averagePrice: number, quantity: number, reason: ExitReason, at: number): void {
-    if (this.position?.positionId !== positionId) {
-      this.deps.logger.warn('exit fill for unknown position ignored', { underlying: this.symbol, positionId });
+  private onExitFilled(event: Extract<ExecutionEvent, { kind: 'EXIT_FILLED' }>, slot: SideSlot): void {
+    if (slot.position?.positionId !== event.positionId) {
+      this.deps.logger.warn('exit fill for unknown position ignored', { underlying: this.symbol, positionId: event.positionId });
       return;
     }
-    if (this.fsm.state === 'EXIT_PENDING') {
-      this.fsm.dispatch('EXIT_FILLED');
-      this.closePosition(averagePrice, quantity, reason, at);
-      this.fsm.dispatch('CLOSE_ACKNOWLEDGED');
+    if (slot.fsm.state === 'EXIT_PENDING') {
+      slot.fsm.dispatch('EXIT_FILLED');
+      this.closePosition(event, slot);
+      slot.fsm.dispatch('CLOSE_ACKNOWLEDGED');
       return;
     }
-    this.closePosition(averagePrice, quantity, reason, at);
+    this.closePosition(event, slot);
   }
 
-  private onExitRejected(positionId: string, reason: string): void {
-    if (this.fsm.state !== 'EXIT_PENDING' || this.position?.positionId !== positionId) {
+  private onExitRejected(event: Extract<ExecutionEvent, { kind: 'EXIT_REJECTED' }>, slot: SideSlot): void {
+    if (slot.fsm.state !== 'EXIT_PENDING' || slot.position?.positionId !== event.positionId) {
       return;
     }
-    this.fsm.dispatch('EXIT_REJECTED');
-    this.exitRetryAfterMs = this.now() + EXIT_RETRY_BACKOFF_MS;
-    this.record('exit_rejected', { positionId, reason });
-    this.deps.logger.warn('exit rejected; position still open, will retry', { underlying: this.symbol, reason });
+    slot.fsm.dispatch('EXIT_REJECTED');
+    slot.exitRetryAfterMs = this.now() + EXIT_RETRY_BACKOFF_MS;
+    this.record('exit_rejected', { positionId: event.positionId, reason: event.reason });
+    this.deps.logger.warn('exit rejected; position still open, will retry', { underlying: this.symbol, reason: event.reason, optionType: slot.optionType });
   }
 
-  private onProtectiveExit(positionId: string, averagePrice: number, quantity: number, reason: ExitReason, at: number): void {
-    if (this.position?.positionId !== positionId) {
-      this.deps.logger.warn('protective exit for unknown position ignored', { underlying: this.symbol, positionId });
+  private onProtectiveExit(event: Extract<ExecutionEvent, { kind: 'PROTECTIVE_EXIT_FILLED' }>, slot: SideSlot): void {
+    if (slot.position?.positionId !== event.positionId) {
+      this.deps.logger.warn('protective exit for unknown position ignored', { underlying: this.symbol, positionId: event.positionId });
       return;
     }
-    const state = this.fsm.state;
+    const state = slot.fsm.state;
     if (state === 'POSITION_OPEN' || state === 'RISK_MANAGEMENT_ACTIVE' || state === 'EXIT_PENDING') {
-      this.fsm.dispatch('PROTECTIVE_EXIT_FILLED');
-      this.closePosition(averagePrice, quantity, reason, at);
-      this.fsm.dispatch('CLOSE_ACKNOWLEDGED');
+      slot.fsm.dispatch('PROTECTIVE_EXIT_FILLED');
+      this.closePosition(event, slot);
+      slot.fsm.dispatch('CLOSE_ACKNOWLEDGED');
       return;
     }
-    this.closePosition(averagePrice, quantity, reason, at);
+    this.closePosition(event, slot);
   }
 
-  private closePosition(averagePrice: number, quantity: number, reason: ExitReason, at: number): void {
-    const position = this.position;
+  private closePosition(fill: { averagePrice: number; quantity: number; reason: ExitReason; at: number }, slot: SideSlot): void {
+    const position = slot.position;
     if (position === undefined) {
       return;
     }
     // Rounded once, here, so the book, the journal and the restored day all carry the same figure.
-    const pnlInr = Number(((averagePrice - position.averagePrice) * quantity).toFixed(2));
-    this.lastExit = { reason, pnlInr, at };
-    this.manualExit = false;
-    this.deps.book.recordClose({ underlying: this.symbol, pnlInr, closedAtMs: at });
+    const pnlInr = Number(((fill.averagePrice - position.averagePrice) * fill.quantity).toFixed(2));
+    this.lastExit = { reason: fill.reason, pnlInr, at: fill.at };
+    slot.manualExit = false;
+    this.deps.book.recordClose({ underlying: this.symbol, optionType: slot.optionType, pnlInr, closedAtMs: fill.at });
     this.deps.feed.unsubscribe([instrumentRefOf(position.contract)]);
-    this.position = undefined;
-    this.pending = undefined;
-    this.lastMark = undefined;
+    slot.position = undefined;
+    slot.pending = undefined;
+    slot.lastMark = undefined;
     // The close is durable: a standby that restores the day must see the realised P&L. The position is already
     // closed in memory, so a failure is logged and, through unconfirmed events, holds new entries until it is recorded.
     this.durableRecord('trade_closed', {
       positionId: position.positionId,
       contract: position.contract.symbol,
-      quantity,
+      quantity: fill.quantity,
       entryPrice: position.averagePrice,
-      exitPrice: averagePrice,
+      exitPrice: fill.averagePrice,
       pnlInr,
-      reason,
+      reason: fill.reason,
+      optionType: slot.optionType,
     }).catch((error: unknown) => {
       this.deps.logger.error('trade close is not durable yet; entries wait until it is recorded', {
         underlying: this.symbol,
@@ -728,32 +853,32 @@ export class UnderlyingAgent {
         error: describe(error),
       });
     });
-    this.deps.logger.info('position closed', { underlying: this.symbol, reason, pnlInr });
+    this.deps.logger.info('position closed', { underlying: this.symbol, reason: fill.reason, pnlInr, optionType: slot.optionType });
   }
 
-  private async checkExits(shutdown: boolean): Promise<void> {
-    const position = this.position;
-    if (position === undefined || this.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
+  private async checkExitForSlot(slot: SideSlot, shutdown: boolean): Promise<void> {
+    const position = slot.position;
+    if (position === undefined || slot.fsm.state !== 'RISK_MANAGEMENT_ACTIVE') {
       return;
     }
     const now = this.now();
-    const reason = this.exitReason(position, now, shutdown);
+    const reason = this.exitReason(slot, now, shutdown);
     if (reason === undefined) {
       return;
     }
-    if (!shutdown && now < this.exitRetryAfterMs) {
+    if (!shutdown && now < slot.exitRetryAfterMs) {
       return;
     }
 
     const order: ExitOrder = {
       side: 'SELL',
-      correlationId: correlationIdFor('X', now, this.exitSequence += 1),
+      correlationId: correlationIdFor('X', now, (this.exitSequence += 1)),
       underlying: this.symbol,
       positionId: position.positionId,
       contract: position.contract,
       quantity: position.quantity,
       reason,
-      referencePrice: this.lastMark ?? position.averagePrice,
+      referencePrice: slot.lastMark ?? position.averagePrice,
     };
     // An exit reduces risk, so it is never held for the ledger. The intent is written durably in the background,
     // and a failure is recorded as an audit gap. Gate-blocked exits (lost leader lock) do not reach the broker.
@@ -766,7 +891,7 @@ export class UnderlyingAgent {
       return;
     }
     this.withheldReason = undefined;
-    this.fsm.dispatch('EXIT_SUBMITTED');
+    slot.fsm.dispatch('EXIT_SUBMITTED');
     this.durableRecord('exit_submitted', { positionId: position.positionId, reason, referencePrice: order.referencePrice }).catch((error: unknown) => {
       this.record('audit_gap', { event: 'exit_submitted', positionId: position.positionId, error: describe(error) });
       this.deps.logger.error('exit intent is not durable; the exit is still sent', { underlying: this.symbol, error: describe(error) });
@@ -779,13 +904,13 @@ export class UnderlyingAgent {
     }
   }
 
-  private exitReason(position: OpenPosition, now: number, shutdown: boolean): ExitReason | undefined {
+  private exitReason(slot: SideSlot, now: number, shutdown: boolean): ExitReason | undefined {
     // Keyed on the flag as well as the argument: a rejected shutdown exit is retried through the
     // ordinary tick path, and that retry must still be a shutdown exit.
     if (shutdown || this.shuttingDown) {
       return 'SHUTDOWN';
     }
-    if (this.manualExit) {
+    if (slot.manualExit) {
       return 'MANUAL';
     }
     if (this.deps.book.snapshot().dayPnlInr <= -this.dailyLossLimitInr) {
@@ -794,7 +919,8 @@ export class UnderlyingAgent {
     if (istParts(now).minuteOfDay >= this.deps.config.exits.flattenByMinute) {
       return 'EOD_FLATTEN';
     }
-    if (now - position.openedAt >= this.deps.config.exits.maxHoldMinutes * 60_000) {
+    const position = slot.position;
+    if (position !== undefined && now - position.openedAt >= this.deps.config.exits.maxHoldMinutes * 60_000) {
       return 'TIME_STOP';
     }
     return undefined;
@@ -802,15 +928,17 @@ export class UnderlyingAgent {
 
   /** Enters HALTED (or applies the given event) and tells the orchestrator, which may disengage the book. */
   private halt(reason: string, event: TradeEvent = 'HALT'): void {
-    if (this.fsm.can(event)) {
-      this.fsm.dispatch(event);
-    } else if (this.fsm.state !== 'HALTED' && this.fsm.can('HALT')) {
-      this.fsm.dispatch('HALT');
+    for (const slot of this.allSlots()) {
+      if (slot.fsm.can(event)) {
+        slot.fsm.dispatch(event);
+      } else if (slot.fsm.state !== 'HALTED' && slot.fsm.can('HALT')) {
+        slot.fsm.dispatch('HALT');
+      }
     }
     this.haltReason = reason;
     this.deps.logger.error('underlying halted', { underlying: this.symbol, reason });
     // A halt cannot be re-derived on restart, so it is durable. The halt itself does not wait for the write.
-    this.durableRecord('halted', { reason, state: this.fsm.state }).catch((error: unknown) => {
+    this.durableRecord('halted', { reason, state: this.state }).catch((error: unknown) => {
       this.deps.logger.error('halt is not durable yet; entries wait until it is recorded', { underlying: this.symbol, error: describe(error) });
     });
     this.deps.onHalt(this.symbol, reason);

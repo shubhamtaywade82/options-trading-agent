@@ -2,6 +2,7 @@ import type { AgentView, CockpitSnapshot } from '../../src/runtime/views.js';
 import { istEpoch, SESSION_DAY } from './fixtures.js';
 
 export function agentView(overrides: Partial<AgentView> & Pick<AgentView, 'symbol'>): AgentView {
+  const position = overrides.position;
   return {
     state: 'IDLE',
     halted: undefined,
@@ -22,7 +23,8 @@ export function agentView(overrides: Partial<AgentView> & Pick<AgentView, 'symbo
     lastDrop: undefined,
     lastCandidate: undefined,
     lastExit: undefined,
-    position: undefined,
+    position,
+    positions: overrides.positions ?? (position !== undefined ? [position] : []),
     cooldownUntil: undefined,
     ...overrides,
   };
@@ -51,6 +53,7 @@ export function snapshot(overrides: Partial<CockpitSnapshot> = {}): CockpitSnaps
       dayPnlInr: 0,
       tradesToday: 0,
       openUnderlyings: [],
+      openPositions: 0,
       killSwitchReason: undefined,
     },
     underlyings: [agentView({ symbol: 'NIFTY' }), agentView({ symbol: 'BANKNIFTY', spot: 48_120.5, state: 'HALTED', halted: 'entry unconfirmed (ENT-1): timeout' })],

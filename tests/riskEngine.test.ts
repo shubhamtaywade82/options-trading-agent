@@ -100,6 +100,29 @@ describe('evaluatePreTrade', () => {
     assert.ok(codes(approvedInput({ nowMs: now, cooldownUntilMs: now + 1 })).includes('COOLDOWN_ACTIVE'));
     assert.ok(!codes(approvedInput({ nowMs: now, cooldownUntilMs: now })).includes('COOLDOWN_ACTIVE'));
   });
+
+  it('rejects when underlying side is already open', () => {
+    assert.ok(codes(approvedInput({ sideOpen: true })).includes('UNDERLYING_SIDE_ALREADY_OPEN'));
+    assert.ok(!codes(approvedInput({ sideOpen: false })).includes('UNDERLYING_SIDE_ALREADY_OPEN'));
+  });
+
+  it('rejects when underlying positions reach maxPositionsPerUnderlying', () => {
+    assert.ok(codes(approvedInput({ underlyingOpenPositions: 2, maxPositionsPerUnderlying: 2 })).includes('UNDERLYING_POSITION_LIMIT'));
+    assert.ok(!codes(approvedInput({ underlyingOpenPositions: 1, maxPositionsPerUnderlying: 2 })).includes('UNDERLYING_POSITION_LIMIT'));
+  });
+
+  it('allows entry when another side is open on the same underlying if under limit', () => {
+    const verdict = evaluatePreTrade(
+      approvedInput({
+        sideOpen: false,
+        underlyingOpenPositions: 1,
+        maxPositionsPerUnderlying: 2,
+        openPositions: 1,
+        maxOpenPositions: 6,
+      }),
+    );
+    assert.equal(verdict.approved, true);
+  });
 });
 
 describe('DayBook', () => {
@@ -146,5 +169,32 @@ describe('DayBook', () => {
     assert.equal(book.snapshot().killSwitchReason, 'first');
     book.clearKillSwitch();
     assert.equal(book.snapshot().killSwitchReason, undefined);
+  });
+
+  it('tracks open positions per underlying and per side independently', () => {
+    const book = new DayBook(istEpoch('2026-10-12', '09:20'), 0);
+    book.recordEntry('NIFTY', 'CE');
+    assert.equal(book.isSideOpen('NIFTY', 'CE'), true);
+    assert.equal(book.isSideOpen('NIFTY', 'PE'), false);
+    assert.equal(book.underlyingOpenPositions('NIFTY'), 1);
+    assert.equal(book.snapshot().openPositions, 1);
+
+    book.recordEntry('NIFTY', 'PE');
+    assert.equal(book.isSideOpen('NIFTY', 'CE'), true);
+    assert.equal(book.isSideOpen('NIFTY', 'PE'), true);
+    assert.equal(book.underlyingOpenPositions('NIFTY'), 2);
+    assert.equal(book.snapshot().openPositions, 2);
+
+    book.setOpenPnl('NIFTY', 500, 'CE');
+    book.setOpenPnl('NIFTY', -200, 'PE');
+    assert.equal(book.snapshot().unrealizedPnlInr, 300);
+
+    book.recordClose({ underlying: 'NIFTY', optionType: 'CE', pnlInr: 500, closedAtMs: istEpoch('2026-10-12', '09:30') });
+    assert.equal(book.isSideOpen('NIFTY', 'CE'), false);
+    assert.equal(book.isSideOpen('NIFTY', 'PE'), true);
+    assert.equal(book.underlyingOpenPositions('NIFTY'), 1);
+    assert.equal(book.snapshot().openPositions, 1);
+    assert.equal(book.snapshot().unrealizedPnlInr, -200);
+    assert.equal(book.snapshot().realizedPnlInr, 500);
   });
 });
