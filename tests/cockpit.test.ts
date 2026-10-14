@@ -167,6 +167,40 @@ describe('cockpit content', () => {
     assert.match(clamped, /SELECTED BANKNIFTY/);
   });
 
+  it('shows open positions across all underlyings even when another underlying is selected', () => {
+    // BANKNIFTY is selected (selected: 1), but NIFTY has an open position
+    const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 1, notice: undefined, logs }).map(plain).join('\n');
+    assert.match(text, /POSITIONS \(1\)/);
+    assert.match(text, /NIFTY 22450 CE/);
+    assert.match(text, /qty 75 avg 101\.00/);
+  });
+
+  it('scrolls positions when positionScroll is set', () => {
+    const multi = snapshot({
+      underlyings: [
+        agentView({
+          symbol: 'NIFTY',
+          state: 'RISK_MANAGEMENT_ACTIVE',
+          positions: [
+            { ...position, contractSymbol: 'NIFTY 22450 CE' },
+            { ...position, contractSymbol: 'NIFTY 22500 CE' },
+          ],
+        }),
+        agentView({
+          symbol: 'BANKNIFTY',
+          state: 'RISK_MANAGEMENT_ACTIVE',
+          positions: [
+            { ...position, contractSymbol: 'BANKNIFTY 48000 PE', optionType: 'PE' },
+            { ...position, contractSymbol: 'BANKNIFTY 48100 PE', optionType: 'PE' },
+          ],
+        }),
+      ],
+    });
+    const scrolled = renderOptionsCockpit(multi, { width: 170, height: 48, selected: 0, notice: undefined, logs, positionScroll: 2 }).map(plain).join('\n');
+    assert.match(scrolled, /POSITIONS \(4\)/);
+    assert.match(scrolled, /▲ 2 more above/);
+  });
+
   it('marks a halted underlying and explains that it stays blocked until restart', () => {
     const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 1, notice: undefined, logs }).map(plain).join('\n');
     assert.match(text, /BANKNIFTY\s+HALTED/);

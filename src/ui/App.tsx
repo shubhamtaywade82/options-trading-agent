@@ -47,6 +47,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
   const [size, setSize] = useState({ cols: stdout.columns || DEFAULT_COLS, rows: stdout.rows || DEFAULT_ROWS });
   const [, setRefresh] = useState(0);
   const [selected, setSelected] = useState(0);
+  const [positionScroll, setPositionScroll] = useState(0);
   const [pending, setPending] = useState<Pending | undefined>(undefined);
   const [notice, setNotice] = useState<string | undefined>(undefined);
 
@@ -169,11 +170,35 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === 'c') {
-      if (selectedSymbol === undefined) {
-        setNotice('no underlying selected');
+      const openUnderlyings = snapshot.underlyings.filter(
+        (u) => (u.positions && u.positions.length > 0) || u.position !== undefined,
+      );
+      let target = selectedSymbol;
+      const selectedHasPosition = openUnderlyings.some((u) => u.symbol === selectedSymbol);
+      if (!selectedHasPosition && openUnderlyings.length === 1 && openUnderlyings[0] !== undefined) {
+        target = openUnderlyings[0].symbol;
+      }
+      if (target === undefined) {
+        setNotice('no underlying selected or open');
         return;
       }
-      request('close', selectedSymbol);
+      request('close', target);
+      return;
+    }
+    if (input === '[') {
+      setPositionScroll((s) => Math.max(0, s - 2));
+      return;
+    }
+    if (input === ']') {
+      setPositionScroll((s) => s + 2);
+      return;
+    }
+    if (key.pageUp) {
+      setPositionScroll((s) => Math.max(0, s - 5));
+      return;
+    }
+    if (key.pageDown) {
+      setPositionScroll((s) => s + 5);
       return;
     }
     if (input === 'k') {
@@ -185,7 +210,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === '?') {
-      setNotice('↑↓ select · ←→ chain · p posture · 1/2 strat · t test trade · c close · k block · s stop (×2)');
+      setNotice('↑↓ select · ←→ chain · [] pos scroll · p posture · 1/2 strat · t test trade · c close · k block · s stop (×2)');
     }
   });
 
@@ -206,6 +231,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
     selected: index,
     notice: armed === undefined ? notice : confirmPrompt(armed),
     logs: records?.newest(200) ?? [],
+    positionScroll,
   });
 
   return (

@@ -55,6 +55,7 @@ export interface CockpitOptions {
   /** Last operator action result or a pending confirmation. */
   readonly notice: string | undefined;
   readonly logs: readonly LogRecord[];
+  readonly positionScroll?: number | undefined;
 }
 
 const dim = muted;
@@ -292,11 +293,29 @@ function signalColumn(agent: AgentView | undefined, width: number): string[] {
   return lines;
 }
 
-function positionLines(position: PositionView, maxHoldMinutes: number, width: number): string[] {
+interface ScopedPosition {
+  readonly position: PositionView;
+  readonly isSelected: boolean;
+}
+
+function allOpenPositions(snapshot: CockpitSnapshot, selectedIndex: number): ScopedPosition[] {
+  const selectedSymbol = snapshot.underlyings[selectedIndex]?.symbol;
+  const list: ScopedPosition[] = [];
+  for (const agent of snapshot.underlyings) {
+    const poses = agent.positions && agent.positions.length > 0 ? agent.positions : (agent.position ? [agent.position] : []);
+    for (const pos of poses) {
+      list.push({ position: pos, isSelected: agent.symbol === selectedSymbol });
+    }
+  }
+  return list;
+}
+
+function positionLines(position: PositionView, maxHoldMinutes: number, width: number, isSelected = false): string[] {
   const pnl = position.unrealizedInr === undefined ? dim('—') : formatSignedInr(position.unrealizedInr);
   const symbol = position.optionType === 'CE' ? callSide(position.contractSymbol) : putSide(position.contractSymbol);
+  const markPrefix = isSelected ? chalk.cyan('▸ ') : '  ';
   return [
-    fit(`  ${ok('OPEN')} ${symbol}`, width),
+    fit(`${markPrefix}${ok('OPEN')} ${symbol}`, width),
     fit(`    qty ${emphasis(String(position.quantity))} avg ${price(position.averagePrice)}`, width),
     fit(`    mark ${emphasis(price(position.mark))} P&L ${pnl}`, width),
     fit(`    SL ${bad(price(position.stopLossPrice))} TP ${ok(price(position.targetPrice))}`, width),
@@ -304,27 +323,48 @@ function positionLines(position: PositionView, maxHoldMinutes: number, width: nu
   ];
 }
 
-function positionColumn(agent: AgentView | undefined, maxHoldMinutes: number, width: number): string[] {
-  if (agent === undefined) {
-    return [fit(dim('no underlying selected'), width)];
-  }
-  const positions = agent.positions && agent.positions.length > 0 ? agent.positions : (agent.position ? [agent.position] : []);
-  if (positions.length > 0) {
-    const lines: string[] = [];
-    for (const pos of positions) {
-      lines.push(...positionLines(pos, maxHoldMinutes, width));
+interface PositionColumnInput {
+  readonly snapshot: CockpitSnapshot;
+  readonly selectedIndex: number;
+  readonly width: number;
+  readonly maxHoldMinutes: number;
+  readonly maxRows: number;
+  readonly scroll?: number | undefined;
+}
+
+function positionColumn(input: PositionColumnInput): string[] {
+  const { snapshot, selectedIndex, width, maxHoldMinutes, maxRows, scroll = 0 } = input;
+  const positions = allOpenPositions(snapshot, selectedIndex);
+  if (positions.length === 0) {
+    const agent = snapshot.underlyings[selectedIndex];
+    const lines: string[] = [fit(dim('  flat (all)'), width), fit(label('LAST EXIT'), width)];
+    const exitAgent = agent?.lastExit !== undefined ? agent : snapshot.underlyings.find((u) => u.lastExit !== undefined);
+    if (exitAgent?.lastExit === undefined) {
+      lines.push(fit(dim('  none this session'), width));
+    } else {
+      lines.push(fit(`  ${exitAgent.symbol} ${exitAgent.lastExit.reason} ${formatSignedInr(exitAgent.lastExit.pnlInr)}`, width));
+      lines.push(fit(dim(`  at ${formatIstClock(exitAgent.lastExit.at)}`), width));
     }
     return lines;
   }
-  const lines: string[] = [fit(dim('  flat'), width)];
-  lines.push(fit(label('LAST EXIT'), width));
-  if (agent.lastExit === undefined) {
-    lines.push(fit(dim('  none this session'), width));
-  } else {
-    lines.push(fit(`  ${agent.lastExit.reason} ${formatSignedInr(agent.lastExit.pnlInr)}`, width));
-    lines.push(fit(dim(`  at ${formatIstClock(agent.lastExit.at)}`), width));
+  const allLines: string[] = [];
+  let first = true;
+  for (const pos of positions) {
+    if (!first) allLines.push(fit('', width));
+    first = false;
+    allLines.push(...positionLines(pos.position, maxHoldMinutes, width, pos.isSelected));
   }
-  return lines;
+  if (allLines.length <= maxRows) return allLines;
+  const maxScroll = Math.max(0, allLines.length - maxRows);
+  const clamped = Math.max(0, Math.min(scroll, maxScroll));
+  const visible = allLines.slice(clamped, clamped + maxRows);
+  if (clamped > 0 && visible.length > 0) {
+    visible[0] = fit(dim(`▲ ${clamped} more above ([/])`), width);
+  }
+  if (clamped < maxScroll && visible.length > 0) {
+    visible[visible.length - 1] = fit(dim(`▼ ${maxScroll - clamped} more below ([/])`), width);
+  }
+  return visible;
 }
 
 function riskBar(lossUsedPct: number, cells: number): string {
@@ -367,10 +407,21 @@ function table(snapshot: CockpitSnapshot, options: CockpitOptions, layout: Cockp
   const [c1, c2, c3, c4] = layout.cols;
   const selected = Math.max(0, Math.min(options.selected, snapshot.underlyings.length - 1));
   const agent = snapshot.underlyings[selected];
+  const openCount = snapshot.underlyings.reduce(
+    (count, u) => count + (u.positions && u.positions.length > 0 ? u.positions.length : (u.position ? 1 : 0)),
+    0,
+  );
   const columns: [string[], string[], string[], string[]] = [
     underlyingColumn(snapshot, selected, c1, layout.tableRows),
     signalColumn(agent, c2),
-    positionColumn(agent, snapshot.maxHoldMinutes, c3),
+    positionColumn({
+      snapshot,
+      selectedIndex: selected,
+      width: c3,
+      maxHoldMinutes: snapshot.maxHoldMinutes,
+      maxRows: layout.tableRows,
+      scroll: options.positionScroll,
+    }),
     riskColumn(snapshot, c4),
   ];
   const rows = layout.tableRows;
@@ -385,7 +436,7 @@ function table(snapshot: CockpitSnapshot, options: CockpitOptions, layout: Cockp
   const titles = [
     infoBold(`UNDERLYINGS (${snapshot.underlyings.length})`),
     chalk.magenta.bold('SIGNAL & CONTRACT'),
-    chalk.white.bold('POSITION'),
+    chalk.white.bold(openCount > 0 ? `POSITIONS (${openCount})` : 'POSITION'),
     warn('RISK & DAY'),
   ];
   const cyan = (text: string) => chalk.cyan(text);
@@ -437,7 +488,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   ←→ chain   p posture   1/2 strat   t test trade   c/k/s confirm   Ctrl+C×2 quit');
+  const keys = dim(' ↑↓ select   ←→ chain   [] pos   p posture   1/2 strat   t test trade   c/k/s confirm   Ctrl+C×2 quit');
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }
