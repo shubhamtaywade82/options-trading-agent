@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { bracketLevels, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../src/options/pricing.js';
+import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../src/options/pricing.js';
 import { sizePosition } from '../src/options/sizing.js';
 
 describe('tick rounding', () => {
@@ -16,7 +16,12 @@ describe('tick rounding', () => {
 describe('bracketLevels', () => {
   it('builds a stop at the configured percentage and a target at the configured R-multiple', () => {
     const levels = bracketLevels({ entryReference: 100, stopLossPct: 30, targetRr: 2, tickSize: 0.05 });
-    assert.deepEqual(levels, { entryReference: 100, stopLossPrice: 70, targetPrice: 160, riskPerUnit: 30 });
+    assert.deepEqual(levels, { entryReference: 100, stopLossPrice: 70, targetPrice: 160, riskPerUnit: 30, trailingJump: undefined });
+  });
+
+  it('calculates trailing jump step when trailingJumpPct is configured', () => {
+    const levels = bracketLevels({ entryReference: 100, stopLossPct: 30, targetRr: 2, tickSize: 0.05, trailingJumpPct: 15 });
+    assert.deepEqual(levels, { entryReference: 100, stopLossPrice: 70, targetPrice: 160, riskPerUnit: 30, trailingJump: 15 });
   });
 
   it('returns undefined when the stop cannot be expressed on the tick grid', () => {
@@ -25,6 +30,41 @@ describe('bracketLevels', () => {
 
   it('returns undefined for non-positive premiums', () => {
     assert.equal(bracketLevels({ entryReference: 0, stopLossPct: 30, targetRr: 2, tickSize: 0.05 }), undefined);
+  });
+});
+
+describe('calculateTrailingStop', () => {
+  const base = {
+    entryPrice: 100,
+    initialStopPrice: 70,
+    currentStopPrice: 70,
+    highWaterMark: 100,
+    trailingJump: 15,
+    breakevenAtRr: 1,
+    tickSize: 0.05,
+  };
+
+  it('keeps the stop at initial stop before reaching 1R', () => {
+    const stop = calculateTrailingStop({ ...base, highWaterMark: 125 });
+    assert.equal(stop, 70, 'under 1R (130), stop remains at initial 70');
+  });
+
+  it('moves stop to breakeven when high water mark touches 1R', () => {
+    const stop = calculateTrailingStop({ ...base, highWaterMark: 130 });
+    assert.equal(stop, 100, 'at 1R (+30), stop moves to entry price 100');
+  });
+
+  it('steps stop up by trailingJump for gains beyond 1R', () => {
+    const stop1 = calculateTrailingStop({ ...base, highWaterMark: 145 });
+    assert.equal(stop1, 115, 'at 1R + 1 jump (+45), stop moves to 115');
+
+    const stop2 = calculateTrailingStop({ ...base, highWaterMark: 160 });
+    assert.equal(stop2, 130, 'at 1R + 2 jumps (+60), stop moves to 130');
+  });
+
+  it('never decreases stop even if currentStopPrice is already higher', () => {
+    const stop = calculateTrailingStop({ ...base, currentStopPrice: 130, highWaterMark: 120 });
+    assert.equal(stop, 130, 'stop never moves down');
   });
 });
 

@@ -200,6 +200,7 @@ export class LiveExecutionPort implements ExecutionPort {
         securityId: order.contract.securityId,
         targetPrice: order.targetPrice,
         stopLossPrice: order.stopLossPrice,
+        ...(order.trailingJump !== undefined && order.trailingJump > 0 ? { trailingJump: order.trailingJump } : {}),
       });
       orderId = placed.data.orderId;
     } catch (error) {

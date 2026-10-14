@@ -4,6 +4,7 @@ export interface BracketLevels {
   readonly targetPrice: number;
   /** Premium points lost per unit if the stop is hit. */
   readonly riskPerUnit: number;
+  readonly trailingJump?: number | undefined;
 }
 
 function decimalPlaces(value: number): number {
@@ -44,8 +45,9 @@ export function bracketLevels(input: {
   stopLossPct: number;
   targetRr: number;
   tickSize: number;
+  trailingJumpPct?: number;
 }): BracketLevels | undefined {
-  const { entryReference, stopLossPct, targetRr, tickSize } = input;
+  const { entryReference, stopLossPct, targetRr, tickSize, trailingJumpPct } = input;
   if (!Number.isFinite(entryReference) || entryReference <= 0) {
     return undefined;
   }
@@ -58,7 +60,48 @@ export function bracketLevels(input: {
   if (targetPrice < entryReference + tickSize) {
     return undefined;
   }
-  return { entryReference, stopLossPrice, targetPrice, riskPerUnit };
+  const trailingJump =
+    trailingJumpPct !== undefined && trailingJumpPct > 0
+      ? roundDownToTick(Math.max(tickSize, entryReference * (trailingJumpPct / 100)), tickSize)
+      : undefined;
+  return { entryReference, stopLossPrice, targetPrice, riskPerUnit, trailingJump };
+}
+
+export interface TrailingStopInput {
+  readonly entryPrice: number;
+  readonly initialStopPrice: number;
+  readonly currentStopPrice: number;
+  readonly highWaterMark: number;
+  readonly trailingJump: number;
+  readonly breakevenAtRr?: number | undefined;
+  readonly tickSize: number;
+}
+
+/**
+ * Trails the stop upward monotonically. Breakeven moves stop to entry when high water mark hits
+ * 1R, and each jump size further in profit steps the stop up by trailingJump points.
+ */
+export function calculateTrailingStop(input: TrailingStopInput): number {
+  const { entryPrice, initialStopPrice, currentStopPrice, highWaterMark, trailingJump, tickSize } = input;
+  const breakevenAtRr = input.breakevenAtRr ?? 1;
+  const initialRisk = entryPrice - initialStopPrice;
+  if (initialRisk <= 0 || trailingJump <= 0 || highWaterMark < entryPrice) {
+    return currentStopPrice;
+  }
+  const breakevenThreshold = entryPrice + breakevenAtRr * initialRisk;
+  let targetStop = currentStopPrice;
+  if (breakevenAtRr > 0) {
+    if (highWaterMark >= breakevenThreshold) {
+      const steps = Math.floor((highWaterMark - breakevenThreshold) / trailingJump);
+      targetStop = Math.max(targetStop, entryPrice + steps * trailingJump);
+    }
+  } else {
+    const steps = Math.floor((highWaterMark - entryPrice) / trailingJump);
+    if (steps > 0) {
+      targetStop = Math.max(targetStop, initialStopPrice + steps * trailingJump);
+    }
+  }
+  return Math.max(currentStopPrice, roundDownToTick(targetStop, tickSize));
 }
 
 /**

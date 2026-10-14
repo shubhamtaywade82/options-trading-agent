@@ -87,6 +87,9 @@ export interface AgentConfig {
     readonly maxHoldMinutes: number;
     readonly flattenByMinute: number;
     readonly cooldownSeconds: number;
+    readonly trailingJumpPct: number;
+    readonly breakevenAtRr: number;
+    readonly runnerMode: boolean;
   };
   readonly session: {
     readonly entryStartMinute: number;
@@ -311,6 +314,9 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       maxHoldMinutes: number(env, 'MAX_HOLD_MINUTES', 20, { min: 1, max: 390, integer: true }),
       flattenByMinute: minuteOfDay(env, 'FLATTEN_BY', '15:05'),
       cooldownSeconds: number(env, 'COOLDOWN_SECONDS', 300, { min: 0, max: 86_400, integer: true }),
+      trailingJumpPct: number(env, 'TRAILING_JUMP_PCT', 0, { min: 0, max: 100 }),
+      breakevenAtRr: number(env, 'BREAKEVEN_AT_RR', 1, { min: 0, max: 10 }),
+      runnerMode: flag(env, 'RUNNER_MODE', false),
     },
     session: {
       entryStartMinute: minuteOfDay(env, 'ENTRY_START', '09:30'),

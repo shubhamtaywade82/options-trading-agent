@@ -1,5 +1,5 @@
 import type { ExitReason, Tick } from '../domain/types.js';
-import { roundDownToTick, roundUpToTick } from '../options/pricing.js';
+import { calculateTrailingStop, roundDownToTick, roundUpToTick } from '../options/pricing.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
 
 interface PaperPosition {
@@ -10,8 +10,13 @@ interface PaperPosition {
   readonly tickSize: number;
   readonly quantity: number;
   readonly averagePrice: number;
-  readonly stopLossPrice: number;
+  readonly initialStopPrice: number;
+  stopLossPrice: number;
+  highWaterMark: number;
   readonly targetPrice: number;
+  readonly trailingJump?: number | undefined;
+  readonly breakevenAtRr?: number | undefined;
+  readonly runner?: boolean | undefined;
 }
 
 export interface PaperExecutionOptions {
@@ -57,8 +62,13 @@ export class PaperExecutionPort implements ExecutionPort {
       tickSize: order.contract.tickSize,
       quantity: order.quantity,
       averagePrice: price,
+      initialStopPrice: order.stopLossPrice,
       stopLossPrice: order.stopLossPrice,
+      highWaterMark: price,
       targetPrice: order.targetPrice,
+      trailingJump: order.trailingJump,
+      breakevenAtRr: order.breakevenAtRr,
+      runner: order.runner,
     });
     this.emitAsync({
       kind: 'ENTRY_FILLED',
@@ -105,12 +115,24 @@ export class PaperExecutionPort implements ExecutionPort {
       if (position.securityId !== tick.securityId || position.exchangeSegment !== tick.exchangeSegment) {
         continue;
       }
+      if (position.trailingJump !== undefined && position.trailingJump > 0) {
+        position.highWaterMark = Math.max(position.highWaterMark, tick.ltp);
+        position.stopLossPrice = calculateTrailingStop({
+          entryPrice: position.averagePrice,
+          initialStopPrice: position.initialStopPrice,
+          currentStopPrice: position.stopLossPrice,
+          highWaterMark: position.highWaterMark,
+          trailingJump: position.trailingJump,
+          breakevenAtRr: position.breakevenAtRr,
+          tickSize: position.tickSize,
+        });
+      }
       let reason: ExitReason | undefined;
       let fill = 0;
       if (tick.ltp <= position.stopLossPrice) {
         reason = 'STOP_LOSS';
         fill = Math.min(tick.ltp, position.stopLossPrice);
-      } else if (tick.ltp >= position.targetPrice) {
+      } else if (!position.runner && tick.ltp >= position.targetPrice) {
         reason = 'TARGET';
         fill = position.targetPrice;
       }

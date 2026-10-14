@@ -1,5 +1,5 @@
 import type { ExitReason, Tick } from '../domain/types.js';
-import { roundDownToTick, roundUpToTick } from '../options/pricing.js';
+import { calculateTrailingStop, roundDownToTick, roundUpToTick } from '../options/pricing.js';
 import type { Logger } from '../ops/logger.js';
 import { toPaise, type OpenEntryResult, type PaperOrderRecord, type PaperPositionRecord, type PaperStore } from './paperStore.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
@@ -13,9 +13,15 @@ export interface PostgresPaperOptions {
   readonly now?: () => number;
 }
 
-interface OpenPosition extends PaperPositionRecord {
+interface OpenPosition extends Omit<PaperPositionRecord, 'stopLossPrice'> {
+  stopLossPrice: number;
   /** Set while an exit is being recorded, so a stop, a target and an agent exit cannot close the same position twice. */
   exiting: boolean;
+  initialStopPrice?: number | undefined;
+  highWaterMark?: number | undefined;
+  trailingJump?: number | undefined;
+  breakevenAtRr?: number | undefined;
+  runner?: boolean | undefined;
 }
 
 /**
@@ -127,7 +133,15 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
       this.emit({ kind: 'ENTRY_REJECTED', correlationId: order.correlationId, underlying: order.underlying, reason: 'duplicate correlation id' });
       return;
     }
-    this.positions.set(position.positionId, { ...position, exiting: false });
+    this.positions.set(position.positionId, {
+      ...position,
+      initialStopPrice: order.stopLossPrice,
+      highWaterMark: price,
+      trailingJump: order.trailingJump,
+      breakevenAtRr: order.breakevenAtRr,
+      runner: order.runner,
+      exiting: false,
+    });
     this.emit({
       kind: 'ENTRY_FILLED',
       correlationId: order.correlationId,
@@ -214,12 +228,24 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
       if (position.exiting || position.securityId !== tick.securityId || position.exchangeSegment !== tick.exchangeSegment) {
         continue;
       }
+      if (position.trailingJump !== undefined && position.trailingJump > 0) {
+        position.highWaterMark = Math.max(position.highWaterMark ?? position.averagePrice, tick.ltp);
+        position.stopLossPrice = calculateTrailingStop({
+          entryPrice: position.averagePrice,
+          initialStopPrice: position.initialStopPrice ?? position.stopLossPrice,
+          currentStopPrice: position.stopLossPrice,
+          highWaterMark: position.highWaterMark,
+          trailingJump: position.trailingJump,
+          breakevenAtRr: position.breakevenAtRr,
+          tickSize: Number(position.tickSize),
+        });
+      }
       let reason: ExitReason | undefined;
       let fill = 0;
       if (tick.ltp <= position.stopLossPrice) {
         reason = 'STOP_LOSS';
         fill = Math.min(tick.ltp, position.stopLossPrice);
-      } else if (tick.ltp >= position.targetPrice) {
+      } else if (!position.runner && tick.ltp >= position.targetPrice) {
         reason = 'TARGET';
         fill = position.targetPrice;
       }

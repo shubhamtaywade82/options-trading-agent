@@ -12,6 +12,10 @@ export interface EntryOrder {
   readonly entryReference: number;
   readonly stopLossPrice: number;
   readonly targetPrice: number;
+  readonly initialStopPrice?: number | undefined;
+  readonly trailingJump?: number | undefined;
+  readonly breakevenAtRr?: number | undefined;
+  readonly runner?: boolean | undefined;
 }
 
 /** Exit closes a long position the agent already holds. It never opens a short. */

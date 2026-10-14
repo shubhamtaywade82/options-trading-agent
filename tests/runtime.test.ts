@@ -287,6 +287,52 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     assert.ok(types(harness).includes('entry_filled'));
   });
 
+  it('trails stop loss to breakeven at 1R and steps up with gains in runner mode', async () => {
+    const harness = build({
+      TRAILING_JUMP_PCT: '15',
+      BREAKEVEN_AT_RR: '1',
+      RUNNER_MODE: 'true',
+    });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+
+    const agent = harness.orchestrator.agent('NIFTY');
+    assert.equal(agent?.state, 'RISK_MANAGEMENT_ACTIVE');
+    assert.equal(agent?.openPosition?.averagePrice, 101);
+    assert.equal(agent?.openPosition?.stopLossPrice, 70.7);
+
+    // Tick below 1R (101 + 30.3 = 131.3): stop remains at initial 70.7
+    optionTick(harness, '48001', 125);
+    await settle(harness.orchestrator);
+    assert.equal(agent?.openPosition?.stopLossPrice, 70.7);
+
+    // Tick reaches 1R: stop jumps to breakeven 101
+    optionTick(harness, '48001', 132);
+    await settle(harness.orchestrator);
+    assert.equal(agent?.openPosition?.stopLossPrice, 101);
+
+    // Tick reaches 1R + 1 jump (131.3 + 15.15 = 146.45): stop jumps to 101 + 15.15 = 116.15
+    optionTick(harness, '48001', 150);
+    await settle(harness.orchestrator);
+    assert.equal(agent?.openPosition?.stopLossPrice, 116.15);
+
+    // In runner mode, a tick at the original 2R target (161.7) does not exit
+    optionTick(harness, '48001', 161.7);
+    await settle(harness.orchestrator);
+    assert.equal(agent?.state, 'RISK_MANAGEMENT_ACTIVE');
+
+    // Price pulls back to 116.15: hits trailed stop, fills at 116.15 with profit
+    harness.setClock('10:05:00');
+    optionTick(harness, '48001', 116.15);
+    await settle(harness.orchestrator);
+
+    assert.equal(agent?.state, 'IDLE');
+    const closed = harness.events.find((event) => event.type === 'trade_closed');
+    assert.equal(closed?.payload['reason'], 'STOP_LOSS');
+    assert.equal(closed?.payload['exitPrice'], 116.15);
+    assert.ok(Number(closed?.payload['pnlInr']) > 0, 'trailed stop locked in net profit');
+  });
+
   it('should not deduct charges again when the venue nets them into its fill prices', async () => {
     const paper = Object.assign(new PaperExecutionPort({ slippageBps: 0 }), { chargesInFills: true });
     const harness = build({}, { execution: paper });

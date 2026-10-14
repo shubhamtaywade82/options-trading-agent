@@ -1,5 +1,6 @@
 import type { ExitReason, Tick } from '../domain/types.js';
 import type { Logger } from '../ops/logger.js';
+import { calculateTrailingStop } from '../options/pricing.js';
 import { correlationIdFor, fitsBrokerLimit } from './brokerIds.js';
 import type { GatewayOrder, GatewayOutcome, OrderGateway } from './orderGateway.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
@@ -10,8 +11,13 @@ interface OpenPosition {
   readonly contract: EntryOrder['contract'];
   readonly quantity: number;
   readonly averagePrice: number;
-  readonly stopLossPrice: number;
+  readonly initialStopPrice: number;
+  stopLossPrice: number;
+  highWaterMark: number;
   readonly targetPrice: number;
+  readonly trailingJump?: number | undefined;
+  readonly breakevenAtRr?: number | undefined;
+  readonly runner?: boolean | undefined;
   /** Set while a sell is in flight. Stop, target and agent exit cannot all sell the same position. */
   exiting: boolean;
 }
@@ -88,8 +94,13 @@ export class GatewayExecutionPort implements ExecutionPort {
       contract: order.contract,
       quantity: outcome.filledQuantity,
       averagePrice: outcome.averagePrice,
+      initialStopPrice: order.stopLossPrice,
       stopLossPrice: order.stopLossPrice,
+      highWaterMark: outcome.averagePrice,
       targetPrice: order.targetPrice,
+      trailingJump: order.trailingJump,
+      breakevenAtRr: order.breakevenAtRr,
+      runner: order.runner,
       exiting: false,
     });
     this.emit({
@@ -184,12 +195,24 @@ export class GatewayExecutionPort implements ExecutionPort {
       if (position.exiting || position.contract.securityId !== tick.securityId || position.contract.exchangeSegment !== tick.exchangeSegment) {
         continue;
       }
+      if (position.trailingJump !== undefined && position.trailingJump > 0) {
+        position.highWaterMark = Math.max(position.highWaterMark, tick.ltp);
+        position.stopLossPrice = calculateTrailingStop({
+          entryPrice: position.averagePrice,
+          initialStopPrice: position.initialStopPrice,
+          currentStopPrice: position.stopLossPrice,
+          highWaterMark: position.highWaterMark,
+          trailingJump: position.trailingJump,
+          breakevenAtRr: position.breakevenAtRr,
+          tickSize: position.contract.tickSize,
+        });
+      }
       let reason: ExitReason | undefined;
       let reference = 0;
       if (tick.ltp <= position.stopLossPrice) {
         reason = 'STOP_LOSS';
         reference = Math.min(tick.ltp, position.stopLossPrice);
-      } else if (tick.ltp >= position.targetPrice) {
+      } else if (!position.runner && tick.ltp >= position.targetPrice) {
         reason = 'TARGET';
         reference = position.targetPrice;
       }

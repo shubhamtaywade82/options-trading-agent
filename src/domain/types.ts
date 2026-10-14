@@ -82,6 +82,11 @@ export interface OpenPosition {
   readonly stopLossPrice: number;
   readonly targetPrice: number;
   readonly openedAt: number;
+  readonly initialStopPrice?: number | undefined;
+  readonly highWaterMark?: number | undefined;
+  readonly trailingJump?: number | undefined;
+  readonly breakevenAtRr?: number | undefined;
+  readonly runner?: boolean | undefined;
 }
 
 export type ExitReason =

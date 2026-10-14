@@ -17,7 +17,7 @@ import {
 import type { EntryOrder, ExecutionEvent, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { EntrySnapshot, TradeAdvisor } from '../llm/advisor.js';
 import { BarSeries, CandleBuilder } from '../market/barSeries.js';
-import { bracketLevels, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
+import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
@@ -265,7 +265,34 @@ export class UnderlyingAgent {
       if (position !== undefined && instrumentKey(tick) === instrumentKey(position.contract)) {
         slot.lastMark = tick.ltp;
         this.deps.book.setOpenPnl(this.symbol, (tick.ltp - position.averagePrice) * position.quantity, slot.optionType);
+        this.updateTrailingStop(slot, tick.ltp);
         this.queue.run(() => this.checkExitForSlot(slot, false));
+      }
+    }
+  }
+
+  private updateTrailingStop(slot: SideSlot, ltp: number): void {
+    const position = slot.position;
+    if (position === undefined || position.trailingJump === undefined || position.trailingJump <= 0) {
+      return;
+    }
+    const hwm = Math.max(position.highWaterMark ?? position.averagePrice, ltp);
+    const newStop = calculateTrailingStop({
+      entryPrice: position.averagePrice,
+      initialStopPrice: position.initialStopPrice ?? position.stopLossPrice,
+      currentStopPrice: position.stopLossPrice,
+      highWaterMark: hwm,
+      trailingJump: position.trailingJump,
+      breakevenAtRr: position.breakevenAtRr,
+      tickSize: position.contract.tickSize,
+    });
+    if (newStop > position.stopLossPrice || hwm !== position.highWaterMark) {
+      const moved = newStop > position.stopLossPrice;
+      slot.position = { ...position, highWaterMark: hwm, stopLossPrice: newStop };
+      if (moved) {
+        this.deps.book.setOpenRisk(this.symbol, riskAtStop(position.quantity, position.averagePrice, newStop), slot.optionType);
+        this.record('trailing_stop_updated', { positionId: position.positionId, stopLossPrice: newStop, highWaterMark: hwm });
+        this.deps.logger.info('trailing stop updated', { underlying: this.symbol, positionId: position.positionId, stopLossPrice: newStop });
       }
     }
   }
@@ -670,10 +697,14 @@ export class UnderlyingAgent {
       stopLossPct: config.exits.stopLossPct,
       targetRr: config.exits.targetRr,
       tickSize: contract.tickSize,
+      trailingJumpPct: config.exits.trailingJumpPct,
     });
     if (bracket === undefined) {
       return fail('BRACKET_UNREPRESENTABLE', `cannot place stop and target at premium ${entryLimit} on tick ${contract.tickSize}`);
     }
+    const targetPrice = config.exits.runnerMode
+      ? roundDownToTick(bracket.entryReference + Math.max(10 * bracket.riskPerUnit, bracket.entryReference * 5), contract.tickSize)
+      : bracket.targetPrice;
 
     const funds = await market.availableFunds();
     // CAPITAL_INR is a ceiling: the daily loss limit is a percentage of it, so sizing off a larger
@@ -703,7 +734,7 @@ export class UnderlyingAgent {
       side: 'BUY',
       entryReference: bracket.entryReference,
       stopLossPrice: bracket.stopLossPrice,
-      targetPrice: bracket.targetPrice,
+      targetPrice,
       lots: sizing.lots,
       lotSize: contract.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
@@ -750,7 +781,7 @@ export class UnderlyingAgent {
       spot: signal.spot,
       entryReference: bracket.entryReference,
       stopLossPrice: bracket.stopLossPrice,
-      targetPrice: bracket.targetPrice,
+      targetPrice,
       spreadPct: ((quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2)) * 100,
       openInterest: quote.oi ?? 0,
       lots: sizing.lots,
@@ -771,7 +802,7 @@ export class UnderlyingAgent {
       lots: sizing.lots,
       quantity: sizing.quantity,
       stopLossPrice: bracket.stopLossPrice,
-      targetPrice: bracket.targetPrice,
+      targetPrice,
       riskInr: verdict.riskInr,
       at: now,
     };
@@ -797,7 +828,11 @@ export class UnderlyingAgent {
         quantity: sizing.quantity,
         entryReference: bracket.entryReference,
         stopLossPrice: bracket.stopLossPrice,
-        targetPrice: bracket.targetPrice,
+        targetPrice,
+        initialStopPrice: bracket.stopLossPrice,
+        trailingJump: bracket.trailingJump,
+        breakevenAtRr: config.exits.breakevenAtRr,
+        runner: config.exits.runnerMode,
       },
     };
   }
@@ -844,8 +879,13 @@ export class UnderlyingAgent {
       contract: pending.contract,
       quantity,
       averagePrice,
+      initialStopPrice: pending.initialStopPrice ?? pending.stopLossPrice,
       stopLossPrice: pending.stopLossPrice,
+      highWaterMark: averagePrice,
       targetPrice: pending.targetPrice,
+      trailingJump: pending.trailingJump,
+      breakevenAtRr: pending.breakevenAtRr,
+      runner: pending.runner,
       openedAt: at,
     };
     slot.position = position;
