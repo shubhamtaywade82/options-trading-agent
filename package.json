@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.tsx",
-    "dev:paper": "MODE=paper tsx src/index.tsx",
+    "dev:paper": "CONFIG_FILE=config.paper.yml MODE=paper tsx src/index.tsx",
     "dev:sandbox": "MODE=sandbox tsx src/index.tsx",
     "dev:live": "MODE=live tsx src/index.tsx",
     "build": "tsc",
@@ -23,10 +23,13 @@
     "smoke:feed": "tsx scripts/smoke-feed.ts",
     "journal:summary": "tsx scripts/journal-summary.ts",
     "report:performance": "tsx scripts/performance-report.ts",
+    "reconcile": "tsx scripts/reconcile.ts",
     "cockpit:demo": "tsx scripts/cockpit-demo.ts",
     "db:status": "tsx scripts/db.ts status",
     "db:migrate": "tsx scripts/db.ts migrate",
     "db:acknowledge": "tsx scripts/db.ts acknowledge",
+    "db:reset-wallet": "tsx scripts/db.ts reset-wallet",
+    "reset:paper": "tsx scripts/reset-paper.ts",
     "test:integration": "tsx --test tests/persistence.integration.test.ts"
   },
   "dependencies": {
@@ -40,6 +43,7 @@
     "pg": "^8.23.1",
     "react": "^18.3.1",
     "string-width": "^7.2.0",
+    "yaml": "^2.9.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

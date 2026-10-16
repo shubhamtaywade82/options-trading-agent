@@ -58,60 +58,129 @@ export interface SuperTrendState {
   readonly line: number;
   /** True when the trend changed on the last bar. */
   readonly flipped: boolean;
+  /** Number of closed bars since the most recent flip (0 on the flip bar itself). */
+  readonly barsSinceFlip: number;
+  /** Distance in points from current close to active SuperTrend line. */
+  readonly distance: number;
+  /** Distance normalized by ATR (distance / ATR). */
+  readonly distanceAtr: number;
+  /** Timestamp of the bar on which the flip occurred. */
+  readonly flipBarTime: number;
+}
+
+/** Kaufman efficiency ratio (directional price change divided by sum of absolute bar changes). */
+export function efficiencyRatio(candles: readonly Candle[], index: number, period: number): number {
+  if (index < period) {
+    return 0;
+  }
+  const current = candles[index];
+  const previous = candles[index - period];
+  if (current === undefined || previous === undefined) {
+    return 0;
+  }
+  const change = Math.abs(current.close - previous.close);
+  let volatility = 0;
+  for (let i = index - period + 1; i <= index; i += 1) {
+    const c1 = candles[i];
+    const c0 = candles[i - 1];
+    if (c1 !== undefined && c0 !== undefined) {
+      volatility += Math.abs(c1.close - c0.close);
+    }
+  }
+  return volatility > 0 ? Math.min(1, change / volatility) : 0;
+}
+
+interface BandState {
+  readonly upper?: number;
+  readonly lower?: number;
+  readonly trend: SuperTrendTrend;
+  readonly prevClose?: number;
+}
+
+interface BandStep {
+  readonly upper: number;
+  readonly lower: number;
+  readonly trend: SuperTrendTrend;
+  readonly flipped: boolean;
+}
+
+function stepBands(candle: Candle, mult: number, bandAtr: number, state: BandState): BandStep {
+  const hl2 = (candle.high + candle.low) / 2;
+  const basicUpper = hl2 + mult * bandAtr;
+  const basicLower = hl2 - mult * bandAtr;
+  if (state.upper === undefined || state.lower === undefined || state.prevClose === undefined) {
+    return { upper: basicUpper, lower: basicLower, trend: candle.close > hl2 ? 'UP' : 'DOWN', flipped: false };
+  }
+  const upper = basicUpper < state.upper || state.prevClose > state.upper ? basicUpper : state.upper;
+  const lower = basicLower > state.lower || state.prevClose < state.lower ? basicLower : state.lower;
+  let trend = state.trend;
+  if (state.trend === 'DOWN' && candle.close > upper) {
+    trend = 'UP';
+  } else if (state.trend === 'UP' && candle.close < lower) {
+    trend = 'DOWN';
+  }
+  return { upper, lower, trend, flipped: state.trend !== trend };
+}
+
+function calculateSuperTrend(
+  candles: readonly Candle[],
+  period: number,
+  multiplierFn: (index: number) => number,
+): SuperTrendState | undefined {
+  const atr = wilderAtr(candles, period);
+  let state: BandState = { trend: 'UP' };
+  let lastFlipped = false;
+  let barsSinceFlip = 0;
+  let flipBarTime = candles[0]?.time ?? 0;
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const candle = candles[i];
+    const bandAtr = atr[i];
+    if (candle === undefined || bandAtr === undefined) continue;
+    const step = stepBands(candle, multiplierFn(i), bandAtr, state);
+    state = { upper: step.upper, lower: step.lower, trend: step.trend, prevClose: candle.close };
+    lastFlipped = step.flipped;
+    if (step.flipped) {
+      barsSinceFlip = 0;
+      flipBarTime = candle.time;
+    } else if (state.prevClose !== undefined) {
+      barsSinceFlip += 1;
+    }
+  }
+
+  if (state.upper === undefined || state.lower === undefined || candles.length === 0) return undefined;
+  const lastClose = candles[candles.length - 1]?.close ?? 0;
+  const line = state.trend === 'UP' ? state.lower : state.upper;
+  const lastAtr = atr[candles.length - 1] ?? 0;
+  const distance = Math.abs(lastClose - line);
+  const distanceAtr = lastAtr > 0 ? distance / lastAtr : 0;
+  return { trend: state.trend, line, flipped: lastFlipped, barsSinceFlip, distance, distanceAtr, flipBarTime };
 }
 
 /**
  * SuperTrend over the full series, returning the state at the final bar.
- * Seeded from the first bar with a valid ATR; callers should supply several
- * multiples of `period` bars so the seed does not dominate the result.
+ * Seeded from the first bar with a valid ATR.
  */
 export function superTrend(
   candles: readonly Candle[],
   period: number,
   multiplier: number,
 ): SuperTrendState | undefined {
-  const atr = wilderAtr(candles, period);
-  let finalUpper: number | undefined;
-  let finalLower: number | undefined;
-  let trend: SuperTrendTrend = 'UP';
-  let flipped = false;
-  let previousClose: number | undefined;
+  return calculateSuperTrend(candles, period, () => multiplier);
+}
 
-  for (let i = 0; i < candles.length; i += 1) {
-    const candle = candles[i];
-    const bandAtr = atr[i];
-    if (candle === undefined || bandAtr === undefined) {
-      continue;
-    }
-    const hl2 = (candle.high + candle.low) / 2;
-    const basicUpper = hl2 + multiplier * bandAtr;
-    const basicLower = hl2 - multiplier * bandAtr;
-
-    if (finalUpper === undefined || finalLower === undefined || previousClose === undefined) {
-      finalUpper = basicUpper;
-      finalLower = basicLower;
-      trend = candle.close > hl2 ? 'UP' : 'DOWN';
-      flipped = false;
-    } else {
-      const nextUpper =
-        basicUpper < finalUpper || previousClose > finalUpper ? basicUpper : finalUpper;
-      const nextLower =
-        basicLower > finalLower || previousClose < finalLower ? basicLower : finalLower;
-      finalUpper = nextUpper;
-      finalLower = nextLower;
-      const before = trend;
-      if (trend === 'DOWN' && candle.close > finalUpper) {
-        trend = 'UP';
-      } else if (trend === 'UP' && candle.close < finalLower) {
-        trend = 'DOWN';
-      }
-      flipped = before !== trend;
-    }
-    previousClose = candle.close;
-  }
-
-  if (finalUpper === undefined || finalLower === undefined) {
-    return undefined;
-  }
-  return { trend, line: trend === 'UP' ? finalLower : finalUpper, flipped };
+/**
+ * Adaptive ML-based SuperTrend: scales the multiplier dynamically using the Kaufman Efficiency Ratio.
+ * Tightens bands (down to 0.75x) in clean trending moves for earlier flip entries;
+ * widens bands (up to 1.5x) in choppy consolidation to filter out whipsaws.
+ */
+export function adaptiveSuperTrend(
+  candles: readonly Candle[],
+  period: number,
+  baseMultiplier: number,
+): SuperTrendState | undefined {
+  return calculateSuperTrend(candles, period, (i) => {
+    const er = efficiencyRatio(candles, i, period);
+    return baseMultiplier * (1.5 - er * 0.75);
+  });
 }

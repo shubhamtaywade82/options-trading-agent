@@ -1,5 +1,6 @@
 import type { ChainSnapshot } from '../options/selector.js';
 import { minStrikeStep, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
+import { analyzeOptionChain } from '../options/chainAnalyzer.js';
 import type { OptionType } from '../domain/types.js';
 import type { ChainMarketBias, ChainWatchView, IndicatorView } from './views.js';
 
@@ -105,6 +106,7 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
   const bullishEntryStrike = targetEntryStrike(atm, step, 'BULLISH', input.offsetSteps);
   const bearishEntryStrike = targetEntryStrike(atm, step, 'BEARISH', input.offsetSteps);
   const visible = sliceStrikeWindow(strikePrices, atmIndex, strikeScroll);
+  const analysis = input.chain !== undefined && input.spot !== undefined ? analyzeOptionChain(input.chain, input.spot) : undefined;
   let maxOi = 1;
   const rows = visible.map((strike) => {
     const row = input.chain!.strikes.find((candidate) => Math.abs(candidate.strike - strike) < EPSILON);
@@ -113,7 +115,7 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     const callOi = row?.call?.oi ?? 0;
     const putOi = row?.put?.oi ?? 0;
     maxOi = Math.max(maxOi, callOi, putOi);
-    const markers: ('ATM' | 'CE_ENTRY' | 'PE_ENTRY' | 'OPEN')[] = [];
+    const markers: ('ATM' | 'CE_ENTRY' | 'PE_ENTRY' | 'OPEN' | 'RES' | 'SUP')[] = [];
     if (Math.abs(strike - atm) < EPSILON) {
       markers.push('ATM');
     }
@@ -122,6 +124,14 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     }
     if (Math.abs(strike - bearishEntryStrike) < EPSILON) {
       markers.push('PE_ENTRY');
+    }
+    if (analysis !== undefined) {
+      if (Math.abs(strike - analysis.callResistance.strike) < EPSILON) {
+        markers.push('RES');
+      }
+      if (Math.abs(strike - analysis.putSupport.strike) < EPSILON) {
+        markers.push('SUP');
+      }
     }
     if (input.openPosition !== undefined && Math.abs(strike - input.openPosition.strike) < EPSILON) {
       markers.push('OPEN');
@@ -159,5 +169,6 @@ export function buildChainWatchView(input: ChainWatchBuildInput): ChainWatchView
     strikeScrollMin: scrollBounds.min,
     strikeScrollMax: scrollBounds.max,
     marketBias: marketBiasFromIndicators(input.indicators),
+    analysis,
   };
 }

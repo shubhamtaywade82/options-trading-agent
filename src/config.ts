@@ -1,6 +1,9 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
 import type { OptionSegment } from './domain/types.js';
 import { TRADING_MODES, type TradingMode } from './domain/mode.js';
+import { POSTURES, type StrategyPosture, STRATEGY_CATALOG, type StrategyId } from './strategy/session.js';
 
 /** The production REST host the SDK uses when DHAN_BASE_URL is not set. The sandbox must never point here. */
 const PRODUCTION_DHAN_HOST = 'api.dhan.co';
@@ -81,6 +84,10 @@ export interface AgentConfig {
     /** Live entries are LIMIT orders at ask × (1 + this %), and are sized and bracketed off that limit. */
     readonly entryLimitBufferPct: number;
   };
+  readonly chainAnalysis: {
+    readonly enabled: boolean;
+    readonly minHeadroomPts: number;
+  };
   readonly exits: {
     readonly stopLossPct: number;
     readonly targetRr: number;
@@ -94,6 +101,7 @@ export interface AgentConfig {
   readonly session: {
     readonly entryStartMinute: number;
     readonly entryEndMinute: number;
+    readonly initialPosture: StrategyPosture;
   };
   readonly strategy: {
     readonly barMinutes: number;
@@ -103,6 +111,9 @@ export interface AgentConfig {
     readonly emaSlow: number;
     readonly orbMinutes: number;
     readonly warmupDays: number;
+    readonly enabledStrategies: readonly StrategyId[] | undefined;
+    readonly maxBarsSinceFlip: number;
+    readonly minDistanceAtr: number;
   };
   readonly feed: {
     readonly staleMs: number;
@@ -257,12 +268,135 @@ function parseUnderlyings(env: Env): AgentConfig['underlyings'] {
   });
 }
 
+function parsePosture(env: Env): StrategyPosture {
+  const raw = (optionalText(env, 'STRATEGY_POSTURE') ?? optionalText(env, 'POSTURE') ?? 'aligned').toLowerCase();
+  if ((POSTURES as readonly string[]).includes(raw)) {
+    return raw as StrategyPosture;
+  }
+  throw new Error(`STRATEGY_POSTURE must be one of ${POSTURES.join(', ')}, got "${raw}"`);
+}
+
+function parseEnabledStrategies(env: Env): readonly StrategyId[] | undefined {
+  const raw = optionalText(env, 'ENABLED_STRATEGIES') ?? optionalText(env, 'STRATEGY_ENABLED');
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parts = raw.split(',').map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0) as StrategyId[];
+  for (const id of parts) {
+    if (!STRATEGY_CATALOG.some((s) => s.id === id)) {
+      throw new Error(`Strategy "${id}" is unknown. Supported: ${STRATEGY_CATALOG.map((s) => s.id).join(', ')}`);
+    }
+  }
+  return parts.length > 0 ? parts : undefined;
+}
+
+const YAML_ENV_MAP: Readonly<Record<string, string>> = {
+  'underlyings': 'UNDERLYINGS',
+  'underlying': 'UNDERLYINGS',
+  'strategy.enabled_strategies': 'ENABLED_STRATEGIES',
+  'strategy.active_strategies': 'ENABLED_STRATEGIES',
+  'strategy.strategies': 'ENABLED_STRATEGIES',
+  'session.current_posture': 'STRATEGY_POSTURE',
+  'session.posture': 'STRATEGY_POSTURE',
+  'posture': 'STRATEGY_POSTURE',
+  'capital.inr': 'CAPITAL_INR',
+  'capital.max_risk_per_trade_pct': 'MAX_RISK_PER_TRADE_PCT',
+  'capital.max_daily_loss_pct': 'MAX_DAILY_LOSS_PCT',
+  'capital.max_lots_per_order': 'MAX_LOTS_PER_ORDER',
+  'limits.max_trades_per_day': 'MAX_TRADES_PER_DAY',
+  'limits.cooldown_seconds': 'COOLDOWN_SECONDS',
+  'limits.max_open_positions': 'MAX_OPEN_POSITIONS',
+  'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
+  'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
+  'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
+  'timing.entry_start': 'ENTRY_START',
+  'timing.entry_end': 'ENTRY_END',
+  'timing.expiry_day_cutoff': 'EXPIRY_DAY_ENTRY_CUTOFF',
+  'timing.flatten_by': 'FLATTEN_BY',
+  'strategy.bar_minutes': 'BAR_MINUTES',
+  'strategy.supertrend_period': 'SUPERTREND_PERIOD',
+  'strategy.supertrend_multiplier': 'SUPERTREND_MULTIPLIER',
+  'strategy.ema_fast': 'EMA_FAST',
+  'strategy.ema_slow': 'EMA_SLOW',
+  'strategy.orb_minutes': 'ORB_MINUTES',
+  'strategy.warmup_days': 'WARMUP_DAYS',
+  'strategy.max_bars_since_flip': 'MAX_BARS_SINCE_FLIP',
+  'strategy.trend_flip_max_bars': 'MAX_BARS_SINCE_FLIP',
+  'strategy.min_distance_atr': 'MIN_DISTANCE_ATR',
+  'strategy.st_min_distance_atr': 'MIN_DISTANCE_ATR',
+  'exits.stop_loss_pct': 'STOP_LOSS_PCT',
+  'exits.target_rr': 'TARGET_RR',
+  'exits.max_hold_minutes': 'MAX_HOLD_MINUTES',
+  'exits.trailing_jump_pct': 'TRAILING_JUMP_PCT',
+  'exits.breakeven_at_rr': 'BREAKEVEN_AT_RR',
+  'exits.runner_mode': 'RUNNER_MODE',
+  'chain_analysis.enabled': 'CHAIN_ANALYSIS_ENABLED',
+  'chain_analysis.min_headroom_pts': 'CHAIN_ANALYSIS_MIN_HEADROOM_PTS',
+};
+
+export function parseYamlToEnv(content: string): Record<string, string> {
+  const parsed = parseYaml(content);
+  const result: Record<string, string> = {};
+  if (parsed === null || typeof parsed !== 'object') {
+    return result;
+  }
+
+  const walk = (node: unknown, path: string): void => {
+    if (node === null || node === undefined) {
+      return;
+    }
+    // Reference descriptions in YAML are skipped so they do not pollute the runtime env
+    if (path === 'session.postures' || path === 'postures') {
+      return;
+    }
+    if (typeof node === 'object' && !Array.isArray(node)) {
+      for (const [key, val] of Object.entries(node as Record<string, unknown>)) {
+        walk(val, path ? `${path}.${key}` : key);
+      }
+      return;
+    }
+    const envKey = YAML_ENV_MAP[path] ?? path.toUpperCase().replace(/\./g, '_');
+    result[envKey] = Array.isArray(node) ? node.map(String).join(',') : String(node);
+  };
+
+  walk(parsed, '');
+  return result;
+}
+
+export function loadYamlConfig(filePath: string): Record<string, string> {
+  if (!existsSync(filePath)) {
+    throw new Error(`Config file not found: ${filePath}`);
+  }
+  return parseYamlToEnv(readFileSync(filePath, 'utf-8'));
+}
+
+function resolveConfigPath(env: Env, explicitPath?: string): string | undefined {
+  if (explicitPath !== undefined) {
+    return explicitPath;
+  }
+  const fromEnv = optionalText(env, 'CONFIG_FILE') ?? optionalText(env, 'CONFIG_PATH');
+  if (fromEnv !== undefined) {
+    return fromEnv;
+  }
+  const args = process.argv;
+  const idx = args.findIndex((arg) => arg === '--config' || arg === '-c');
+  if (idx !== -1 && idx + 1 < args.length) {
+    return args[idx + 1];
+  }
+  const eq = args.find((arg) => arg.startsWith('--config='));
+  return eq?.split('=')[1];
+}
+
 /**
  * Parses and validates the full agent configuration. Every invalid or unsafe
  * value throws before any network call; live mode additionally requires an
  * explicit acknowledgement phrase.
  */
-export function loadConfig(env: Env = process.env): AgentConfig {
+export function loadConfig(env: Env = process.env, configPath?: string): AgentConfig {
+  const resolvedPath = resolveConfigPath(env, configPath);
+  if (resolvedPath !== undefined) {
+    env = { ...env, ...loadYamlConfig(resolvedPath) };
+  }
   if (optionalText(env, 'EVENT_LOG_PATH') !== undefined) {
     // A single file grew without bound and was read in full at every start. Refuse rather than ignore it.
     throw new Error('EVENT_LOG_PATH was replaced by EVENT_LOG_DIR (daily journal files); unset EVENT_LOG_PATH');
@@ -321,6 +455,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     session: {
       entryStartMinute: minuteOfDay(env, 'ENTRY_START', '09:30'),
       entryEndMinute: minuteOfDay(env, 'ENTRY_END', '14:30'),
+      initialPosture: parsePosture(env),
     },
     strategy: {
       barMinutes: number(env, 'BAR_MINUTES', 5, { min: 1, max: 60, integer: true }),
@@ -330,6 +465,13 @@ export function loadConfig(env: Env = process.env): AgentConfig {
       emaSlow: number(env, 'EMA_SLOW', 21, { min: 3, max: 400, integer: true }),
       orbMinutes: number(env, 'ORB_MINUTES', 15, { min: 5, max: 60, integer: true }),
       warmupDays: number(env, 'WARMUP_DAYS', 5, { min: 1, max: 30, integer: true }),
+      enabledStrategies: parseEnabledStrategies(env),
+      maxBarsSinceFlip: number(env, 'MAX_BARS_SINCE_FLIP', 3, { min: 0, max: 50, integer: true }),
+      minDistanceAtr: number(env, 'MIN_DISTANCE_ATR', 0.5, { min: 0, max: 20 }),
+    },
+    chainAnalysis: {
+      enabled: flag(env, 'CHAIN_ANALYSIS_ENABLED', false),
+      minHeadroomPts: number(env, 'CHAIN_ANALYSIS_MIN_HEADROOM_PTS', 15, { min: 0, max: 1000 }),
     },
     feed: {
       staleMs: number(env, 'FEED_STALE_MS', 5_000, { min: 500, max: 60_000, integer: true }),
@@ -471,9 +613,9 @@ function parsePersistence(env: Env, mode: TradingMode): AgentConfig['persistence
  * this function only reads the trading sections.
  */
 export function configFingerprint(config: AgentConfig): string {
-  const { mode, underlyings, capital, contract, exits, session, strategy, feed, paper } = config;
+  const { mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis } = config;
   return createHash('sha256')
-    .update(JSON.stringify({ mode, underlyings, capital, contract, exits, session, strategy, feed, paper }))
+    .update(JSON.stringify({ mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis }))
     .digest('hex');
 }
 

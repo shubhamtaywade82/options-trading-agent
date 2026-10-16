@@ -70,6 +70,7 @@ export interface Signal {
   readonly reasons: readonly string[];
   /** Which strategy fired, so results can be judged per strategy. `test` for an operator test trade. */
   readonly strategy?: string;
+  readonly flipBarTime?: number | undefined;
 }
 
 export interface OpenPosition {

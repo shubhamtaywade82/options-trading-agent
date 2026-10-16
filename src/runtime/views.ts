@@ -1,6 +1,7 @@
 import type { TradingMode } from '../domain/mode.js';
 import type { TradeState } from '../domain/fsm.js';
 import type { Direction, ExitReason, OptionType } from '../domain/types.js';
+import type { ChainAnalysis } from '../options/chainAnalyzer.js';
 
 /**
  * Read-only views the operator cockpit renders. They are plain data: building one
@@ -80,7 +81,7 @@ export interface ChainWatchLegView {
 
 export interface ChainWatchRowView {
   readonly strike: number;
-  readonly markers: readonly ('ATM' | 'CE_ENTRY' | 'PE_ENTRY' | 'OPEN')[];
+  readonly markers: readonly ('ATM' | 'CE_ENTRY' | 'PE_ENTRY' | 'OPEN' | 'RES' | 'SUP')[];
   readonly call: ChainWatchLegView;
   readonly put: ChainWatchLegView;
 }
@@ -104,6 +105,7 @@ export interface ChainWatchView {
   readonly strikeScrollMin: number;
   readonly strikeScrollMax: number;
   readonly marketBias: ChainMarketBias;
+  readonly analysis?: ChainAnalysis | undefined;
 }
 
 export interface AgentView {

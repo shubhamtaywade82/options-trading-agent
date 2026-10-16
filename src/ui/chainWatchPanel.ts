@@ -1,4 +1,5 @@
 import type { AgentView, ChainWatchLegView, ChainWatchRowView, ChainWatchView } from '../runtime/views.js';
+import type { ChainAnalysis } from '../options/chainAnalyzer.js';
 import { bad, callSide, infoBold, muted, ok, putSide, warn } from './palette.js';
 import { fit } from './terminalFit.js';
 
@@ -46,6 +47,12 @@ function marks(markers: ChainWatchRowView['markers']): string {
   }
   if (markers.includes('PE_ENTRY')) {
     parts.push(putSide('PE▸'));
+  }
+  if (markers.includes('RES')) {
+    parts.push(bad('RES'));
+  }
+  if (markers.includes('SUP')) {
+    parts.push(ok('SUP'));
   }
   if (markers.includes('OPEN')) {
     parts.push(infoBold('OPEN'));
@@ -147,7 +154,19 @@ function legMid(leg: ChainWatchLegView): number | undefined {
   return (leg.bid + leg.ask) / 2;
 }
 
-function readings(watch: ChainWatchView): string[] {
+function analysisReadings(watch: ChainWatchView, analysis: ChainAnalysis): string[] {
+  const scoreText = analysis.sentimentScore >= 0 ? `+${analysis.sentimentScore}` : `${analysis.sentimentScore}`;
+  const biasColor = analysis.bias === 'BULLISH' ? callSide : analysis.bias === 'BEARISH' ? putSide : muted;
+  return [
+    `straddle ${analysis.straddlePremium.toFixed(1)}`,
+    analysis.pcr >= 1 ? putSide(`PCR ${analysis.pcr.toFixed(2)} (${analysis.atmPcr.toFixed(2)})`) : callSide(`PCR ${analysis.pcr.toFixed(2)} (${analysis.atmPcr.toFixed(2)})`),
+    `R ${analysis.callResistance.strike} (+${Math.max(0, analysis.headroomCe).toFixed(0)})`,
+    `S ${analysis.putSupport.strike} (-${Math.max(0, analysis.headroomPe).toFixed(0)})`,
+    biasColor(`Score ${scoreText} ${analysis.bias}`),
+  ];
+}
+
+function fallbackReadings(watch: ChainWatchView): string[] {
   const atm = watch.rows.find((row) => row.markers.includes('ATM'));
   const callMid = atm === undefined ? undefined : legMid(atm.call);
   const putMid = atm === undefined ? undefined : legMid(atm.put);
@@ -167,6 +186,10 @@ function readings(watch: ChainWatchView): string[] {
     entryLeg === undefined ? 'entry —' : entryLeg.passesGate ? ok('entry pass') : bad('entry fail'),
     `OI win ${compactOi(Math.max(callOi, putOi))}`,
   ];
+}
+
+function readings(watch: ChainWatchView): string[] {
+  return watch.analysis !== undefined ? analysisReadings(watch, watch.analysis) : fallbackReadings(watch);
 }
 
 function appendLadder(lines: string[], watch: ChainWatchView, inner: number): void {

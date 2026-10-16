@@ -1,0 +1,92 @@
+# ==============================================================================
+# Options Trading Agent - Paper Trading Session Configuration
+# ==============================================================================
+# Run with:
+#   npm run dev:paper
+#   or: CONFIG_FILE=config.paper.yml MODE=paper tsx src/index.tsx
+# ==============================================================================
+
+mode: paper
+# Underlyings to trade (supported: NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX)
+underlyings:
+  - NIFTY
+  - BANKNIFTY
+  - SENSEX
+
+# Session posture configuration
+session:
+  # Active posture for the session: "scout" | "aligned" | "confirmed"
+  current_posture: scout
+
+  # Reference configurations and behavior for each posture
+  postures:
+    scout:
+      mode: aggressive
+      description: "Fastest entries: triggers ORB breakout on immediate touch/cross and SuperTrend flip without requiring EMA agreement."
+      orb_requires_close_outside: false
+      trend_requires_ema_filter: false
+
+    aligned:
+      mode: balanced
+      description: "Standard: requires ORB breakout + SuperTrend + EMA fast/slow alignment on closed bar."
+      orb_requires_close_outside: true
+      trend_requires_ema_filter: true
+
+    confirmed:
+      mode: protective
+      description: "Conservative: requires price to hold beyond range + multi-indicator trend confluence and confirmation bar."
+      orb_requires_close_outside: true
+      trend_requires_ema_filter: true
+      confirmation_bars: 1
+
+# Strategy Selection & Indicators
+strategy:
+  active_strategies:
+    - trend                    # Only take SuperTrend flips (disables Range break)
+  bar_minutes: 5               # 5-minute bars
+  supertrend_period: 10        # Base ATR period for adaptive SuperTrend
+  supertrend_multiplier: 3.0   # Base multiplier (dynamically scaled by market efficiency in Scout)
+  max_bars_since_flip: 2       # Only take FRESH flips (within 2 candles of flip); prevents buying exhausted trends
+  min_distance_atr: 0.5        # Minimum distance from ST line (in ATR multiples) to enter
+
+# Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
+chain_analysis:
+  enabled: true
+  min_headroom_pts: 15         # Minimum headroom (pts) before major OI resistance/support wall
+
+# Capital & Sizing: 10L paper capital with 20k risk allocation per trade
+capital:
+  inr: 1000000                 # ₹10,00,000 (10 Lakhs paper balance)
+  max_risk_per_trade_pct: 2.0  # 2% of 10L = ₹20,000 risk allocation per trade
+  max_daily_loss_pct: 100.0    # 100% daily loss allowance (must be >= max_risk_per_trade_pct)
+  max_lots_per_order: 15       # Allows full ₹20k deployment without 1-lot cap
+
+# Risk Limits: no hardblocks so the system can take as many trades as possible
+limits:
+  max_trades_per_day: 0        # 0 = unlimited trades per day (no trade count hardblock)
+  cooldown_seconds: 0          # 0 = no cooldown between exits and new entries
+  max_open_positions: 2        # Max 2 concurrent positions across underlyings to prevent correlated overexposure
+  max_positions_per_underlying: 1
+  max_positions_per_side: 2
+  broker_kill_switch_on_breach: false # Avoids tripping broker kill switch during paper runs
+
+# Exit Strategy & Targets
+exits:
+  stop_loss_pct: 30            # 30% stop loss
+  target_rr: 2.0               # 1:2 Risk to Reward (e.g. entry ₹120 -> SL ₹85, TP ₹190)
+  runner_mode: false           # false = realistic achievable TP (1:2 R:R); true = uncapped runner
+  max_hold_minutes: 90         # 90 min hold: lets trend develop, preventing premature lunchtime time-stop exits
+  trailing_jump_pct: 15        # Step up stop loss by 15% as price advances
+  breakeven_at_rr: 1.0         # Move SL to entry breakeven at 1R profit
+
+# Paper Trading Venue Settings
+paper:
+  backend: postgres            # postgres (local PostgreSQL ledger) or exchange
+  slippage_bps: 25             # 25 bps realistic spread/slippage simulation
+
+# Session Window & Timings (IST)
+timing:
+  entry_start: "09:15"         # Market open
+  entry_end: "15:10"           # Trade until near market close
+  expiry_day_cutoff: "15:15"
+  flatten_by: "15:15"          # Auto-square off cutoff

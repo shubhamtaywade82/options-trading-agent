@@ -208,3 +208,40 @@ describe('loadConfig journal location', () => {
     assert.throws(() => loadConfig({ ...BASE, EVENT_LOG_PATH: 'data/events.jsonl' }), /replaced by EVENT_LOG_DIR/);
   });
 });
+
+describe('loadConfig posture and YAML loading', () => {
+  it('defaults initial posture to aligned', () => {
+    assert.equal(loadConfig(BASE).session.initialPosture, 'aligned');
+  });
+
+  it('accepts configured initial posture from env', () => {
+    assert.equal(loadConfig({ ...BASE, STRATEGY_POSTURE: 'scout' }).session.initialPosture, 'scout');
+    assert.equal(loadConfig({ ...BASE, POSTURE: 'confirmed' }).session.initialPosture, 'confirmed');
+  });
+
+  it('rejects unknown posture values', () => {
+    assert.throws(() => loadConfig({ ...BASE, STRATEGY_POSTURE: 'yolo' }), /STRATEGY_POSTURE must be one of/);
+  });
+
+  it('loads paper YAML configuration and applies scout posture, 10L capital, and no hardblocks', () => {
+    const config = loadConfig(BASE, 'config.paper.yml');
+    assert.deepEqual(config.underlyings.map((u) => u.symbol), ['NIFTY', 'BANKNIFTY', 'SENSEX']);
+    assert.equal(config.session.initialPosture, 'scout');
+    assert.equal(config.capital.inr, 1_000_000);
+    assert.equal(config.capital.maxRiskPerTradePct, 2.0);
+    assert.equal(config.capital.maxDailyLossPct, 100.0);
+    assert.equal(config.capital.maxLotsPerOrder, 15);
+    assert.equal(config.capital.maxTradesPerDay, 0);
+    assert.equal(config.exits.cooldownSeconds, 0);
+    assert.equal(config.capital.maxOpenPositions, 2);
+    assert.equal(config.session.entryStartMinute, 9 * 60 + 15);
+    assert.equal(config.session.entryEndMinute, 15 * 60 + 10);
+    assert.equal(config.exits.flattenByMinute, 15 * 60 + 15);
+    assert.equal(config.ops.brokerKillSwitchOnBreach, false);
+    assert.equal(config.strategy.maxBarsSinceFlip, 2);
+    assert.equal(config.strategy.minDistanceAtr, 0.5);
+    assert.equal(config.chainAnalysis.enabled, true);
+    assert.equal(config.chainAnalysis.minHeadroomPts, 15);
+  });
+});
+

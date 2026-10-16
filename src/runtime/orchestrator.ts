@@ -89,7 +89,7 @@ export class Orchestrator {
     private readonly services: OrchestratorServices,
   ) {
     this.now = services.now ?? Date.now;
-    this.strategySession = new StrategySession();
+    this.strategySession = new StrategySession(config.session.initialPosture, config.strategy.enabledStrategies);
     this.book = services.dayBook ?? new DayBook(this.now(), config.exits.cooldownSeconds * 1000);
     this.dailyLossLimitInr = (config.capital.inr * config.capital.maxDailyLossPct) / 100;
     for (const spec of specs) {
@@ -210,6 +210,9 @@ export class Orchestrator {
 
     this.timer = setInterval(() => this.onClock(), this.services.clockIntervalMs ?? DEFAULT_CLOCK_INTERVAL_MS);
     this.timer.unref?.();
+    for (const agent of this.agents.values()) {
+      agent.evaluateWarmupSignal();
+    }
     this.services.logger.info('agent running', {
       mode: this.config.mode,
       underlyings: this.specs.map((spec) => spec.symbol),

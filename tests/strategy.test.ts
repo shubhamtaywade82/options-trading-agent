@@ -143,5 +143,51 @@ describe('StrategySession', () => {
     assert.match(signal?.reasons[0] ?? '', /Range break/);
     assert.match(signal?.reasons[0] ?? '', /held beyond the range/);
   });
+
+  it('in scout posture with only trend enabled, fires on adaptive SuperTrend flip', () => {
+    const session = new StrategySession('scout', ['trend']);
+    assert.deepEqual(session.view().strategies.map((s) => ({ id: s.id, on: s.on })), [
+      { id: 'range', on: false },
+      { id: 'trend', on: true },
+    ]);
+
+    const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.5, 108]);
+    const signal = session.evaluate([...fallingWarmup, ...today], PARAMS);
+    assert.ok(signal !== undefined, 'adaptive SuperTrend flip should fire');
+    assert.equal(signal?.strategy, 'trend');
+    assert.match(signal?.reasons[0] ?? '', /adaptive flip/);
+    assert.match(signal?.reasons[0] ?? '', /exact flip/);
+    assert.ok(signal?.flipBarTime !== undefined);
+  });
+
+  it('in scout posture, allows entry within maxBarsSinceFlip candles of the flip', () => {
+    const session = new StrategySession('scout', ['trend']);
+    const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
+    // Flip happened on bar at 108. Next 2 bars continue up: 109, 110. (barsSinceFlip = 2)
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.5, 108, 109, 110]);
+    const signal = session.evaluate([...fallingWarmup, ...today], { ...PARAMS, maxBarsSinceFlip: 3, minDistanceAtr: 0.5 });
+    assert.ok(signal !== undefined, 'should fire within 3 candles of the flip');
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /flip \+2b/);
+  });
+
+  it('in scout posture, rejects entry when bars since flip exceeds maxBarsSinceFlip', () => {
+    const session = new StrategySession('scout', ['trend']);
+    const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
+    // Flip happened on 108. Followed by 4 bars: 108.5, 109, 109.5, 110 (barsSinceFlip = 4)
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.5, 108, 108.5, 109, 109.5, 110]);
+    const signal = session.evaluate([...fallingWarmup, ...today], { ...PARAMS, maxBarsSinceFlip: 3 });
+    assert.equal(signal, undefined, 'should reject because flip is older than 3 bars');
+  });
+
+  it('in scout posture, rejects entry when distance from ST line is less than minDistanceAtr', () => {
+    const session = new StrategySession('scout', ['trend']);
+    const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.5, 108]);
+    // Require a very large distance (e.g. 10x ATR)
+    const signal = session.evaluate([...fallingWarmup, ...today], { ...PARAMS, minDistanceAtr: 10.0 });
+    assert.equal(signal, undefined, 'should reject because distance does not meet 10x ATR threshold');
+  });
 });
 

@@ -18,6 +18,7 @@ import type { EntryOrder, ExecutionEvent, ExecutionPort, ExitOrder } from '../ex
 import type { EntrySnapshot, TradeAdvisor } from '../llm/advisor.js';
 import { BarSeries, CandleBuilder } from '../market/barSeries.js';
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
+import { analyzeOptionChain, checkOptionBuyingConfluence } from '../options/chainAnalyzer.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
@@ -88,6 +89,7 @@ interface SideSlot {
   manualExit: boolean;
   /** An exit for the current position was sent and has no known outcome yet. A halted slot never resends one. */
   exitSent: boolean;
+  lastTradedFlipBarTime?: number | undefined;
 }
 
 export class UnderlyingAgent {
@@ -136,7 +138,7 @@ export class UnderlyingAgent {
       manualExit: false,
       exitSent: false,
     };
-    this.strategySession = deps.strategySession ?? new StrategySession();
+    this.strategySession = deps.strategySession ?? new StrategySession(deps.config.session.initialPosture, deps.config.strategy.enabledStrategies);
     this.queue = new SerialQueue((error) => {
       this.deps.logger.error('agent task failed', { underlying: this.symbol, error: describe(error) });
     });
@@ -152,6 +154,8 @@ export class UnderlyingAgent {
       entryStartMinute: session.entryStartMinute,
       entryEndMinute: session.entryEndMinute,
       sessionOpenMinute: NSE_SESSION_OPEN_MINUTE,
+      maxBarsSinceFlip: strategy.maxBarsSinceFlip,
+      minDistanceAtr: strategy.minDistanceAtr,
     };
     this.dailyLossLimitInr = (deps.config.capital.inr * deps.config.capital.maxDailyLossPct) / 100;
   }
@@ -233,6 +237,12 @@ export class UnderlyingAgent {
   seedBars(history: readonly Candle[]): void {
     for (const bar of history) {
       this.bars.upsert(bar);
+    }
+  }
+
+  evaluateWarmupSignal(): void {
+    if (this.bars.length > 0) {
+      this.queue.run(() => this.evaluateSignal());
     }
   }
 
@@ -461,6 +471,10 @@ export class UnderlyingAgent {
     if (signal !== undefined) {
       const slot = this.slotForDirection(signal.direction);
       if (slot.fsm.state === 'IDLE') {
+        if (signal.flipBarTime !== undefined && slot.lastTradedFlipBarTime === signal.flipBarTime) {
+          return;
+        }
+        slot.lastTradedFlipBarTime = signal.flipBarTime;
         await this.processSignal(signal, slot);
       }
     }
@@ -640,6 +654,7 @@ export class UnderlyingAgent {
     this.lastDrop = { code, detail, at: this.now() };
     if (slot !== undefined && slot.fsm.can('SIGNAL_DROPPED')) {
       slot.fsm.dispatch('SIGNAL_DROPPED');
+      slot.lastTradedFlipBarTime = undefined;
     }
     this.record('signal_dropped', { code, detail });
     this.deps.logger.info('signal dropped', { underlying: this.symbol, code, detail });
@@ -669,6 +684,13 @@ export class UnderlyingAgent {
     }
 
     const chain = await market.optionChain(spec.spot, expiry);
+    if (config.chainAnalysis.enabled) {
+      const analysis = analyzeOptionChain(chain, signal.spot);
+      const confluence = checkOptionBuyingConfluence(analysis, signal.direction, config.chainAnalysis.minHeadroomPts);
+      if (!confluence.ok) {
+        return fail('OPTION_CHAIN_RESISTANCE', confluence.reason ?? 'option chain resistance detected');
+      }
+    }
     const contracts = await market.optionContracts(this.symbol, spec.optionSegment);
     const selection = selectContract({
       spot: signal.spot,

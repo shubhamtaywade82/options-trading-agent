@@ -72,8 +72,23 @@ async function main(): Promise<void> {
         throw new Error(`run ${runId} is not open; nothing was acknowledged`);
       }
       console.log(`acknowledged run ${runId}`);
+    } else if (command === 'reset-wallet') {
+      const clientId = argument('--client') ?? process.env['DHAN_CLIENT_ID'];
+      if (!clientId) {
+        throw new Error('--client or DHAN_CLIENT_ID is required');
+      }
+      const rawAmount = argument('--amount') ?? process.env['CAPITAL_INR'] ?? '1000000';
+      const amount = Number(rawAmount);
+      if (process.argv.includes('--clean')) {
+        await pool.query('TRUNCATE paper_wallets CASCADE');
+      }
+      await pool.query(
+        'INSERT INTO paper_wallets (client_id, initial_inr, balance_inr) VALUES ($1, $2, $2) ON CONFLICT (client_id) DO UPDATE SET initial_inr = $2, balance_inr = $2, updated_at = now()',
+        [clientId, amount],
+      );
+      console.log(`paper wallet for client ${clientId} reset to ${amount} INR${process.argv.includes('--clean') ? ' (clean slate)' : ''}`);
     } else {
-      throw new Error('usage: db.ts migrate | status | acknowledge --run <runId> --reason "<text>"');
+      throw new Error('usage: db.ts migrate | status | acknowledge --run <runId> --reason "<text>" | reset-wallet [--client <id>] [--amount <inr>] [--clean]');
     }
   } catch (error) {
     console.error(`db: ${errorMessage(error, secrets)}`);

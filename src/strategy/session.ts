@@ -1,5 +1,5 @@
 import type { Candle, Direction, Signal } from '../domain/types.js';
-import { ema, superTrend } from '../market/indicators.js';
+import { ema, superTrend, adaptiveSuperTrend } from '../market/indicators.js';
 import { istParts } from '../time/ist.js';
 import { evaluateOrbSupertrend, openingRangeCross, sessionRange, type OrbSupertrendParams } from './orbSupertrend.js';
 
@@ -36,10 +36,15 @@ export interface StrategySessionView {
  */
 export class StrategySession {
   private posture: StrategyPosture;
-  private readonly enabled = new Set<StrategyId>(STRATEGY_CATALOG.map((row) => row.id));
+  private readonly enabled: Set<StrategyId>;
 
-  constructor(initial: StrategyPosture = 'aligned') {
+  constructor(initial: StrategyPosture = 'aligned', initialStrategies?: readonly StrategyId[]) {
     this.posture = initial;
+    this.enabled = new Set<StrategyId>(
+      initialStrategies !== undefined && initialStrategies.length > 0
+        ? initialStrategies
+        : STRATEGY_CATALOG.map((row) => row.id),
+    );
   }
 
   cyclePosture(): string {
@@ -154,12 +159,19 @@ function plainSignal(params: OrbSupertrendParams, bar: Candle, direction: Direct
 
 function trendSignal(bars: readonly Candle[], params: OrbSupertrendParams, posture: StrategyPosture): Signal | undefined {
   const last = bars[bars.length - 1];
-  const trend = superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
+  const trend = posture === 'scout'
+    ? adaptiveSuperTrend(bars, params.supertrendPeriod, params.supertrendMultiplier)
+    : superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
   if (last === undefined || trend === undefined || !inWindow(last, params)) {
     return undefined;
   }
   if (posture === 'scout') {
-    return trend.flipped ? trendSignalOf(params, last, trend.trend, 'flip') : undefined;
+    const maxBars = params.maxBarsSinceFlip ?? 0;
+    const minDistance = params.minDistanceAtr ?? 0.5;
+    if ((maxBars > 0 && trend.barsSinceFlip > maxBars) || trend.distanceAtr < minDistance) {
+      return undefined;
+    }
+    return trendSignalOf(params, last, trend, 'adaptive flip');
   }
   const closes = bars.map((bar) => bar.close);
   const fast = ema(closes, params.emaFast);
@@ -169,7 +181,7 @@ function trendSignal(bars: readonly Candle[], params: OrbSupertrendParams, postu
     return undefined;
   }
   if (posture === 'aligned') {
-    return trend.flipped ? trendSignalOf(params, last, trend.trend, 'flip with EMA') : undefined;
+    return trend.flipped ? trendSignalOf(params, last, trend, 'flip with EMA') : undefined;
   }
   return trendConfirmed(bars, params, last, trend);
 }
@@ -178,7 +190,7 @@ function trendConfirmed(
   bars: readonly Candle[],
   params: OrbSupertrendParams,
   last: Candle,
-  trend: { trend: 'UP' | 'DOWN'; flipped: boolean },
+  trend: { trend: 'UP' | 'DOWN'; flipped: boolean; barsSinceFlip: number; distanceAtr: number; flipBarTime: number },
 ): Signal | undefined {
   const prior = superTrend(bars.slice(0, -1), params.supertrendPeriod, params.supertrendMultiplier);
   if (prior === undefined || !prior.flipped || prior.trend !== trend.trend || trend.flipped) {
@@ -191,16 +203,24 @@ function trendConfirmed(
     return undefined;
   }
   const beyond = trend.trend === 'UP' ? last.close > range.high : last.close < range.low;
-  return beyond ? trendSignalOf(params, last, trend.trend, 'flip held beyond the range') : undefined;
+  return beyond ? trendSignalOf(params, last, trend, 'flip held beyond the range') : undefined;
 }
 
-function trendSignalOf(params: OrbSupertrendParams, bar: Candle, trend: 'UP' | 'DOWN', detail: string): Signal {
-  const direction: Direction = trend === 'UP' ? 'BULLISH' : 'BEARISH';
+function trendSignalOf(
+  params: OrbSupertrendParams,
+  bar: Candle,
+  trend: { trend: 'UP' | 'DOWN'; barsSinceFlip: number; distanceAtr: number; flipBarTime: number },
+  detail: string,
+): Signal {
+  const direction: Direction = trend.trend === 'UP' ? 'BULLISH' : 'BEARISH';
+  const recency = trend.barsSinceFlip === 0 ? 'exact flip' : `flip +${trend.barsSinceFlip}b`;
+  const dist = `dist ${trend.distanceAtr.toFixed(2)}x ATR`;
   return {
     underlying: params.underlying,
     direction,
     barTime: bar.time,
     spot: bar.close,
-    reasons: [`Trend flip (${detail})`, `SuperTrend ${trend}`],
+    reasons: [`Trend flip (${detail}: ${recency}, ${dist})`, `SuperTrend ${trend.trend}`],
+    flipBarTime: trend.flipBarTime,
   };
 }

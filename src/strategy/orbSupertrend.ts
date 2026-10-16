@@ -14,6 +14,8 @@ export interface OrbSupertrendParams {
   readonly entryEndMinute: number;
   /** Opening range begins at the first regular-session minute. */
   readonly sessionOpenMinute: number;
+  readonly maxBarsSinceFlip?: number | undefined;
+  readonly minDistanceAtr?: number | undefined;
 }
 
 /** High and low of the bars on one IST date that open within [fromMinute, toMinute). Undefined when there are none. */
