@@ -143,7 +143,7 @@ export class CockpitChainWatch {
     try {
       const today = istParts(this.now()).date;
       const expiries = await this.market.listExpiries(spec.spot);
-      const expiry = pickExpiry(expiries, today, this.config.contract.minDaysToExpiry);
+      const expiry = pickExpiry(expiries, today, this.config.contract.minDaysToExpiry, this.config.contract.maxDaysToExpiry);
       if (expiry === undefined) {
         this.error = `no expiry ≥ ${this.config.contract.minDaysToExpiry} day(s) out`;
         this.cache = undefined;

@@ -104,4 +104,13 @@ describe('pickExpiry', () => {
     assert.equal(pickExpiry(expiries, '2026-10-12', 2), '2026-10-15');
     assert.equal(pickExpiry(expiries, '2026-10-12', 30), undefined);
   });
+
+  it('respects maxDaysToExpiry ceiling to filter out sluggish distant contracts', () => {
+    const expiries = ['2026-10-20', '2026-10-13', '2026-10-15'];
+    // 2026-10-12 to 2026-10-13 is 1 day, 2026-10-15 is 3 days, 2026-10-20 is 8 days
+    assert.equal(pickExpiry(expiries, '2026-10-12', 0, 4), '2026-10-13');
+    assert.equal(pickExpiry(expiries, '2026-10-12', 2, 4), '2026-10-15');
+    assert.equal(pickExpiry(expiries, '2026-10-12', 5, 8), '2026-10-20');
+    assert.equal(pickExpiry(expiries, '2026-10-12', 5, 7), undefined);
+  });
 });

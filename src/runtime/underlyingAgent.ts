@@ -542,9 +542,19 @@ export class UnderlyingAgent {
   }
 
   private async prepareSafely(signal: Signal, slot: SideSlot): Promise<Preparation> {
+    if (this.shuttingDown) {
+      return { ok: false, code: 'ENTRY_BLOCKED', detail: 'shutdown requested' };
+    }
     try {
-      return await this.prepareEntry(signal, slot);
+      const prepared = await this.prepareEntry(signal, slot);
+      if (this.shuttingDown) {
+        return { ok: false, code: 'ENTRY_BLOCKED', detail: 'shutdown requested' };
+      }
+      return prepared;
     } catch (error) {
+      if (this.shuttingDown) {
+        return { ok: false, code: 'ENTRY_BLOCKED', detail: 'shutdown requested' };
+      }
       return { ok: false, code: 'DATA_UNAVAILABLE', detail: describe(error) };
     }
   }
@@ -683,9 +693,12 @@ export class UnderlyingAgent {
     }
 
     const expiries = await market.listExpiries(spec.spot);
-    const expiry = pickExpiry(expiries, today.date, config.contract.minDaysToExpiry);
+    const expiry = pickExpiry(expiries, today.date, config.contract.minDaysToExpiry, config.contract.maxDaysToExpiry);
     if (expiry === undefined) {
-      return fail('NO_EXPIRY', `no expiry at least ${config.contract.minDaysToExpiry} day(s) out`);
+      const window = config.contract.maxDaysToExpiry > 0
+        ? `between ${config.contract.minDaysToExpiry} and ${config.contract.maxDaysToExpiry} day(s) out`
+        : `at least ${config.contract.minDaysToExpiry} day(s) out`;
+      return fail('NO_EXPIRY', `no expiry ${window}`);
     }
 
     const chain = await market.optionChain(spec.spot, expiry);

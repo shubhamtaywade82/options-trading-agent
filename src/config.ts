@@ -75,6 +75,7 @@ export interface AgentConfig {
   };
   readonly contract: {
     readonly minDaysToExpiry: number;
+    readonly maxDaysToExpiry: number;
     readonly expiryDayEntryCutoffMinute: number;
     /** 0 = ATM, positive = further OTM, negative = further ITM. */
     readonly strikeOffsetSteps: number;
@@ -309,6 +310,8 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
+  'contract.min_days_to_expiry': 'MIN_DAYS_TO_EXPIRY',
+  'contract.max_days_to_expiry': 'MAX_DAYS_TO_EXPIRY',
   'timing.entry_start': 'ENTRY_START',
   'timing.entry_end': 'ENTRY_END',
   'timing.expiry_day_cutoff': 'EXPIRY_DAY_ENTRY_CUTOFF',
@@ -435,6 +438,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
     },
     contract: {
       minDaysToExpiry: number(env, 'MIN_DAYS_TO_EXPIRY', 0, { min: 0, max: 60, integer: true }),
+      maxDaysToExpiry: number(env, 'MAX_DAYS_TO_EXPIRY', 4, { min: 0, max: 60, integer: true }),
       expiryDayEntryCutoffMinute: minuteOfDay(env, 'EXPIRY_DAY_ENTRY_CUTOFF', '13:30'),
       strikeOffsetSteps: number(env, 'STRIKE_OFFSET_STEPS', 0, { min: -10, max: 10, integer: true }),
       maxSpreadPct: number(env, 'MAX_SPREAD_PCT', 2, { min: 0.01, max: 20 }),

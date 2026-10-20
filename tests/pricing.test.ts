@@ -66,6 +66,15 @@ describe('calculateTrailingStop', () => {
     const stop = calculateTrailingStop({ ...base, currentStopPrice: 130, highWaterMark: 120 });
     assert.equal(stop, 130, 'stop never moves down');
   });
+
+  it('moves stop to breakeven at fractional R (0.8R) and steps with tighter jump', () => {
+    const tight = { ...base, breakevenAtRr: 0.8, trailingJump: 8 };
+    // initialRisk = 30; 0.8R = 24 -> breakeven threshold = 124.
+    assert.equal(calculateTrailingStop({ ...tight, highWaterMark: 123 }), 70);
+    assert.equal(calculateTrailingStop({ ...tight, highWaterMark: 124 }), 100);
+    assert.equal(calculateTrailingStop({ ...tight, highWaterMark: 132 }), 108);
+    assert.equal(calculateTrailingStop({ ...tight, highWaterMark: 140 }), 116);
+  });
 });
 
 describe('sizePosition', () => {

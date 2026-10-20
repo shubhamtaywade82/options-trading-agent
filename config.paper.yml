@@ -50,10 +50,15 @@ strategy:
   bar_minutes: 5               # 5-minute bars
   supertrend_period: 10        # Base ATR period for adaptive SuperTrend
   supertrend_multiplier: 3.0   # Base multiplier (dynamically scaled by market efficiency in Scout)
-  max_bars_since_flip: 0       # 0 = unlimited bars since flip in Scout; lets SuperTrend enter active trends
+  max_bars_since_flip: 4       # Enters within 4 bars (20m) of flip; mature trends enter via continuation or momentum
   min_distance_atr: 0.2        # Minimum distance from ST line (in ATR multiples) to enter
   ema_fast: 9
   ema_slow: 21
+
+# Contract selection & expiry constraints
+contract:
+  min_days_to_expiry: 0
+  max_days_to_expiry: 4        # Capped at 4 DTE: avoids sluggish, low-delta 8+ DTE contracts
 
 # Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
 chain_analysis:
@@ -79,11 +84,11 @@ limits:
 # Exit Strategy & Targets
 exits:
   stop_loss_pct: 30            # 30% stop loss
-  target_rr: 2.0               # 1:2 Risk to Reward (e.g. entry ₹120 -> SL ₹85, TP ₹190)
-  runner_mode: false           # false = realistic achievable TP (1:2 R:R); true = uncapped runner
+  target_rr: 1.5               # 1:1.5 Risk to Reward (+45% target on premium; higher probability of hitting than 2.0R)
+  runner_mode: false           # false = realistic achievable TP; true = uncapped runner
   max_hold_minutes: 90         # 90 min hold: lets trend develop, preventing premature lunchtime time-stop exits
-  trailing_jump_pct: 15        # Step up stop loss by 15% as price advances
-  breakeven_at_rr: 1.0         # Move SL to entry breakeven at 1R profit
+  trailing_jump_pct: 8         # Step up stop loss by 8% as price advances (locks in profit tighter)
+  breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+24% gain)
 
 # Paper Trading Venue Settings
 paper:

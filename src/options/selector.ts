@@ -180,13 +180,21 @@ export function selectContract(input: SelectionInput): SelectionResult {
 }
 
 /**
- * Earliest expiry at least `minDaysToExpiry` calendar days away (IST dates).
- * `expiries` must be `YYYY-MM-DD` strings; anything else is ignored.
+ * Earliest expiry between `minDaysToExpiry` and optional `maxDaysToExpiry` calendar days away.
+ * A ceiling prevents buying sluggish, high-decay contracts (e.g. 8+ DTE) on intraday momentum setups.
  */
-export function pickExpiry(expiries: readonly string[], todayKey: string, minDaysToExpiry: number): string | undefined {
+export function pickExpiry(
+  expiries: readonly string[],
+  todayKey: string,
+  minDaysToExpiry: number,
+  maxDaysToExpiry?: number,
+): string | undefined {
   const eligible = expiries
     .filter((expiry) => /^\d{4}-\d{2}-\d{2}$/.test(expiry))
-    .filter((expiry) => dayDifference(todayKey, expiry) >= minDaysToExpiry)
+    .filter((expiry) => {
+      const days = dayDifference(todayKey, expiry);
+      return days >= minDaysToExpiry && (maxDaysToExpiry === undefined || maxDaysToExpiry <= 0 || days <= maxDaysToExpiry);
+    })
     .sort();
   return eligible[0];
 }
