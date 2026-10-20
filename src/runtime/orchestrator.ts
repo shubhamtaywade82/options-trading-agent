@@ -195,6 +195,7 @@ export class Orchestrator {
     this.unsubscribeTicks = this.services.feed.onTick((tick) => this.route(tick));
     this.unsubscribeEvents = this.services.execution.onEvent((event) => {
       this.agents.get(event.underlying)?.onExecutionEvent(event);
+      this.notifyView();
     });
     this.services.execution.start?.();
     await this.services.feed.start();
@@ -314,16 +315,41 @@ export class Orchestrator {
     this.services.logger.info('agent stopped', { kind, flat });
   }
 
+  private allocatedCapitalInr(): number {
+    let total = 0;
+    for (const agent of this.agents.values()) {
+      for (const pos of agent.openPositions) {
+        total += pos.averagePrice * pos.quantity;
+      }
+    }
+    return total;
+  }
+
+  private computeBalances(realizedPnl: number, dayPnl: number) {
+    const initial = this.config.capital.inr;
+    const current = Number((initial + realizedPnl).toFixed(2));
+    const allocated = Number(this.allocatedCapitalInr().toFixed(2));
+    return {
+      initialCapitalInr: initial,
+      currentBalanceInr: current,
+      allocatedBalanceInr: allocated,
+      availableBalanceInr: Math.max(0, Number((current - allocated).toFixed(2))),
+      realTimeBalanceInr: Number((initial + dayPnl).toFixed(2)),
+    };
+  }
+
   /** Read-only state for the operator cockpit. Building it never changes trading state. */
   snapshot(nowMs: number = this.now()): CockpitSnapshot {
     const day = this.book.snapshot();
+    const balances = this.computeBalances(day.realizedPnlInr, day.dayPnlInr);
     return {
       at: nowMs,
       mode: this.config.mode,
       phase: this.phase,
       phaseDetail: this.phaseDetail,
-      capitalInr: this.config.capital.inr,
-      riskBudgetInr: (this.config.capital.inr * this.config.capital.maxRiskPerTradePct) / 100,
+      capitalInr: balances.initialCapitalInr,
+      ...balances,
+      riskBudgetInr: (balances.initialCapitalInr * this.config.capital.maxRiskPerTradePct) / 100,
       dailyLossLimitInr: this.dailyLossLimitInr,
       maxTradesPerDay: this.config.capital.maxTradesPerDay,
       maxOpenPositions: this.config.capital.maxOpenPositions,
@@ -331,16 +357,7 @@ export class Orchestrator {
       staleMs: this.config.feed.staleMs,
       contractMaxSpreadPct: this.config.contract.maxSpreadPct,
       contractMinOpenInterest: this.config.contract.minOpenInterest,
-      day: {
-        dayKey: day.dayKey,
-        realizedPnlInr: day.realizedPnlInr,
-        unrealizedPnlInr: day.unrealizedPnlInr,
-        dayPnlInr: day.dayPnlInr,
-        tradesToday: day.tradesToday,
-        openUnderlyings: day.openUnderlyings,
-        openPositions: day.openPositions,
-        killSwitchReason: day.killSwitchReason,
-      },
+      day,
       underlyings: this.specs.flatMap((spec) => {
         const agent = this.agents.get(spec.symbol);
         return agent === undefined ? [] : [agent.view(nowMs)];

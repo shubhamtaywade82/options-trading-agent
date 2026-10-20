@@ -132,6 +132,11 @@ export interface CockpitSnapshot {
   readonly phase: 'IDLE' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED';
   readonly phaseDetail: string | undefined;
   readonly capitalInr: number;
+  readonly initialCapitalInr: number;
+  readonly currentBalanceInr: number;
+  readonly availableBalanceInr: number;
+  readonly allocatedBalanceInr: number;
+  readonly realTimeBalanceInr: number;
   readonly riskBudgetInr: number;
   readonly dailyLossLimitInr: number;
   readonly maxTradesPerDay: number;

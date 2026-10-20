@@ -102,8 +102,9 @@ describe('StrategySession', () => {
 
   it('returns undefined when all strategies are disabled', () => {
     const session = new StrategySession('aligned');
-    session.toggle('range');
-    session.toggle('trend');
+    for (const strat of session.view().strategies) {
+      if (strat.on) session.toggle(strat.id);
+    }
     const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
     const bars = [...risingWarmup(), ...today];
     assert.equal(session.evaluate(bars, PARAMS), undefined);
@@ -149,6 +150,9 @@ describe('StrategySession', () => {
     assert.deepEqual(session.view().strategies.map((s) => ({ id: s.id, on: s.on })), [
       { id: 'range', on: false },
       { id: 'trend', on: true },
+      { id: 'ema_cross', on: false },
+      { id: 'momentum', on: false },
+      { id: 'continuation', on: false },
     ]);
 
     const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
@@ -189,5 +193,30 @@ describe('StrategySession', () => {
     const signal = session.evaluate([...fallingWarmup, ...today], { ...PARAMS, minDistanceAtr: 10.0 });
     assert.equal(signal, undefined, 'should reject because distance does not meet 10x ATR threshold');
   });
+
+  it('in scout posture, fires on momentum break of recent 3-bar high', () => {
+    const session = new StrategySession('scout', ['momentum']);
+    const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, () => 100));
+    // 3 bars consolidate at 100, then 4th bar breaks out to 105
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 105]);
+    const signal = session.evaluate([...warmup, ...today], PARAMS);
+    assert.ok(signal !== undefined);
+    assert.equal(signal?.strategy, 'momentum');
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /Momentum break/);
+  });
+
+  it('in scout posture, fires on trend continuation pullback bounce', () => {
+    const session = new StrategySession('scout', ['continuation']);
+    const risingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 90 + (i * 20) / 59));
+    // Pullback at 109, bounce at 112
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [108, 110, 109, 112]);
+    const signal = session.evaluate([...risingWarmup, ...today], PARAMS);
+    assert.ok(signal !== undefined);
+    assert.equal(signal?.strategy, 'continuation');
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /Trend continuation/);
+  });
 });
+
 

@@ -221,6 +221,16 @@ describe('cockpit content', () => {
     assert.match(text, /operator entry block/);
   });
 
+  it('reports the live capital and balance breakdown in the risk column', () => {
+    const text = renderOptionsCockpit(rich, { width: 170, height: 48, selected: 0, notice: undefined, logs }).map(plain).join('\n');
+    assert.match(text, /init capital\s+₹3,00,000/);
+    assert.match(text, /current bal\s+₹3,00,000/);
+    assert.match(text, /allocated\s+₹0/);
+    assert.match(text, /available\s+₹3,00,000/);
+    assert.match(text, /live equity\s+₹3,00,000/);
+    assert.match(text, /risk\/trade\s+₹3,000/);
+  });
+
   it('shows a failed start with its reason rather than an empty dashboard', () => {
     const failed = snapshot({ phase: 'FAILED', phaseDetail: 'broker reports 1 open option position(s)', underlyings: [] });
     const text = renderOptionsCockpit(failed, { width: 170, height: 48, selected: 0, notice: undefined, logs: [] }).map(plain).join('\n');

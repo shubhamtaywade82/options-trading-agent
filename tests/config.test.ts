@@ -233,13 +233,13 @@ describe('loadConfig posture and YAML loading', () => {
     assert.equal(config.capital.maxLotsPerOrder, 15);
     assert.equal(config.capital.maxTradesPerDay, 0);
     assert.equal(config.exits.cooldownSeconds, 0);
-    assert.equal(config.capital.maxOpenPositions, 2);
+    assert.equal(config.capital.maxOpenPositions, 6);
     assert.equal(config.session.entryStartMinute, 9 * 60 + 15);
     assert.equal(config.session.entryEndMinute, 15 * 60 + 10);
     assert.equal(config.exits.flattenByMinute, 15 * 60 + 15);
     assert.equal(config.ops.brokerKillSwitchOnBreach, false);
-    assert.equal(config.strategy.maxBarsSinceFlip, 2);
-    assert.equal(config.strategy.minDistanceAtr, 0.5);
+    assert.equal(config.strategy.maxBarsSinceFlip, 0);
+    assert.equal(config.strategy.minDistanceAtr, 0.2);
     assert.equal(config.chainAnalysis.enabled, true);
     assert.equal(config.chainAnalysis.minHeadroomPts, 15);
   });

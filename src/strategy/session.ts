@@ -15,6 +15,9 @@ export const POSTURE_LABELS: Record<StrategyPosture, string> = {
 export const STRATEGY_CATALOG = [
   { id: 'range', label: 'Range break' },
   { id: 'trend', label: 'Trend flip' },
+  { id: 'ema_cross', label: 'EMA cross' },
+  { id: 'momentum', label: 'Momentum break' },
+  { id: 'continuation', label: 'Trend continuation' },
 ] as const;
 
 export type StrategyId = (typeof STRATEGY_CATALOG)[number]['id'];
@@ -80,12 +83,22 @@ export class StrategySession {
       if (!this.enabled.has(row.id)) {
         continue;
       }
-      const signal = row.id === 'range' ? rangeSignal(bars, params, this.posture) : trendSignal(bars, params, this.posture);
+      const signal = this.dispatchSignal(row.id, bars, params);
       if (signal !== undefined) {
         return { ...signal, strategy: row.id };
       }
     }
     return undefined;
+  }
+
+  private dispatchSignal(id: StrategyId, bars: readonly Candle[], params: OrbSupertrendParams): Signal | undefined {
+    switch (id) {
+      case 'range': return rangeSignal(bars, params, this.posture);
+      case 'trend': return trendSignal(bars, params, this.posture);
+      case 'ema_cross': return emaCrossSignal(bars, params, this.posture);
+      case 'momentum': return momentumSignal(bars, params, this.posture);
+      case 'continuation': return continuationSignal(bars, params, this.posture);
+    }
   }
 
   private armedText(): string {
@@ -114,10 +127,9 @@ function rangeSignal(bars: readonly Candle[], params: OrbSupertrendParams, postu
 function rangeScout(bars: readonly Candle[], params: OrbSupertrendParams): Signal | undefined {
   const cross = openingRangeCross(bars, params);
   const last = bars[bars.length - 1];
-  if (cross === undefined || last === undefined) {
-    return undefined;
-  }
-  return tag(plainSignal(params, last, cross.direction, `ORB cross ${cross.level}`), 'Range break');
+  return cross === undefined || last === undefined
+    ? undefined
+    : tag(plainSignal(params, last, cross.direction, `ORB cross ${cross.level}`), 'Range break');
 }
 
 function rangeConfirmed(bars: readonly Candle[], params: OrbSupertrendParams): Signal | undefined {
@@ -147,10 +159,8 @@ function trendConfluence(bars: readonly Candle[], params: OrbSupertrendParams, d
   const closes = bars.map((bar) => bar.close);
   const fast = ema(closes, params.emaFast);
   const slow = ema(closes, params.emaSlow);
-  if (trend === undefined || fast === undefined || slow === undefined) {
-    return false;
-  }
-  return direction === 'BULLISH' ? trend.trend === 'UP' && fast > slow : trend.trend === 'DOWN' && fast < slow;
+  return trend !== undefined && fast !== undefined && slow !== undefined
+    && (direction === 'BULLISH' ? trend.trend === 'UP' && fast > slow : trend.trend === 'DOWN' && fast < slow);
 }
 
 function plainSignal(params: OrbSupertrendParams, bar: Candle, direction: Direction, detail: string): Signal {
@@ -214,13 +224,76 @@ function trendSignalOf(
 ): Signal {
   const direction: Direction = trend.trend === 'UP' ? 'BULLISH' : 'BEARISH';
   const recency = trend.barsSinceFlip === 0 ? 'exact flip' : `flip +${trend.barsSinceFlip}b`;
-  const dist = `dist ${trend.distanceAtr.toFixed(2)}x ATR`;
   return {
     underlying: params.underlying,
     direction,
     barTime: bar.time,
     spot: bar.close,
-    reasons: [`Trend flip (${detail}: ${recency}, ${dist})`, `SuperTrend ${trend.trend}`],
+    reasons: [`Trend flip (${detail}: ${recency}, dist ${trend.distanceAtr.toFixed(2)}x ATR)`, `SuperTrend ${trend.trend}`],
     flipBarTime: trend.flipBarTime,
   };
 }
+
+function emaCrossSignal(bars: readonly Candle[], params: OrbSupertrendParams, posture: StrategyPosture): Signal | undefined {
+  const last = bars[bars.length - 1];
+  if (last === undefined || !inWindow(last, params) || bars.length < params.emaSlow + 2) return undefined;
+  const closes = bars.map((b) => b.close);
+  const fast = ema(closes, params.emaFast);
+  const slow = ema(closes, params.emaSlow);
+  const prevFast = ema(closes.slice(0, -1), params.emaFast);
+  const prevSlow = ema(closes.slice(0, -1), params.emaSlow);
+  if (fast === undefined || slow === undefined || prevFast === undefined || prevSlow === undefined) return undefined;
+  const bullish = fast > slow && prevFast <= prevSlow;
+  const bearish = fast < slow && prevFast >= prevSlow;
+  if (!bullish && !bearish) return undefined;
+  const direction: Direction = bullish ? 'BULLISH' : 'BEARISH';
+  if (posture === 'scout') {
+    return tag(plainSignal(params, last, direction, `EMA${params.emaFast} cross EMA${params.emaSlow} (${direction})`), 'EMA cross');
+  }
+  const trend = superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
+  if (trend === undefined || (bullish ? trend.trend !== 'UP' : trend.trend !== 'DOWN')) return undefined;
+  return tag(plainSignal(params, last, direction, `EMA cross with SuperTrend ${trend.trend}`), 'EMA cross');
+}
+
+function momentumSignal(bars: readonly Candle[], params: OrbSupertrendParams, posture: StrategyPosture): Signal | undefined {
+  const last = bars[bars.length - 1];
+  const prev = bars[bars.length - 2];
+  if (last === undefined || prev === undefined || !inWindow(last, params) || bars.length < 5) return undefined;
+  const lookback = bars.slice(-4, -1);
+  const high = Math.max(...lookback.map((b) => b.high));
+  const low = Math.min(...lookback.map((b) => b.low));
+  const bullish = last.close > high && prev.close <= high;
+  const bearish = last.close < low && prev.close >= low;
+  if (!bullish && !bearish) return undefined;
+  const direction: Direction = bullish ? 'BULLISH' : 'BEARISH';
+  if (posture === 'scout') {
+    return tag(plainSignal(params, last, direction, `3-bar ${bullish ? 'high ' + high : 'low ' + low} break`), 'Momentum break');
+  }
+  const trend = superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
+  if (trend === undefined || (bullish ? trend.trend !== 'UP' : trend.trend !== 'DOWN')) return undefined;
+  return tag(plainSignal(params, last, direction, `Momentum break with SuperTrend ${trend.trend}`), 'Momentum break');
+}
+
+function continuationSignal(bars: readonly Candle[], params: OrbSupertrendParams, posture: StrategyPosture): Signal | undefined {
+  const last = bars[bars.length - 1];
+  const prev = bars[bars.length - 2];
+  if (last === undefined || prev === undefined || !inWindow(last, params) || bars.length < 5) return undefined;
+  const trend = posture === 'scout'
+    ? adaptiveSuperTrend(bars, params.supertrendPeriod, params.supertrendMultiplier)
+    : superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
+  if (trend === undefined || trend.barsSinceFlip < 1) return undefined;
+  const bullish = trend.trend === 'UP' && prev.close < last.close && last.close > prev.high;
+  const bearish = trend.trend === 'DOWN' && prev.close > last.close && last.close < prev.low;
+  if (!bullish && !bearish) return undefined;
+  const direction: Direction = bullish ? 'BULLISH' : 'BEARISH';
+  if (posture === 'scout') {
+    return tag(plainSignal(params, last, direction, `Pullback bounce in ${trend.trend} trend`), 'Trend continuation');
+  }
+  const closes = bars.map((b) => b.close);
+  const fast = ema(closes, params.emaFast);
+  const slow = ema(closes, params.emaSlow);
+  const emaAgrees = fast !== undefined && slow !== undefined && (bullish ? fast > slow : fast < slow);
+  if (!emaAgrees) return undefined;
+  return tag(plainSignal(params, last, direction, `Trend continuation (${trend.trend} + EMA)`), 'Trend continuation');
+}
+

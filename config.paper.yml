@@ -22,7 +22,7 @@ session:
   postures:
     scout:
       mode: aggressive
-      description: "Fastest entries: triggers ORB breakout on immediate touch/cross and SuperTrend flip without requiring EMA agreement."
+      description: "Fastest entries: triggers ORB breakout, SuperTrend flip, EMA cross, momentum break, or trend continuation without requiring multi-indicator agreement."
       orb_requires_close_outside: false
       trend_requires_ema_filter: false
 
@@ -42,12 +42,18 @@ session:
 # Strategy Selection & Indicators
 strategy:
   active_strategies:
-    - trend                    # Only take SuperTrend flips (disables Range break)
+    - range                    # Opening Range Breakout
+    - trend                    # SuperTrend flip
+    - ema_cross                # Fast / slow EMA crossover
+    - momentum                 # 3-bar high/low momentum breakout
+    - continuation             # Pullback bounce in active trend
   bar_minutes: 5               # 5-minute bars
   supertrend_period: 10        # Base ATR period for adaptive SuperTrend
   supertrend_multiplier: 3.0   # Base multiplier (dynamically scaled by market efficiency in Scout)
-  max_bars_since_flip: 2       # Only take FRESH flips (within 2 candles of flip); prevents buying exhausted trends
-  min_distance_atr: 0.5        # Minimum distance from ST line (in ATR multiples) to enter
+  max_bars_since_flip: 0       # 0 = unlimited bars since flip in Scout; lets SuperTrend enter active trends
+  min_distance_atr: 0.2        # Minimum distance from ST line (in ATR multiples) to enter
+  ema_fast: 9
+  ema_slow: 21
 
 # Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
 chain_analysis:
@@ -61,13 +67,13 @@ capital:
   max_daily_loss_pct: 100.0    # 100% daily loss allowance (must be >= max_risk_per_trade_pct)
   max_lots_per_order: 15       # Allows full ₹20k deployment without 1-lot cap
 
-# Risk Limits: no hardblocks so the system can take as many trades as possible
+# Risk Limits: allow all underlyings to open positions concurrently
 limits:
   max_trades_per_day: 0        # 0 = unlimited trades per day (no trade count hardblock)
   cooldown_seconds: 0          # 0 = no cooldown between exits and new entries
-  max_open_positions: 2        # Max 2 concurrent positions across underlyings to prevent correlated overexposure
-  max_positions_per_underlying: 1
-  max_positions_per_side: 2
+  max_open_positions: 6        # Max 6 concurrent positions so all underlyings can take positions
+  max_positions_per_underlying: 2 # Up to 2 positions per underlying (1 CE + 1 PE)
+  max_positions_per_side: 5    # Up to 5 positions on one side across all underlyings
   broker_kill_switch_on_breach: false # Avoids tripping broker kill switch during paper runs
 
 # Exit Strategy & Targets

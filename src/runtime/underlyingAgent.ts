@@ -90,6 +90,7 @@ interface SideSlot {
   /** An exit for the current position was sent and has no known outcome yet. A halted slot never resends one. */
   exitSent: boolean;
   lastTradedFlipBarTime?: number | undefined;
+  lastTradedBarTime?: number | undefined;
 }
 
 export class UnderlyingAgent {
@@ -474,7 +475,11 @@ export class UnderlyingAgent {
         if (signal.flipBarTime !== undefined && slot.lastTradedFlipBarTime === signal.flipBarTime) {
           return;
         }
+        if (slot.lastTradedBarTime === signal.barTime) {
+          return;
+        }
         slot.lastTradedFlipBarTime = signal.flipBarTime;
+        slot.lastTradedBarTime = signal.barTime;
         await this.processSignal(signal, slot);
       }
     }

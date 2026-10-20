@@ -373,34 +373,52 @@ function riskBar(lossUsedPct: number, cells: number): string {
   return color('█'.repeat(filled)) + dim('░'.repeat(cells - filled));
 }
 
+function capitalLines(snapshot: CockpitSnapshot, width: number): string[] {
+  const initCap = snapshot.initialCapitalInr ?? snapshot.capitalInr;
+  const currentBal = snapshot.currentBalanceInr ?? initCap;
+  const realTimeBal = snapshot.realTimeBalanceInr ?? (initCap + snapshot.day.dayPnlInr);
+  const eqColor = realTimeBal >= initCap ? green : red;
+  return [
+    fit(`init capital  ${formatInrWhole(initCap)}`, width),
+    fit(`current bal   ${formatInrWhole(currentBal)}`, width),
+    fit(`allocated     ${formatInrWhole(snapshot.allocatedBalanceInr ?? 0)}`, width),
+    fit(`available     ${formatInrWhole(snapshot.availableBalanceInr ?? initCap)}`, width),
+    fit(`live equity   ${eqColor(formatInrWhole(realTimeBal))}`, width),
+    fit(`risk/trade    ${formatInrWhole(snapshot.riskBudgetInr)}`, width),
+  ];
+}
+
+function cooldownLines(snapshot: CockpitSnapshot, width: number): string[] {
+  return snapshot.underlyings
+    .filter((agent) => agent.cooldownUntil !== undefined && agent.cooldownUntil > snapshot.at)
+    .map((agent) => {
+      const remaining = Math.ceil(((agent.cooldownUntil ?? 0) - snapshot.at) / 1000);
+      const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
+      const ss = String(remaining % 60).padStart(2, '0');
+      return fit(warn(`cooldown ${agent.symbol} ${mm}:${ss}`), width);
+    });
+}
+
 function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
   const day = snapshot.day;
   const lossUsedPct = day.dayPnlInr < 0 && snapshot.dailyLossLimitInr > 0 ? (-day.dayPnlInr / snapshot.dailyLossLimitInr) * 100 : 0;
   const openCount = day.openPositions ?? day.openUnderlyings.length;
-  const lines: string[] = [
+  const tradesStr = snapshot.maxTradesPerDay > 0
+    ? (day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`)
+    : `${day.tradesToday} (unlimited)`;
+  return [
     fit(cyanBold(`DAY ${day.dayKey}`), width),
     fit(`P&L ${formatSignedInr(day.dayPnlInr)}`, width),
     fit(`  realised ${formatSignedInr(day.realizedPnlInr)}`, width),
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
     fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
-    fit(
-      `trades ${snapshot.maxTradesPerDay > 0 ? (day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday} (unlimited)`}  open ${openCount}/${snapshot.maxOpenPositions}`,
-      width,
-    ),
-    fit(`capital ${formatInrWhole(snapshot.capitalInr)}`, width),
-    fit(`risk/trade ${formatInrWhole(snapshot.riskBudgetInr)}`, width),
+    fit(`trades ${tradesStr}  open ${openCount}/${snapshot.maxOpenPositions}`, width),
+    ...capitalLines(snapshot, width),
     ...(day.killSwitchReason === undefined
       ? [fit(`kill switch ${green('off')}`, width)]
       : [fit(`kill switch ${red('ON')}`, width), fit(dim(`  ${day.killSwitchReason}`), width)]),
+    ...cooldownLines(snapshot, width),
   ];
-  const cooling = snapshot.underlyings.filter((agent) => agent.cooldownUntil !== undefined && agent.cooldownUntil > snapshot.at);
-  for (const agent of cooling) {
-    const remaining = Math.ceil(((agent.cooldownUntil ?? 0) - snapshot.at) / 1000);
-    const mm = String(Math.floor(remaining / 60)).padStart(2, '0');
-    const ss = String(remaining % 60).padStart(2, '0');
-    lines.push(fit(warn(`cooldown ${agent.symbol} ${mm}:${ss}`), width));
-  }
-  return lines;
 }
 
 function table(snapshot: CockpitSnapshot, options: CockpitOptions, layout: CockpitLayout): string[] {

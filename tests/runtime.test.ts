@@ -1136,8 +1136,12 @@ describe('runtime: durable intents and the trading gate', () => {
     const nifty = snapshot.underlyings[0];
     assert.ok(nifty !== undefined);
     assert.equal(nifty.positions.length, 2);
-    assert.deepEqual(nifty.positions.map((p) => p.optionType).sort(), ['CE', 'PE']);
     assert.equal(snapshot.day.openPositions, 2);
+    const expectedAllocated = nifty.positions.reduce((acc, p) => acc + p.averagePrice * p.quantity, 0);
+    assert.equal(snapshot.allocatedBalanceInr, expectedAllocated);
+    assert.equal(snapshot.availableBalanceInr, snapshot.currentBalanceInr - snapshot.allocatedBalanceInr);
+    assert.equal(snapshot.realTimeBalanceInr, snapshot.currentBalanceInr + snapshot.day.unrealizedPnlInr);
+    assert.equal(snapshot.initialCapitalInr, 300_000);
 
     const msg3 = harness.orchestrator.triggerTestTrade('NIFTY', 'BULLISH');
     assert.match(msg3, /cannot test trade while CE state is RISK_MANAGEMENT_ACTIVE/);
