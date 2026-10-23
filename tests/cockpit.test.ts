@@ -274,3 +274,30 @@ describe('cockpit helpers', () => {
     assert.match(plain(formatSignedInr(83.75)), /^\+₹83\.75$/);
   });
 });
+
+describe('cockpit: context and giveback', () => {
+  const render = (shot: ReturnType<typeof snapshot>) =>
+    plain(renderOptionsCockpit(shot, { width: 200, height: 50, selected: 0, notice: undefined, logs: [] }).join('\n'));
+
+  it('should show day trend, regime and the last structure shift for each underlying', () => {
+    const context = {
+      dayTrend: 'BEARISH' as const,
+      dayMoveAtr: -4.4,
+      regime: 'RANGING' as const,
+      efficiency: 0.18,
+      structure: { trend: 'BULLISH' as const, lastSwingHigh: 1, lastSwingLow: 1, shift: { direction: 'BULLISH' as const, barTime: istEpoch(SESSION_DAY, '13:35'), barsAgo: 1 } },
+    };
+    const screen = render(snapshot({ underlyings: [agentView({ symbol: 'NIFTY', context })] }));
+    assert.match(screen, /day↓-4\.4 {2}RANGE 0\.18 {2}struct↑ MSS↑ 13:35/);
+  });
+
+  it('should show how much of the day peak has been given back, and warn when there is no daily stop', () => {
+    const base = snapshot();
+    const screen = render(
+      snapshot({ dayPeakPnlInr: 29_505.52, dailyLossLimitInr: 2_000_000, day: { ...base.day, dayPnlInr: -31_364.41, realizedPnlInr: -31_364.41 } }),
+    );
+    assert.match(screen, /peak \+₹29,506/);
+    assert.match(screen, /gave back ₹60,870 \(206%\)/);
+    assert.match(screen, /no daily stop/);
+  });
+});

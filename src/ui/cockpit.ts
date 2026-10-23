@@ -24,7 +24,7 @@ const DETAIL_FRAME_ROWS = 4;
 const LOG_FRAME_ROWS = 4;
 const FOOTER_ROWS = 2;
 const FIXED_ROWS = HEADER_ROWS + TABLE_FRAME_ROWS + DETAIL_FRAME_ROWS + DETAIL_ROWS + LOG_FRAME_ROWS + FOOTER_ROWS;
-const BLOCK_ROWS = 5; // one underlying: four content rows and a spacer
+const BLOCK_ROWS = 6; // one underlying: five content rows and a spacer
 const MIN_TABLE_ROWS = BLOCK_ROWS * 3;
 const MAX_TABLE_ROWS = BLOCK_ROWS * 8;
 const MIN_LOG_ROWS = 3;
@@ -229,8 +229,24 @@ function underlyingBlock(
     fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs, marketOpen)}`, width),
     fit(`  ${trend}  ${alignment}`, width),
     fit(`  ${orb}`, width),
+    fit(`  ${contextText(agent.context)}`, width),
     fit('', width),
   ];
+}
+
+function leanArrow(lean: 'BULLISH' | 'BEARISH' | 'NEUTRAL'): string {
+  return lean === 'BULLISH' ? ok('↑') : lean === 'BEARISH' ? bad('↓') : muted('→');
+}
+
+/** One line of market context: day trend in ATRs, regime with its efficiency, structure and the last shift. */
+function contextText(context: AgentView['context']): string {
+  if (context === undefined) {
+    return muted('context warming up');
+  }
+  const regime = context.regime === 'TRENDING' ? ok(`TREND ${context.efficiency}`) : warn(`RANGE ${context.efficiency}`);
+  const { shift } = context.structure;
+  const shiftText = shift === undefined ? muted('no MSS') : `MSS${leanArrow(shift.direction)} ${formatIstClock(shift.barTime).slice(0, 5)}`;
+  return `${muted('day')}${leanArrow(context.dayTrend)}${context.dayMoveAtr}  ${regime}  ${muted('struct')}${leanArrow(context.structure.trend)} ${shiftText}`;
 }
 
 function underlyingColumn(snapshot: CockpitSnapshot, selected: number, width: number, rows: number): string[] {
@@ -399,6 +415,21 @@ function cooldownLines(snapshot: CockpitSnapshot, width: number): string[] {
     });
 }
 
+/** Peak day P&L and how much of it is gone, so a giveback is visible before it becomes a loss. */
+function peakLines(snapshot: CockpitSnapshot, width: number): string[] {
+  const peak = snapshot.dayPeakPnlInr ?? 0;
+  if (peak <= 0) {
+    return [];
+  }
+  const givenBack = Math.max(0, peak - snapshot.day.dayPnlInr);
+  const pct = (givenBack / peak) * 100;
+  const color = pct >= 50 ? red : pct >= 25 ? yellow : dim;
+  return [
+    fit(`  peak +${formatInrWhole(peak)}`, width),
+    fit(`  ${color(`gave back ${formatInrWhole(givenBack)} (${pct.toFixed(0)}%)`)}`, width),
+  ];
+}
+
 function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
   const day = snapshot.day;
   const lossUsedPct = day.dayPnlInr < 0 && snapshot.dailyLossLimitInr > 0 ? (-day.dayPnlInr / snapshot.dailyLossLimitInr) * 100 : 0;
@@ -411,7 +442,10 @@ function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
     fit(`P&L ${formatSignedInr(day.dayPnlInr)}`, width),
     fit(`  realised ${formatSignedInr(day.realizedPnlInr)}`, width),
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
-    fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
+    ...peakLines(snapshot, width),
+    snapshot.dailyLossLimitInr >= snapshot.currentBalanceInr
+      ? fit(warn('loss limit ≥ capital: no daily stop'), width)
+      : fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
     fit(`trades ${tradesStr}  open ${openCount}/${snapshot.maxOpenPositions}`, width),
     ...capitalLines(snapshot, width),
     ...(day.killSwitchReason === undefined

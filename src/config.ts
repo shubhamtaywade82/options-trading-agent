@@ -89,6 +89,11 @@ export interface AgentConfig {
     readonly enabled: boolean;
     readonly minHeadroomPts: number;
   };
+  /** Day trend, regime, market structure and chain bias as an entry gate and a structure-shift exit. */
+  readonly context: {
+    readonly enabled: boolean;
+    readonly structureExit: boolean;
+  };
   readonly exits: {
     readonly stopLossPct: number;
     readonly targetRr: number;
@@ -337,6 +342,8 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'exits.runner_mode': 'RUNNER_MODE',
   'chain_analysis.enabled': 'CHAIN_ANALYSIS_ENABLED',
   'chain_analysis.min_headroom_pts': 'CHAIN_ANALYSIS_MIN_HEADROOM_PTS',
+  'context.enabled': 'CONTEXT_FILTER_ENABLED',
+  'context.structure_exit': 'CONTEXT_STRUCTURE_EXIT',
 };
 
 export function parseYamlToEnv(content: string): Record<string, string> {
@@ -479,6 +486,10 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       enabled: flag(env, 'CHAIN_ANALYSIS_ENABLED', false),
       minHeadroomPts: number(env, 'CHAIN_ANALYSIS_MIN_HEADROOM_PTS', 15, { min: 0, max: 1000 }),
     },
+    context: {
+      enabled: flag(env, 'CONTEXT_FILTER_ENABLED', false),
+      structureExit: flag(env, 'CONTEXT_STRUCTURE_EXIT', false),
+    },
     feed: {
       staleMs: number(env, 'FEED_STALE_MS', 5_000, { min: 500, max: 60_000, integer: true }),
       istShiftedTimestamps: flag(env, 'DHAN_EPOCH_IST_SHIFTED', false),
@@ -620,9 +631,9 @@ function parsePersistence(env: Env, mode: TradingMode): AgentConfig['persistence
  * this function only reads the trading sections.
  */
 export function configFingerprint(config: AgentConfig): string {
-  const { mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis } = config;
+  const { mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis, context } = config;
   return createHash('sha256')
-    .update(JSON.stringify({ mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis }))
+    .update(JSON.stringify({ mode, underlyings, capital, contract, exits, session, strategy, feed, paper, chainAnalysis, context }))
     .digest('hex');
 }
 

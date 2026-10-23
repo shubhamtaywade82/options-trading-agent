@@ -19,6 +19,7 @@ import type { EntrySnapshot, TradeAdvisor } from '../llm/advisor.js';
 import { BarSeries, CandleBuilder } from '../market/barSeries.js';
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { analyzeOptionChain, checkOptionBuyingConfluence } from '../options/chainAnalyzer.js';
+import { contextVerdict, marketContext, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import { pickExpiry, selectContract } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
@@ -89,6 +90,8 @@ interface SideSlot {
   lastMark: number | undefined;
   exitRetryAfterMs: number;
   manualExit: boolean;
+  /** Market structure shifted against this side on a closed bar; the next exit check closes the position. */
+  structureExit: boolean;
   /** An exit for the current position was sent and has no known outcome yet. A halted slot never resends one. */
   exitSent: boolean;
   lastTradedFlipBarTime?: number | undefined;
@@ -97,6 +100,7 @@ interface SideSlot {
 
 export class UnderlyingAgent {
   readonly symbol: string;
+  private marketContext: MarketContext | undefined;
   private readonly ce: SideSlot;
   private readonly pe: SideSlot;
   private readonly queue: SerialQueue;
@@ -129,6 +133,7 @@ export class UnderlyingAgent {
       lastMark: undefined,
       exitRetryAfterMs: 0,
       manualExit: false,
+      structureExit: false,
       exitSent: false,
     };
     this.pe = {
@@ -139,6 +144,7 @@ export class UnderlyingAgent {
       lastMark: undefined,
       exitRetryAfterMs: 0,
       manualExit: false,
+      structureExit: false,
       exitSent: false,
     };
     this.strategySession = deps.strategySession ?? new StrategySession(deps.config.session.initialPosture, deps.config.strategy.enabledStrategies);
@@ -245,6 +251,7 @@ export class UnderlyingAgent {
     for (const bar of history) {
       this.bars.upsert(bar);
     }
+    this.marketContext = marketContext(this.bars.all());
   }
 
   evaluateWarmupSignal(): void {
@@ -432,6 +439,7 @@ export class UnderlyingAgent {
       position: positions[0],
       positions,
       cooldownUntil,
+      context: this.marketContext,
     };
   }
 
@@ -461,7 +469,22 @@ export class UnderlyingAgent {
 
   private acceptClosedBar(bar: Candle): void {
     if (this.bars.upsert(bar)) {
+      this.marketContext = marketContext(this.bars.all());
+      this.flagStructureExits(this.marketContext);
       this.queue.run(() => this.evaluateSignal());
+    }
+  }
+
+  /** A side whose structure just shifted against it is closed, so CE and PE hand over instead of both bleeding. */
+  private flagStructureExits(context: MarketContext): void {
+    if (!this.deps.config.context.structureExit) {
+      return;
+    }
+    for (const slot of this.allSlots()) {
+      const held: Direction = slot.optionType === 'CE' ? 'BULLISH' : 'BEARISH';
+      if (slot.position !== undefined && structureTurnedAgainst(context.structure, held)) {
+        slot.structureExit = true;
+      }
     }
   }
 
@@ -714,6 +737,13 @@ export class UnderlyingAgent {
       if (!confluence.ok) {
         return fail('OPTION_CHAIN_RESISTANCE', confluence.reason ?? 'option chain resistance detected');
       }
+    }
+    if (config.context.enabled && signal.strategy !== 'test') {
+      const verdict = contextVerdict(marketContext(this.bars.all()), signal.direction, analyzeOptionChain(chain, signal.spot).bias);
+      if (!verdict.ok) {
+        return fail('CONTEXT_REJECTED', verdict.reason);
+      }
+      this.deps.logger.info('context supports entry', { underlying: this.symbol, direction: signal.direction, context: verdict.reason });
     }
     const contracts = await market.optionContracts(this.symbol, spec.optionSegment);
     const selection = selectContract({
@@ -1026,6 +1056,7 @@ export class UnderlyingAgent {
     const { grossPnlInr, chargesInr, pnlInr } = this.closedPnl(position, fill);
     this.lastExit = { reason: fill.reason, pnlInr, at: fill.at };
     slot.manualExit = false;
+    slot.structureExit = false;
     slot.exitSent = false;
     this.deps.book.recordClose({ underlying: this.symbol, optionType: slot.optionType, pnlInr, closedAtMs: fill.at });
     this.deps.feed.unsubscribe([instrumentRefOf(position.contract)]);
@@ -1147,6 +1178,9 @@ export class UnderlyingAgent {
     }
     if (slot.manualExit) {
       return 'MANUAL';
+    }
+    if (slot.structureExit) {
+      return 'STRUCTURE_BREAK';
     }
     if (this.deps.book.snapshot().dayPnlInr <= -this.dailyLossLimitInr) {
       return 'DAILY_LOSS';

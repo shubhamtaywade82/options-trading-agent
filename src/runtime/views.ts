@@ -2,6 +2,7 @@ import type { TradingMode } from '../domain/mode.js';
 import type { TradeState } from '../domain/fsm.js';
 import type { Direction, ExitReason, OptionType } from '../domain/types.js';
 import type { ChainAnalysis } from '../options/chainAnalyzer.js';
+import type { MarketContext } from '../strategy/marketContext.js';
 
 /**
  * Read-only views the operator cockpit renders. They are plain data: building one
@@ -124,6 +125,8 @@ export interface AgentView {
   readonly position: PositionView | undefined;
   readonly positions: readonly PositionView[];
   readonly cooldownUntil: number | undefined;
+  /** Day trend, regime and market structure as of the last closed bar. */
+  readonly context?: MarketContext | undefined;
 }
 
 export interface CockpitSnapshot {
@@ -139,6 +142,8 @@ export interface CockpitSnapshot {
   readonly realTimeBalanceInr: number;
   readonly riskBudgetInr: number;
   readonly dailyLossLimitInr: number;
+  /** Best day P&L seen by this run (restored from realised P&L on restart). */
+  readonly dayPeakPnlInr?: number;
   readonly maxTradesPerDay: number;
   readonly maxOpenPositions: number;
   readonly maxHoldMinutes: number;

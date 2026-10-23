@@ -65,6 +65,12 @@ chain_analysis:
   enabled: true
   min_headroom_pts: 15         # Minimum headroom (pts) before major OI resistance/support wall
 
+# Market context: both CE and PE may be held, but each entry must be backed by the day trend, market structure
+# (swing breaks / MSS), chain bias and regime; structure against the side vetoes it.
+context:
+  enabled: true                # Gate entries on context (ranging markets need stronger agreement)
+  structure_exit: true         # Exit a side when market structure shifts against it
+
 # Capital & Sizing: 10L paper capital with 20k risk allocation per trade
 capital:
   inr: 1000000                 # ₹10,00,000 (10 Lakhs paper balance)

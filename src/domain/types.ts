@@ -98,4 +98,6 @@ export type ExitReason =
   | 'DAILY_LOSS'
   | 'SHUTDOWN'
   | 'MANUAL'
-  | 'EXTERNAL';
+  | 'EXTERNAL'
+  /** Market structure shifted against the position's side. */
+  | 'STRUCTURE_BREAK';

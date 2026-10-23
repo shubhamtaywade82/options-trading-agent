@@ -69,6 +69,8 @@ export class Orchestrator {
   private readonly optionIndex = new Map<string, string>();
   private readonly now: () => number;
   private readonly dailyLossLimitInr: number;
+  // ponytail: in memory, so a restart restarts the peak from realised P&L; persist it if giveback rules need it.
+  private dayPeak = { dayKey: '', pnlInr: 0 };
   private timer: ReturnType<typeof setInterval> | undefined;
   private unsubscribeTicks: (() => void) | undefined;
   private unsubscribeEvents: (() => void) | undefined;
@@ -345,6 +347,10 @@ export class Orchestrator {
   snapshot(nowMs: number = this.now()): CockpitSnapshot {
     const day = this.book.snapshot();
     const balances = this.computeBalances(day.realizedPnlInr, day.dayPnlInr);
+    if (this.dayPeak.dayKey !== day.dayKey) {
+      this.dayPeak = { dayKey: day.dayKey, pnlInr: Math.max(0, day.realizedPnlInr) };
+    }
+    this.dayPeak.pnlInr = Math.max(this.dayPeak.pnlInr, day.dayPnlInr);
     return {
       at: nowMs,
       mode: this.config.mode,
@@ -354,6 +360,7 @@ export class Orchestrator {
       ...balances,
       riskBudgetInr: (balances.currentBalanceInr * this.config.capital.maxRiskPerTradePct) / 100,
       dailyLossLimitInr: this.dailyLossLimitInr,
+      dayPeakPnlInr: this.dayPeak.pnlInr,
       maxTradesPerDay: this.config.capital.maxTradesPerDay,
       maxOpenPositions: this.config.capital.maxOpenPositions,
       maxHoldMinutes: this.config.exits.maxHoldMinutes,

@@ -416,6 +416,18 @@ describe('runtime: carried balance', () => {
   });
 });
 
+describe('runtime: market context', () => {
+  it('should take a with-trend breakout through the context gate and show the context', async () => {
+    // The warmup climbs all session, so the day, the structure and the regime all back a bullish entry.
+    const harness = build({ CONTEXT_FILTER_ENABLED: 'true' });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.events.some((event) => event.type === 'entry_submitted'), true);
+    assert.equal(harness.events.some((event) => event.payload['code'] === 'CONTEXT_REJECTED'), false);
+    assert.equal(harness.orchestrator.snapshot().underlyings[0]?.context?.structure.trend, 'BULLISH');
+  });
+});
+
 describe('runtime: risk capital', () => {
   // One lot risks (101 - 70.7) × 75 = 2272.5. CAPITAL_INR 300000 at 1% allows 3000, so one lot.
   it('should size from CAPITAL_INR when the broker balance is larger', async () => {
