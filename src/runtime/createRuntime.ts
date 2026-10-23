@@ -27,7 +27,7 @@ import type { PostgresLedger } from '../persistence/ledger.js';
 import { errorMessage } from '../persistence/redact.js';
 import { scopeJournalLines } from '../persistence/scope.js';
 import { openSession, type PersistenceSession } from '../persistence/session.js';
-import { istParts } from '../time/ist.js';
+import { istParts, shiftDateKey } from '../time/ist.js';
 import type { MarketPort } from './ports.js';
 import { Orchestrator } from './orchestrator.js';
 import { ledgerAndLeaseGate } from './tradingGate.js';
@@ -98,7 +98,7 @@ async function compose(
     accountKey: clientId,
   });
   const feed = new DhanFeed(dataClient, {
-    istShiftedTimestamps: config.feed.istShiftedTimestamps,
+    istShiftedTimestamps: config.feed.feedIstShifted,
     marketFeedMode: config.feed.marketFeedMode,
     now,
     logger,
@@ -179,6 +179,9 @@ async function compose(
   for (const underlying of config.underlyings) {
     const spot = await master.resolveSpot(underlying.symbol);
     specs.push({ symbol: underlying.symbol, spot, optionSegment: underlying.optionSegment });
+  }
+  if (venue !== undefined) {
+    await settleExpiredPositions(venue, specs, market, config.strategy.barMinutes, logger);
   }
 
   const dayBook = new DayBook(now(), config.exits.cooldownSeconds * 1000);
@@ -289,6 +292,31 @@ function buildGateway(
  * Opens the PostgreSQL paper venue: creates the wallet on first use and loads the open positions. The venue needs
  * the database and the lease fence, both of which exist in paper mode because the config requires DATABASE_URL.
  */
+/** Settles paper positions whose option expired while held, so a carried position cannot outlive its contract. */
+async function settleExpiredPositions(
+  venue: PostgresPaperExecutionPort,
+  specs: readonly UnderlyingSpec[],
+  market: MarketPort,
+  barMinutes: number,
+  logger: Logger,
+): Promise<void> {
+  const settled = await venue.settleExpired(async (underlying, expiry) => {
+    const spec = specs.find((candidate) => candidate.symbol === underlying);
+    if (spec === undefined) {
+      throw new Error(`cannot settle an expired ${underlying} position: ${underlying} is not a configured underlying`);
+    }
+    const bars = await market.intradayCandles(spec.spot, barMinutes, expiry, shiftDateKey(expiry, 1));
+    const close = bars.filter((bar) => istParts(bar.time).date === expiry).at(-1)?.close;
+    if (close === undefined) {
+      throw new Error(`cannot settle an expired ${underlying} position: no ${underlying} bars on expiry day ${expiry}`);
+    }
+    return close;
+  });
+  for (const position of settled) {
+    logger.warn('expired paper position cash-settled at intrinsic value', { ...position });
+  }
+}
+
 /**
  * Capital the day starts with. The paper wallet carries every earlier close and withdrawal, so it compounds; it
  * already holds today's restored closes, which come off so the day book does not count them twice. Other venues

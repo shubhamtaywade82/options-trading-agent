@@ -237,4 +237,44 @@ describe('feed', () => {
     feed.unsubscribe([{ exchangeSegment: 'NSE_FNO', securityId: '48001' }]);
     assert.equal(feed.ageMs({ exchangeSegment: 'NSE_FNO', securityId: '48001' }), undefined);
   });
+
+  it('should convert IST-stamped LTT to UTC, and report a tick stamped in the future once', async () => {
+    let handler: ((value: unknown) => void) | undefined;
+    const errors: string[] = [];
+    const client = {
+      ws: {
+        market: {
+          on: (event: string, listener: (value: unknown) => void) => {
+            if (event === 'tick') {
+              handler = listener;
+            }
+          },
+          connect: async () => undefined,
+          subscribe: () => undefined,
+          unsubscribe: () => undefined,
+        },
+        connect: async () => undefined,
+        disconnect: () => undefined,
+      },
+    };
+    const nowMs = 1_700_000_000_000;
+    const logger = { info: () => undefined, warn: () => undefined, error: (message: string) => errors.push(message), debug: () => undefined };
+    const ticks: { ltt: number }[] = [];
+    const shifted = new DhanFeed(client as never, { istShiftedTimestamps: true, now: () => nowMs, logger: logger as never });
+    shifted.onTick((tick) => ticks.push(tick));
+    await shifted.start();
+    shifted.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
+    // Dhan's measured packet: the trade at nowMs, stamped 19800 s ahead.
+    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_450, ltt: nowMs / 1000 + 19_800 });
+    assert.equal(ticks[0]?.ltt, nowMs);
+    assert.deepEqual(errors, []);
+
+    const unshifted = new DhanFeed(client as never, { istShiftedTimestamps: false, now: () => nowMs, logger: logger as never });
+    await unshifted.start();
+    unshifted.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
+    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_450, ltt: nowMs / 1000 + 19_800 });
+    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_451, ltt: nowMs / 1000 + 19_801 });
+    assert.equal(errors.length, 1);
+    assert.match(errors[0] ?? '', /DHAN_FEED_IST_SHIFTED/);
+  });
 });

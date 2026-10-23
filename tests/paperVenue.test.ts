@@ -297,6 +297,45 @@ describe('PostgresPaperExecutionPort', () => {
     assert.equal(await restarted.cash(), 300_000 - 100 * 75, 'and so does the cash');
   });
 
+  it('should cash-settle a carried position at intrinsic value once its expiry session has closed', async () => {
+    const store = new MemoryPaperStore();
+    await (await venue(store)).submitEntry(entry());
+    await flush();
+    let clock = istEpoch('2026-10-15', '15:29');
+    const restart = async () => {
+      const port = new PostgresPaperExecutionPort(store, { clientId: CLIENT, slippageBps: 0, initialCapitalInr: 300_000, logger: SILENT, now: () => clock });
+      await port.open();
+      return port;
+    };
+    const closes: string[] = [];
+    const nifty = async (underlying: string, expiry: string) => {
+      closes.push(`${underlying} ${expiry}`);
+      return 22_500;
+    };
+
+    assert.deepEqual(await (await restart()).settleExpired(nifty), [], 'the expiry session is still trading');
+
+    clock = istEpoch('2026-10-16', '09:00');
+    const port = await restart();
+    const settled = await port.settleExpired(nifty);
+    assert.deepEqual(settled, [{ positionId: 'ENT-1', underlying: 'NIFTY', expiry: '2026-10-15', settlementPrice: 50 }]);
+    assert.deepEqual(closes, ['NIFTY 2026-10-15'], 'settled against the expiry-day close');
+    assert.equal(port.openPositionCount(), 0);
+    assert.equal(store.positions.get('ENT-1')?.pnl, (50 - 100) * 75 - chargesFor(100, 50));
+    assert.equal(store.orders.at(-1)?.kind, 'EXPIRY');
+  });
+
+  it('should settle an out-of-the-money expired option at zero', async () => {
+    const store = new MemoryPaperStore();
+    await (await venue(store)).submitEntry(entry());
+    await flush();
+    const port = new PostgresPaperExecutionPort(store, { clientId: CLIENT, slippageBps: 0, initialCapitalInr: 300_000, logger: SILENT, now: () => istEpoch('2026-10-19', '09:00') });
+    await port.open();
+    const settled = await port.settleExpired(async () => 22_000);
+    assert.equal(settled[0]?.settlementPrice, 0);
+    assert.equal(store.wallet, toPaise(300_000 - 100 * 75 - chargesFor(100, 0)), 'the premium is lost, and the charges with it');
+  });
+
   it('refuses to trade before open(), so no order can see an unloaded wallet', async () => {
     const port = new PostgresPaperExecutionPort(new MemoryPaperStore(), {
       clientId: CLIENT,

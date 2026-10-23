@@ -192,4 +192,20 @@ export const MIGRATIONS: readonly Migration[] = [
         FOR EACH ROW EXECUTE FUNCTION paper_history_append_only();
     `,
   },
+  {
+    version: '006_paper_expiry',
+    sql: `
+      -- A position carried past its expiry is cash-settled at intrinsic value, which needs the contract's terms.
+      -- Rows written before this migration have none.
+      ALTER TABLE paper_positions ADD COLUMN expiry date;
+      ALTER TABLE paper_positions ADD COLUMN strike numeric(14,4) CHECK (strike > 0);
+      ALTER TABLE paper_positions ADD COLUMN option_type text CHECK (option_type IN ('CE', 'PE'));
+
+      -- An out-of-the-money option expires at zero, so a settlement order can carry price 0.
+      ALTER TABLE paper_orders DROP CONSTRAINT paper_orders_kind_check;
+      ALTER TABLE paper_orders ADD CONSTRAINT paper_orders_kind_check CHECK (kind IN ('ENTRY', 'EXIT', 'PROTECTIVE_EXIT', 'EXPIRY'));
+      ALTER TABLE paper_orders DROP CONSTRAINT paper_orders_price_check;
+      ALTER TABLE paper_orders ADD CONSTRAINT paper_orders_price_check CHECK (price > 0 OR (kind = 'EXPIRY' AND price = 0));
+    `,
+  },
 ];

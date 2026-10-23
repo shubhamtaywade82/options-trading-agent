@@ -76,7 +76,7 @@ function auditClosedPosition(pos: PositionRow, issues: Issue[]): { deltaCapital:
   } else if (Math.abs(expectedPnl - pos.realized_pnl) > 0.01) {
     issues.push({ severity: 'ERROR', category: 'PNL_MATH', entityId: pos.position_id, detail: `P&L mismatch: expected ${expectedPnl} after charges, recorded ${pos.realized_pnl}` });
   }
-  if (expectedPnl < -toPaise(pos.average_price * pos.quantity)) {
+  if (grossPnl < -toPaise(pos.average_price * pos.quantity)) {
     issues.push({ severity: 'ERROR', category: 'OPTIONS_RISK', entityId: pos.position_id, detail: 'Long option loss exceeds 100% of premium paid' });
   }
   return { deltaCapital: 0, deltaPnl: pos.realized_pnl, win: pos.realized_pnl >= 0, loss: pos.realized_pnl < 0 };

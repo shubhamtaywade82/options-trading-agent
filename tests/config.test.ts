@@ -23,6 +23,7 @@ describe('loadConfig', () => {
     assert.equal(config.capital.maxRiskPerTradePct, 1);
     assert.equal(config.llm.enabled, false);
     assert.equal(config.feed.istShiftedTimestamps, false);
+    assert.equal(config.feed.feedIstShifted, true, 'Dhan stamps WebSocket LTT in IST wall-clock');
   });
 
   it('requires Dhan credentials even in paper mode, because market data is live', () => {

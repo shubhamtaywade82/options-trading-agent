@@ -105,6 +105,15 @@ export function calculateTrailingStop(input: TrailingStopInput): number {
 }
 
 /**
+ * What an index option pays at expiry. NSE and BSE cash-settle index options at intrinsic value against the
+ * underlying's closing value on expiry day; out of the money, the option expires at zero.
+ */
+export function expirySettlementPrice(optionType: 'CE' | 'PE', strike: number, underlyingClose: number): number {
+  const intrinsic = optionType === 'CE' ? underlyingClose - strike : strike - underlyingClose;
+  return Math.max(0, Math.round(intrinsic * 100) / 100);
+}
+
+/**
  * Statutory and broker charges for one option round trip (buy, then sell), as a percentage of premium unless named
  * in rupees. An estimate for the day book: the contract note is authoritative, and these rates change by budget
  * and exchange circular (STT on the options sell side rose from 0.10% to 0.15% on 2026-04-01).

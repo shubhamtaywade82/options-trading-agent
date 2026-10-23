@@ -57,11 +57,15 @@ export function asPriceEvent(value: unknown): PriceEvent | undefined {
  * is judged on what this process actually saw, not on the exchange clock.
  * Reconnection and re-subscription are handled by the SDK.
  */
+/** Allowance for clock skew between this host and the exchange's trade stamps. */
+const FUTURE_LTT_TOLERANCE_MS = 60_000;
+
 export class DhanFeed {
   private readonly listeners = new Set<(tick: Tick) => void>();
   private readonly lastReceived = new Map<string, number>();
   private readonly subscriptions = new Map<string, InstrumentRef>();
   private started = false;
+  private warnedFutureLtt = false;
 
   constructor(
     private readonly client: FeedClient,
@@ -158,11 +162,18 @@ export class DhanFeed {
       return;
     }
     this.lastReceived.set(key, receivedAt);
+    const ltt = dhanEpochSecondsToMs(event.ltt, this.options.istShiftedTimestamps);
+    // A trade cannot happen after it is received. A tick from the future means the LTT convention is wrong, which
+    // moves bars and fill times by 5h30m, so it is reported loudly, once.
+    if (ltt > receivedAt + FUTURE_LTT_TOLERANCE_MS && !this.warnedFutureLtt) {
+      this.warnedFutureLtt = true;
+      this.options.logger?.error('feed LTT is ahead of the clock; check DHAN_FEED_IST_SHIFTED', { aheadMs: ltt - receivedAt });
+    }
     const tick: Tick = {
       exchangeSegment: event.exchangeSegment,
       securityId: event.securityId,
       ltp: event.ltp,
-      ltt: dhanEpochSecondsToMs(event.ltt, this.options.istShiftedTimestamps),
+      ltt,
     };
     for (const listener of this.listeners) {
       listener(tick);

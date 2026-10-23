@@ -119,6 +119,8 @@ export interface AgentConfig {
   readonly feed: {
     readonly staleMs: number;
     readonly istShiftedTimestamps: boolean;
+    /** WebSocket LTT convention. Measured 2026-10-23: ticker and full packets stamp IST wall-clock, unlike REST bars. */
+    readonly feedIstShifted: boolean;
     /** Dhan market WebSocket subscription mode. Index spots (IDX_I) do not stream in `full` mode. */
     readonly marketFeedMode: 'ticker' | 'quote' | 'full';
   };
@@ -480,6 +482,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
     feed: {
       staleMs: number(env, 'FEED_STALE_MS', 5_000, { min: 500, max: 60_000, integer: true }),
       istShiftedTimestamps: flag(env, 'DHAN_EPOCH_IST_SHIFTED', false),
+      feedIstShifted: flag(env, 'DHAN_FEED_IST_SHIFTED', true),
       marketFeedMode: parseMarketFeedMode(env),
     },
     paper: {

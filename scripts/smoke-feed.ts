@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   client.ws.market.on('disconnect', (event: unknown) => console.log('ws: server disconnect frame', JSON.stringify(event).slice(0, 200)));
 
   const feed = new DhanFeed(client, {
-    istShiftedTimestamps: config.feed.istShiftedTimestamps,
+    istShiftedTimestamps: config.feed.feedIstShifted,
     marketFeedMode: config.feed.marketFeedMode,
     logger,
   });

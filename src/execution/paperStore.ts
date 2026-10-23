@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import type { OptionType } from '../domain/types.js';
 import { runFenced, type LedgerFence } from '../persistence/ledger.js';
 
 /** A paper position as the venue holds it. Prices are per unit; money is rupees rounded to paise. */
@@ -14,12 +15,16 @@ export interface PaperPositionRecord {
   readonly stopLossPrice: number;
   readonly targetPrice: number;
   readonly openedAt: number;
+  /** Contract terms for expiry settlement. Absent on positions recorded before they were stored. */
+  readonly expiry?: string | undefined;
+  readonly strike?: number | undefined;
+  readonly optionType?: OptionType | undefined;
 }
 
 export interface PaperOrderRecord {
   readonly correlationId: string;
   readonly positionId: string;
-  readonly kind: 'ENTRY' | 'EXIT' | 'PROTECTIVE_EXIT';
+  readonly kind: 'ENTRY' | 'EXIT' | 'PROTECTIVE_EXIT' | 'EXPIRY';
   readonly side: 'BUY' | 'SELL';
   readonly quantity: number;
   readonly price: number;
@@ -100,7 +105,8 @@ export class PostgresPaperStore implements PaperStore {
     const { rows } = await this.pool.query<PositionRow>(
       `SELECT position_id, client_id, underlying, security_id, exchange_segment,
               tick_size::float8 AS tick_size, quantity, average_price::float8 AS average_price,
-              stop_loss_price::float8 AS stop_loss_price, target_price::float8 AS target_price, opened_at
+              stop_loss_price::float8 AS stop_loss_price, target_price::float8 AS target_price, opened_at,
+              to_char(expiry, 'YYYY-MM-DD') AS expiry, strike::float8 AS strike, option_type
        FROM paper_positions WHERE client_id = $1 AND status = 'OPEN' ORDER BY opened_at, position_id`,
       [clientId],
     );
@@ -116,6 +122,9 @@ export class PostgresPaperStore implements PaperStore {
       stopLossPrice: row.stop_loss_price,
       targetPrice: row.target_price,
       openedAt: row.opened_at.getTime(),
+      expiry: row.expiry ?? undefined,
+      strike: row.strike ?? undefined,
+      optionType: row.option_type ?? undefined,
     }));
   }
 
@@ -136,8 +145,8 @@ export class PostgresPaperStore implements PaperStore {
       }
       const inserted = await client.query(
         `INSERT INTO paper_positions (position_id, client_id, underlying, security_id, exchange_segment, tick_size, quantity,
-                                      average_price, stop_loss_price, target_price, status, opened_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'OPEN', $11)
+                                      average_price, stop_loss_price, target_price, status, opened_at, expiry, strike, option_type)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'OPEN', $11, $12, $13, $14)
          ON CONFLICT (position_id) DO NOTHING`,
         [
           position.positionId,
@@ -151,6 +160,9 @@ export class PostgresPaperStore implements PaperStore {
           position.stopLossPrice,
           position.targetPrice,
           new Date(position.openedAt).toISOString(),
+          position.expiry ?? null,
+          position.strike ?? null,
+          position.optionType ?? null,
         ],
       );
       if ((inserted.rowCount ?? 0) === 0) {
@@ -209,6 +221,9 @@ interface PositionRow {
   stop_loss_price: number;
   target_price: number;
   opened_at: Date;
+  expiry: string | null;
+  strike: number | null;
+  option_type: OptionType | null;
 }
 
 async function insertOrder(

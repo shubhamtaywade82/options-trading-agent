@@ -1,5 +1,6 @@
 import type { ExitReason, Tick } from '../domain/types.js';
-import { calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
+import { calculateTrailingStop, expirySettlementPrice, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
+import { istParts, NSE_SESSION_CLOSE_MINUTE } from '../time/ist.js';
 import type { Logger } from '../ops/logger.js';
 import { toPaise, type OpenEntryResult, type PaperOrderRecord, type PaperPositionRecord, type PaperStore } from './paperStore.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
@@ -11,6 +12,13 @@ export interface PostgresPaperOptions {
   readonly initialCapitalInr: number;
   readonly logger: Logger;
   readonly now?: () => number;
+}
+
+export interface SettledPosition {
+  readonly positionId: string;
+  readonly underlying: string;
+  readonly expiry: string;
+  readonly settlementPrice: number;
 }
 
 interface OpenPosition extends Omit<PaperPositionRecord, 'stopLossPrice'> {
@@ -101,6 +109,9 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
       stopLossPrice: order.stopLossPrice,
       targetPrice: order.targetPrice,
       openedAt: at,
+      expiry: order.contract.expiry,
+      strike: order.contract.strike,
+      optionType: order.contract.optionType,
     };
     const record: PaperOrderRecord = {
       correlationId: order.correlationId,
@@ -286,6 +297,42 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
           });
         });
     }
+  }
+
+  /**
+   * Cash-settles every position whose contract expired while it was held, at intrinsic value against the
+   * underlying's expiry-day close, and returns what was settled. Runs at start, before any position is adopted:
+   * an expired contract has left the scrip master and could not be adopted. A position without stored terms
+   * (recorded before they were kept) is left for the adoption check to report.
+   */
+  async settleExpired(underlyingClose: (underlying: string, expiry: string) => Promise<number>): Promise<SettledPosition[]> {
+    this.assertOpened();
+    const now = istParts(this.now());
+    const settled: SettledPosition[] = [];
+    for (const position of [...this.positions.values()]) {
+      const { expiry, strike, optionType } = position;
+      if (expiry === undefined || strike === undefined || optionType === undefined) {
+        continue;
+      }
+      if (expiry > now.date || (expiry === now.date && now.minuteOfDay < NSE_SESSION_CLOSE_MINUTE)) {
+        continue;
+      }
+      const price = expirySettlementPrice(optionType, strike, await underlyingClose(position.underlying, expiry));
+      const at = this.now();
+      position.exiting = true;
+      await this.recordClose(position, {
+        correlationId: `${position.positionId}:EXPIRY`,
+        positionId: position.positionId,
+        kind: 'EXPIRY',
+        side: 'SELL',
+        quantity: position.quantity,
+        price,
+        reason: 'EXPIRY',
+        at,
+      }, price, 'EXPIRY');
+      settled.push({ positionId: position.positionId, underlying: position.underlying, expiry, settlementPrice: price });
+    }
+    return settled;
   }
 
   async close(): Promise<void> {

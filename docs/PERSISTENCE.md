@@ -32,6 +32,8 @@ Migrations are in `src/persistence/migrations.ts`, applied in order, each in its
 
 `005_paper_withdrawals`: `paper_withdrawals` (append-only, one row per week or month). A withdrawal debits the wallet with a cash entry `WITHDRAWAL:<period>`, so wallet entries no longer all reference an order. Exits credit proceeds less estimated round-trip charges. `npm run withdraw` takes a share of the last completed period's net P&L; `npm run reconcile` checks `initial + realised P&L − open premium − withdrawn = balance`. The agent sizes off the day's opening capital (wallet cash + open premium − today's realised), so profit compounds and withdrawals reduce it.
 
+`006_paper_expiry`: `paper_positions` gains `expiry`, `strike` and `option_type`. At start, a paper position whose expiry session has closed is cash-settled at intrinsic value against the underlying's expiry-day close (`EXPIRY` order, price 0 when out of the money), before positions are adopted. Positions recorded before this migration have no terms and are not settled automatically.
+
 The migrator refuses to run when an applied migration's checksum (sha256) has changed, or when the database holds a version this build does not know.
 
 ## Modes and accounts

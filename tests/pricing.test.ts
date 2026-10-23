@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../src/options/pricing.js';
+import { bracketLevels, calculateTrailingStop, expirySettlementPrice, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../src/options/pricing.js';
 import { sizePosition } from '../src/options/sizing.js';
 
 describe('tick rounding', () => {
@@ -135,5 +135,14 @@ describe('roundTripChargesInr', () => {
     const nse = roundTripChargesInr({ quantity: 20, buyPrice: 200, sellPrice: 200, exchangeSegment: 'NSE_FNO' });
     const bse = roundTripChargesInr({ quantity: 20, buyPrice: 200, sellPrice: 200, exchangeSegment: 'BSE_FNO' });
     assert.ok(bse < nse);
+  });
+});
+
+describe('expirySettlementPrice', () => {
+  it('should pay intrinsic value in the money and zero out of it', () => {
+    assert.equal(expirySettlementPrice('CE', 22_450, 22_512.35), 62.35);
+    assert.equal(expirySettlementPrice('PE', 22_450, 22_400), 50);
+    assert.equal(expirySettlementPrice('CE', 22_450, 22_400), 0);
+    assert.equal(expirySettlementPrice('PE', 22_450, 22_450), 0);
   });
 });
