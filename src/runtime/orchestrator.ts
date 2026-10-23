@@ -26,6 +26,8 @@ export interface OrchestratorFeed extends FeedPort {
 export interface OrchestratorServices {
   /** Pre-restored book for the current IST day. A fresh book is created when omitted. */
   readonly dayBook?: DayBook;
+  /** Account balance carried in from earlier days, before today's realised P&L. CAPITAL_INR when omitted. */
+  readonly openingBalanceInr?: number;
   readonly market: MarketPort;
   readonly feed: OrchestratorFeed;
   readonly execution: ExecutionPort;
@@ -327,14 +329,15 @@ export class Orchestrator {
 
   private computeBalances(realizedPnl: number, dayPnl: number) {
     const initial = this.config.capital.inr;
-    const current = Number((initial + realizedPnl).toFixed(2));
+    const opening = this.services.openingBalanceInr ?? initial;
+    const current = Number((opening + realizedPnl).toFixed(2));
     const allocated = Number(this.allocatedCapitalInr().toFixed(2));
     return {
       initialCapitalInr: initial,
       currentBalanceInr: current,
       allocatedBalanceInr: allocated,
       availableBalanceInr: Math.max(0, Number((current - allocated).toFixed(2))),
-      realTimeBalanceInr: Number((initial + dayPnl).toFixed(2)),
+      realTimeBalanceInr: Number((opening + dayPnl).toFixed(2)),
     };
   }
 

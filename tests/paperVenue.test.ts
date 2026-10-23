@@ -11,6 +11,7 @@ import {
 } from '../src/execution/paperStore.js';
 import type { EntryOrder, ExecutionEvent, ExitOrder } from '../src/execution/ports.js';
 import { createConsoleLogger } from '../src/ops/logger.js';
+import { roundTripChargesInr } from '../src/options/pricing.js';
 import { contract, istEpoch } from './support/fixtures.js';
 
 const NOW = istEpoch('2026-10-12', '10:00');
@@ -132,10 +133,13 @@ function collect(port: PostgresPaperExecutionPort): ExecutionEvent[] {
   return events;
 }
 
+const chargesFor = (buyPrice: number, sellPrice: number) =>
+  roundTripChargesInr({ quantity: 75, buyPrice, sellPrice, exchangeSegment: OPTION.exchangeSegment });
+
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe('PostgresPaperExecutionPort', () => {
-  it('debits the wallet on entry, credits it on exit, and realises P&L as the cash difference', async () => {
+  it('debits the wallet on entry, credits it on exit net of charges, and realises P&L as the cash difference', async () => {
     const store = new MemoryPaperStore();
     const port = await venue(store, 0);
     const events = collect(port);
@@ -146,9 +150,10 @@ describe('PostgresPaperExecutionPort', () => {
 
     await port.submitExit(exit());
     await flush();
-    assert.equal(store.wallet, 300_000 + (120 - 100) * 75, 'the exit proceeds are credited');
+    const netPnl = (120 - 100) * 75 - chargesFor(100, 120);
+    assert.equal(store.wallet, 300_000 + netPnl, 'the exit proceeds less charges are credited');
     assert.equal(port.openPositionCount(), 0);
-    assert.equal(store.positions.get('ENT-1')?.pnl, (120 - 100) * 75);
+    assert.equal(store.positions.get('ENT-1')?.pnl, netPnl);
     assert.deepEqual(events.map((e) => e.kind), ['ENTRY_FILLED', 'EXIT_FILLED']);
     assert.equal(store.orders.length, 2, 'the entry and the exit are both recorded as orders');
   });
@@ -258,7 +263,7 @@ describe('PostgresPaperExecutionPort', () => {
     await flush();
     const stop = events.find((e) => e.kind === 'PROTECTIVE_EXIT_FILLED');
     assert.equal(stop?.kind === 'PROTECTIVE_EXIT_FILLED' && stop.averagePrice, 60);
-    assert.equal(store.positions.get('ENT-1')?.pnl, (60 - 100) * 75);
+    assert.equal(store.positions.get('ENT-1')?.pnl, (60 - 100) * 75 - chargesFor(100, 60));
 
     await port.submitEntry(entry({ correlationId: 'ENT-2' }));
     await flush();

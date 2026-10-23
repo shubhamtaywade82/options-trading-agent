@@ -123,6 +123,7 @@ function build(
     funds?: number;
     /** Runs inside the funds call, the last REST call before the risk gate. */
     onFunds?: () => void;
+    openingBalanceInr?: number;
   } = {},
 ): Harness {
   // Start after the warmup's last bar has closed; the clock guard refuses bars stamped in the future.
@@ -190,6 +191,7 @@ function build(
     clockIntervalMs: 1e9,
     shutdownTimeoutMs: 2_000,
     ...(options.gate === undefined ? {} : { gate: options.gate }),
+    ...(options.openingBalanceInr === undefined ? {} : { openingBalanceInr: options.openingBalanceInr }),
   });
   return {
     orchestrator,
@@ -400,6 +402,15 @@ describe('runtime: winning trade end to end (paper venue)', () => {
     const refused = harness.events.filter((event) => event.type === 'signal_dropped');
     assert.equal(refused.at(-1)?.payload['code'], 'KILL_SWITCH_ACTIVE');
     assert.equal(harness.events.filter((event) => event.type === 'entry_submitted').length, 1, 'no second entry after the breach');
+  });
+});
+
+describe('runtime: carried balance', () => {
+  it('should show the balance carried from earlier sessions, not CAPITAL_INR, when an opening balance is given', () => {
+    const snapshot = build({}, { openingBalanceInr: 312_345.5 }).orchestrator.snapshot();
+    assert.equal(snapshot.initialCapitalInr, 300_000);
+    assert.equal(snapshot.currentBalanceInr, 312_345.5);
+    assert.equal(snapshot.realTimeBalanceInr, 312_345.5);
   });
 });
 

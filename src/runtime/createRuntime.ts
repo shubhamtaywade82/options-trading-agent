@@ -13,7 +13,7 @@ import { LiveExecutionPort, type LiveClient } from '../dhan/liveExecution.js';
 import type { AgentConfig } from '../config.js';
 import type { ExecutionPort } from '../execution/ports.js';
 import { PostgresPaperExecutionPort } from '../execution/postgresPaper.js';
-import { PostgresPaperStore } from '../execution/paperStore.js';
+import { PostgresPaperStore, toPaise } from '../execution/paperStore.js';
 import { OllamaTradeAdvisor, type TradeAdvisor } from '../llm/advisor.js';
 import type { UnderlyingSpec } from '../domain/types.js';
 import { readFile } from 'node:fs/promises';
@@ -194,6 +194,16 @@ async function compose(
     releasedUnresolved: restored.releasedUnresolved,
   });
 
+  // The wallet already holds today's restored closes, so they come off to avoid counting them twice.
+  const openingBalanceInr =
+    venue === undefined
+      ? undefined
+      : toPaise(
+          (await venue.cash()) +
+            venue.getOpenPositions().reduce((sum, position) => sum + position.averagePrice * position.quantity, 0) -
+            dayBook.snapshot().realizedPnlInr,
+        );
+
   const gate = ledgerAndLeaseGate({
     unconfirmedEvents: () => events.unconfirmedEvents(),
     leaseHolds: () => session.lease === undefined || session.lease.holds(),
@@ -201,6 +211,7 @@ async function compose(
 
   const orchestrator = new Orchestrator(config, specs, {
     dayBook,
+    ...(openingBalanceInr === undefined ? {} : { openingBalanceInr }),
     market,
     feed,
     execution,

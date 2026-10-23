@@ -1,5 +1,5 @@
 import type { ExitReason, Tick } from '../domain/types.js';
-import { calculateTrailingStop, roundDownToTick, roundUpToTick } from '../options/pricing.js';
+import { calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import type { Logger } from '../ops/logger.js';
 import { toPaise, type OpenEntryResult, type PaperOrderRecord, type PaperPositionRecord, type PaperStore } from './paperStore.js';
 import type { EntryOrder, ExecutionEvent, ExecutionListener, ExecutionPort, ExitOrder } from './ports.js';
@@ -298,7 +298,15 @@ export class PostgresPaperExecutionPort implements ExecutionPort {
    * means another path already closed the position, which must not happen silently, so it is an error.
    */
   private async recordClose(position: OpenPosition, order: PaperOrderRecord, price: number, reason: string): Promise<void> {
-    const credit = toPaise(price * position.quantity);
+    // A broker deducts charges from the account, so the wallet does too. Same estimate the agent's day book uses,
+    // so the carried balance and the booked P&L agree.
+    const charges = roundTripChargesInr({
+      quantity: position.quantity,
+      buyPrice: position.averagePrice,
+      sellPrice: price,
+      exchangeSegment: position.exchangeSegment,
+    });
+    const credit = toPaise(price * position.quantity - charges);
     const debit = debitOf(position);
     const outcome = await this.store.closePosition({
       clientId: this.options.clientId,
