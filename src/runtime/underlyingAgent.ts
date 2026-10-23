@@ -58,6 +58,8 @@ export interface AgentDependencies {
   readonly gate?: TradingGate;
   /** Active session posture and strategy toggles shared across agents. */
   readonly strategySession?: StrategySession;
+  /** Account capital at the start of the day, after earlier P&L and withdrawals. CAPITAL_INR when omitted. */
+  readonly openingCapitalInr?: number;
 }
 
 type Preparation =
@@ -158,7 +160,11 @@ export class UnderlyingAgent {
       maxBarsSinceFlip: strategy.maxBarsSinceFlip,
       minDistanceAtr: strategy.minDistanceAtr,
     };
-    this.dailyLossLimitInr = (deps.config.capital.inr * deps.config.capital.maxDailyLossPct) / 100;
+    this.dailyLossLimitInr = (this.openingCapitalInr * deps.config.capital.maxDailyLossPct) / 100;
+  }
+
+  private get openingCapitalInr(): number {
+    return this.deps.openingCapitalInr ?? this.deps.config.capital.inr;
   }
 
   get state(): TradeState {
@@ -747,9 +753,9 @@ export class UnderlyingAgent {
       : bracket.targetPrice;
 
     const funds = await market.availableFunds();
-    // CAPITAL_INR is a ceiling: the daily loss limit is a percentage of it, so sizing off a larger
-    // broker balance would let one stop-out breach the day. A smaller balance shrinks risk with it.
-    const capital = Math.min(config.capital.inr, funds);
+    // Compounds: risk is a share of the day's opening capital plus what the day has realised. Premium already
+    // paid for open positions stays in that base; the funds check below decides only what is affordable.
+    const capital = Math.max(0, this.openingCapitalInr + this.deps.book.snapshot().realizedPnlInr);
     const sizing = sizePosition({
       capitalInr: capital,
       maxRiskPerTradePct: config.capital.maxRiskPerTradePct,

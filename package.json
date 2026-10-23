@@ -24,6 +24,7 @@
     "journal:summary": "tsx scripts/journal-summary.ts",
     "report:performance": "tsx scripts/performance-report.ts",
     "reconcile": "tsx scripts/reconcile.ts",
+    "withdraw": "tsx scripts/withdraw.ts",
     "cockpit:demo": "tsx scripts/cockpit-demo.ts",
     "db:status": "tsx scripts/db.ts status",
     "db:migrate": "tsx scripts/db.ts migrate",

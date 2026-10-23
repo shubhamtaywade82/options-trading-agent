@@ -28,7 +28,7 @@ function resetJournalFile(journalDir: string, dayKey: string): { path: string; a
 async function resetDatabaseState(databaseUrl: string, clientId: string, capitalInr: number): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl });
   try {
-    await pool.query('TRUNCATE paper_positions, paper_orders, paper_wallet_entries, paper_wallets CASCADE');
+    await pool.query('TRUNCATE paper_withdrawals, paper_positions, paper_orders, paper_wallet_entries, paper_wallets CASCADE');
     await pool.query(
       'INSERT INTO paper_wallets (client_id, initial_inr, balance_inr) VALUES ($1, $2, $2)',
       [clientId, capitalInr],

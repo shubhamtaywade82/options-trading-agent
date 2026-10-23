@@ -194,15 +194,7 @@ async function compose(
     releasedUnresolved: restored.releasedUnresolved,
   });
 
-  // The wallet already holds today's restored closes, so they come off to avoid counting them twice.
-  const openingBalanceInr =
-    venue === undefined
-      ? undefined
-      : toPaise(
-          (await venue.cash()) +
-            venue.getOpenPositions().reduce((sum, position) => sum + position.averagePrice * position.quantity, 0) -
-            dayBook.snapshot().realizedPnlInr,
-        );
+  const openingCapitalInr = await openingCapital(config, venue, market, dayBook);
 
   const gate = ledgerAndLeaseGate({
     unconfirmedEvents: () => events.unconfirmedEvents(),
@@ -211,7 +203,7 @@ async function compose(
 
   const orchestrator = new Orchestrator(config, specs, {
     dayBook,
-    ...(openingBalanceInr === undefined ? {} : { openingBalanceInr }),
+    openingCapitalInr,
     market,
     feed,
     execution,
@@ -297,6 +289,24 @@ function buildGateway(
  * Opens the PostgreSQL paper venue: creates the wallet on first use and loads the open positions. The venue needs
  * the database and the lease fence, both of which exist in paper mode because the config requires DATABASE_URL.
  */
+/**
+ * Capital the day starts with. The paper wallet carries every earlier close and withdrawal, so it compounds; it
+ * already holds today's restored closes, which come off so the day book does not count them twice. Other venues
+ * keep no history here, so CAPITAL_INR stands in, capped by the broker cash so a smaller account sizes smaller.
+ */
+async function openingCapital(
+  config: AgentConfig,
+  venue: PostgresPaperExecutionPort | undefined,
+  market: MarketPort,
+  dayBook: DayBook,
+): Promise<number> {
+  if (venue === undefined) {
+    return Math.min(config.capital.inr, await market.availableFunds());
+  }
+  const openPremiumInr = venue.getOpenPositions().reduce((sum, position) => sum + position.averagePrice * position.quantity, 0);
+  return toPaise((await venue.cash()) + openPremiumInr - dayBook.snapshot().realizedPnlInr);
+}
+
 async function openPaperVenue(
   config: AgentConfig,
   session: PersistenceSession,

@@ -4,6 +4,7 @@ import type { Pool } from 'pg';
 import { createPostgresPool } from '../src/persistence/postgres.js';
 import { validatePostgresUrl } from '../src/persistence/urls.js';
 import { toPaise } from '../src/execution/paperStore.js';
+import { roundTripChargesInr } from '../src/options/pricing.js';
 
 interface Issue {
   readonly severity: 'ERROR' | 'WARNING';
@@ -15,6 +16,7 @@ interface Issue {
 interface PositionRow {
   readonly position_id: string;
   readonly underlying: string;
+  readonly exchange_segment: string;
   readonly quantity: number;
   readonly average_price: number;
   readonly stop_loss_price: number;
@@ -54,6 +56,7 @@ interface AuditSummary {
   readonly closedCount: number;
   readonly openCapitalInr: number;
   readonly realizedPnlInr: number;
+  readonly withdrawnInr: number;
   readonly winCount: number;
   readonly lossCount: number;
   readonly issues: readonly Issue[];
@@ -64,14 +67,19 @@ function auditClosedPosition(pos: PositionRow, issues: Issue[]): { deltaCapital:
     issues.push({ severity: 'ERROR', category: 'POSITION_STATE', entityId: pos.position_id, detail: 'Closed position missing exit values' });
     return { deltaCapital: 0, deltaPnl: 0, win: false, loss: false };
   }
-  const expectedPnl = toPaise((pos.exit_price - pos.average_price) * pos.quantity);
-  if (Math.abs(expectedPnl - pos.realized_pnl) > 0.01) {
-    issues.push({ severity: 'ERROR', category: 'PNL_MATH', entityId: pos.position_id, detail: `P&L mismatch: expected ${expectedPnl}, recorded ${pos.realized_pnl}` });
+  const grossPnl = toPaise((pos.exit_price - pos.average_price) * pos.quantity);
+  const charges = roundTripChargesInr({ quantity: pos.quantity, buyPrice: pos.average_price, sellPrice: pos.exit_price, exchangeSegment: pos.exchange_segment });
+  const expectedPnl = toPaise(grossPnl - charges);
+  // Closes recorded before the wallet deducted charges carry the gross figure: correct then, overstated now.
+  if (Math.abs(grossPnl - pos.realized_pnl) <= 0.01 && charges > 0) {
+    issues.push({ severity: 'WARNING', category: 'PNL_GROSS', entityId: pos.position_id, detail: `P&L ${pos.realized_pnl} booked before charges of ${charges}` });
+  } else if (Math.abs(expectedPnl - pos.realized_pnl) > 0.01) {
+    issues.push({ severity: 'ERROR', category: 'PNL_MATH', entityId: pos.position_id, detail: `P&L mismatch: expected ${expectedPnl} after charges, recorded ${pos.realized_pnl}` });
   }
   if (expectedPnl < -toPaise(pos.average_price * pos.quantity)) {
     issues.push({ severity: 'ERROR', category: 'OPTIONS_RISK', entityId: pos.position_id, detail: 'Long option loss exceeds 100% of premium paid' });
   }
-  return { deltaCapital: 0, deltaPnl: expectedPnl, win: expectedPnl >= 0, loss: expectedPnl < 0 };
+  return { deltaCapital: 0, deltaPnl: pos.realized_pnl, win: pos.realized_pnl >= 0, loss: pos.realized_pnl < 0 };
 }
 
 function auditSinglePosition(pos: PositionRow, issues: Issue[]): { deltaCapital: number; deltaPnl: number; win: boolean; loss: boolean } {
@@ -134,17 +142,38 @@ function auditOrders(orders: readonly OrderRow[], positions: readonly PositionRo
   }
 }
 
-function auditLedgerChain(entries: readonly WalletEntryRow[], orders: readonly OrderRow[], initial: number, issues: Issue[]): number {
-  const orderMap = new Map(orders.map((o) => [o.correlation_id, o]));
+/** What a cash entry should move: an entry pays the premium, an exit returns cost plus the booked P&L, a withdrawal its amount. */
+function expectedEntryDelta(entry: WalletEntryRow, records: LedgerRecords): number | undefined {
+  const withdrawal = records.withdrawals.get(entry.correlation_id);
+  if (withdrawal !== undefined) {
+    return -withdrawal;
+  }
+  const order = records.orders.get(entry.correlation_id);
+  if (order === undefined) {
+    return undefined;
+  }
+  if (order.side === 'BUY') {
+    return toPaise(-order.price * order.quantity);
+  }
+  const position = records.positions.get(order.position_id);
+  return toPaise((position?.average_price ?? 0) * order.quantity + (position?.realized_pnl ?? 0));
+}
+
+interface LedgerRecords {
+  readonly orders: ReadonlyMap<string, OrderRow>;
+  readonly positions: ReadonlyMap<string, PositionRow>;
+  readonly withdrawals: ReadonlyMap<string, number>;
+}
+
+function auditLedgerChain(entries: readonly WalletEntryRow[], records: LedgerRecords, initial: number, issues: Issue[]): number {
   let running = initial;
 
   for (const entry of entries) {
-    const order = orderMap.get(entry.correlation_id);
-    if (!order) {
-      issues.push({ severity: 'ERROR', category: 'LEDGER_ORDER', entityId: entry.correlation_id, detail: 'Wallet entry has no matching order' });
+    const expectedDelta = expectedEntryDelta(entry, records);
+    if (expectedDelta === undefined) {
+      issues.push({ severity: 'ERROR', category: 'LEDGER_ORDER', entityId: entry.correlation_id, detail: 'Wallet entry has no matching order or withdrawal' });
       continue;
     }
-    const expectedDelta = toPaise((order.side === 'BUY' ? -1 : 1) * order.price * order.quantity);
     if (Math.abs(expectedDelta - entry.delta) > 0.01) {
       issues.push({ severity: 'ERROR', category: 'LEDGER_DELTA', entityId: entry.correlation_id, detail: `Delta mismatch: expected ${expectedDelta}, got ${entry.delta}` });
     }
@@ -165,6 +194,7 @@ function printSummaryHeader(s: AuditSummary): void {
   console.log(`Current Cash Balance:  ₹${s.currentBalanceInr.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`);
   console.log(`Committed in Open:     ₹${s.openCapitalInr.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (${s.openCount} open)`);
   console.log(`Realized P&L:          ₹${s.realizedPnlInr >= 0 ? '+' : ''}${s.realizedPnlInr.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (${s.closedCount} trades, ${winRate}% win rate)`);
+  console.log(`Withdrawn:             ₹${s.withdrawnInr.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`);
   console.log(`Total Account Equity:  ₹${netEquity.toLocaleString('en-IN', { minimumFractionDigits: 2 })}`);
   console.log('--------------------------------------------------------------------------');
   console.log('MATHEMATICAL & OPTIONS INVARIANTS:');
@@ -193,6 +223,7 @@ async function loadAuditRecords(pool: Pool, clientId: string): Promise<{
   positions: PositionRow[];
   orders: OrderRow[];
   entries: WalletEntryRow[];
+  withdrawals: Map<string, number>;
 }> {
   const walletRes = await pool.query<{ initial: number; balance: number }>(
     'SELECT initial_inr::float8 AS initial, balance_inr::float8 AS balance FROM paper_wallets WHERE client_id = $1',
@@ -201,22 +232,24 @@ async function loadAuditRecords(pool: Pool, clientId: string): Promise<{
   const wallet = walletRes.rows[0];
   if (!wallet) throw new Error(`No paper wallet found for client ${clientId}`);
 
-  const [posRes, orderRes, entryRes] = await Promise.all([
-    pool.query<PositionRow>('SELECT position_id, underlying, quantity, average_price::float8 AS average_price, stop_loss_price::float8 AS stop_loss_price, target_price::float8 AS target_price, status, opened_at, closed_at, exit_price::float8 AS exit_price, exit_reason, realized_pnl_inr::float8 AS realized_pnl FROM paper_positions WHERE client_id = $1 ORDER BY opened_at', [clientId]),
+  const [posRes, orderRes, entryRes, withdrawalRes] = await Promise.all([
+    pool.query<PositionRow>('SELECT position_id, underlying, exchange_segment, quantity, average_price::float8 AS average_price, stop_loss_price::float8 AS stop_loss_price, target_price::float8 AS target_price, status, opened_at, closed_at, exit_price::float8 AS exit_price, exit_reason, realized_pnl_inr::float8 AS realized_pnl FROM paper_positions WHERE client_id = $1 ORDER BY opened_at', [clientId]),
     pool.query<OrderRow>('SELECT correlation_id, position_id, kind, side, quantity, price::float8 AS price, at FROM paper_orders WHERE client_id = $1 ORDER BY at', [clientId]),
     pool.query<WalletEntryRow>('SELECT id::text AS id, correlation_id, delta_inr::float8 AS delta, balance_after_inr::float8 AS balance_after, at FROM paper_wallet_entries WHERE client_id = $1 ORDER BY id', [clientId]),
+    pool.query<{ period: string; amount: number }>('SELECT period, amount_inr::float8 AS amount FROM paper_withdrawals WHERE client_id = $1', [clientId]),
   ]);
-  return { wallet, positions: posRes.rows, orders: orderRes.rows, entries: entryRes.rows };
+  const withdrawals = new Map(withdrawalRes.rows.map((row) => [`WITHDRAWAL:${row.period}`, row.amount]));
+  return { wallet, positions: posRes.rows, orders: orderRes.rows, entries: entryRes.rows, withdrawals };
 }
 
-function verifyGlobalParity(wallet: { initial: number; balance: number }, posAudit: { openCapital: number; realizedPnl: number }, clientId: string, issues: Issue[]): void {
-  const expectedBalance = toPaise(wallet.initial + posAudit.realizedPnl - posAudit.openCapital);
+function verifyGlobalParity(wallet: { initial: number; balance: number }, posAudit: { openCapital: number; realizedPnl: number }, withdrawn: number, issues: Issue[]): void {
+  const expectedBalance = toPaise(wallet.initial + posAudit.realizedPnl - posAudit.openCapital - withdrawn);
   if (Math.abs(expectedBalance - wallet.balance) > 0.01) {
-    issues.push({ severity: 'ERROR', category: 'GLOBAL_BALANCE', entityId: clientId, detail: `Balance parity failed: Initial (${wallet.initial}) + PnL (${posAudit.realizedPnl}) - OpenCapital (${posAudit.openCapital}) = ${expectedBalance}, but wallet balance is ${wallet.balance}` });
+    issues.push({ severity: 'ERROR', category: 'GLOBAL_BALANCE', entityId: 'wallet', detail: `Balance parity failed: Initial (${wallet.initial}) + PnL (${posAudit.realizedPnl}) - OpenCapital (${posAudit.openCapital}) - Withdrawn (${withdrawn}) = ${expectedBalance}, but wallet balance is ${wallet.balance}` });
   }
 }
 
-function buildSummary(clientId: string, wallet: { initial: number; balance: number }, posAudit: { openCapital: number; realizedPnl: number; wins: number; losses: number }, ledgerBalance: number, positions: readonly PositionRow[], issues: readonly Issue[]): AuditSummary {
+function buildSummary(clientId: string, wallet: { initial: number; balance: number }, posAudit: { openCapital: number; realizedPnl: number; wins: number; losses: number }, withdrawn: number, ledgerBalance: number, positions: readonly PositionRow[], issues: readonly Issue[]): AuditSummary {
   return {
     clientId,
     initialInr: wallet.initial,
@@ -226,6 +259,7 @@ function buildSummary(clientId: string, wallet: { initial: number; balance: numb
     closedCount: positions.filter((p) => p.status === 'CLOSED').length,
     openCapitalInr: posAudit.openCapital,
     realizedPnlInr: posAudit.realizedPnl,
+    withdrawnInr: withdrawn,
     winCount: posAudit.wins,
     lossCount: posAudit.losses,
     issues,
@@ -242,13 +276,19 @@ async function main(): Promise<void> {
   const issues: Issue[] = [];
 
   try {
-    const { wallet, positions, orders, entries } = await loadAuditRecords(pool, clientId);
+    const { wallet, positions, orders, entries, withdrawals } = await loadAuditRecords(pool, clientId);
     const posAudit = auditPositions(positions, issues);
     auditOrders(orders, positions, issues);
-    const ledgerBalance = auditLedgerChain(entries, orders, wallet.initial, issues);
-    verifyGlobalParity(wallet, posAudit, clientId, issues);
+    const records = {
+      orders: new Map(orders.map((o) => [o.correlation_id, o])),
+      positions: new Map(positions.map((p) => [p.position_id, p])),
+      withdrawals,
+    };
+    const ledgerBalance = auditLedgerChain(entries, records, wallet.initial, issues);
+    const withdrawn = toPaise([...withdrawals.values()].reduce((sum, amount) => sum + amount, 0));
+    verifyGlobalParity(wallet, posAudit, withdrawn, issues);
 
-    printReport(buildSummary(clientId, wallet, posAudit, ledgerBalance, positions, issues));
+    printReport(buildSummary(clientId, wallet, posAudit, withdrawn, ledgerBalance, positions, issues));
     if (issues.some((i) => i.severity === 'ERROR')) process.exitCode = 1;
   } finally {
     await pool.end();

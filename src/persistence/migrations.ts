@@ -173,4 +173,23 @@ export const MIGRATIONS: readonly Migration[] = [
         FOR EACH ROW EXECUTE FUNCTION paper_position_closed_is_final();
     `,
   },
+  {
+    version: '005_paper_withdrawals',
+    sql: `
+      -- Profit taken out of the paper wallet, one row per week or month. The wallet entry for it carries the
+      -- correlation id WITHDRAWAL:<period>, so cash entries no longer all point at an order.
+      ALTER TABLE paper_wallet_entries DROP CONSTRAINT paper_wallet_entries_correlation_id_fkey;
+
+      CREATE TABLE paper_withdrawals (
+        client_id text NOT NULL REFERENCES paper_wallets (client_id),
+        period text NOT NULL CHECK (period ~ '^(W:[0-9]{4}-W[0-9]{2}|M:[0-9]{4}-[0-9]{2})$'),
+        period_pnl_inr numeric(18,2) NOT NULL,
+        amount_inr numeric(18,2) NOT NULL CHECK (amount_inr > 0),
+        at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (client_id, period)
+      );
+      CREATE TRIGGER paper_withdrawals_immutable BEFORE UPDATE OR DELETE ON paper_withdrawals
+        FOR EACH ROW EXECUTE FUNCTION paper_history_append_only();
+    `,
+  },
 ];

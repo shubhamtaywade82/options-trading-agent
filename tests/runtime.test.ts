@@ -123,7 +123,7 @@ function build(
     funds?: number;
     /** Runs inside the funds call, the last REST call before the risk gate. */
     onFunds?: () => void;
-    openingBalanceInr?: number;
+    openingCapitalInr?: number;
   } = {},
 ): Harness {
   // Start after the warmup's last bar has closed; the clock guard refuses bars stamped in the future.
@@ -191,7 +191,7 @@ function build(
     clockIntervalMs: 1e9,
     shutdownTimeoutMs: 2_000,
     ...(options.gate === undefined ? {} : { gate: options.gate }),
-    ...(options.openingBalanceInr === undefined ? {} : { openingBalanceInr: options.openingBalanceInr }),
+    ...(options.openingCapitalInr === undefined ? {} : { openingCapitalInr: options.openingCapitalInr }),
   });
   return {
     orchestrator,
@@ -407,10 +407,12 @@ describe('runtime: winning trade end to end (paper venue)', () => {
 
 describe('runtime: carried balance', () => {
   it('should show the balance carried from earlier sessions, not CAPITAL_INR, when an opening balance is given', () => {
-    const snapshot = build({}, { openingBalanceInr: 312_345.5 }).orchestrator.snapshot();
+    const snapshot = build({}, { openingCapitalInr: 312_345.5 }).orchestrator.snapshot();
     assert.equal(snapshot.initialCapitalInr, 300_000);
     assert.equal(snapshot.currentBalanceInr, 312_345.5);
     assert.equal(snapshot.realTimeBalanceInr, 312_345.5);
+    const atCapital = build().orchestrator.snapshot();
+    assert.ok(Math.abs(snapshot.dailyLossLimitInr - (atCapital.dailyLossLimitInr * 312_345.5) / 300_000) < 1e-6, 'the loss limit follows the capital');
   });
 });
 
@@ -440,8 +442,24 @@ describe('runtime: risk capital', () => {
     assert.equal(entries[0]?.targetPrice, 163.25);
   });
 
-  it('should shrink the risk budget when the broker balance is below CAPITAL_INR', async () => {
-    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { funds: 150_000 });
+  it('should compound: size off the opening capital, not CAPITAL_INR', async () => {
+    // 1% of 700000 is 7000, which covers three lots at 2272.5.
+    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { funds: 10_000_000, openingCapitalInr: 700_000 });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.openPosition?.quantity, 225);
+  });
+
+  it('should not shrink the risk budget because cash is tied up in open premium', async () => {
+    // 20000 cash buys two lots at 7575; risk still comes from the 300000 capital, so one lot, not none.
+    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { funds: 20_000 });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    assert.equal(harness.orchestrator.agent('NIFTY')?.openPosition?.quantity, 75);
+  });
+
+  it('should shrink the risk budget when the opening capital is below CAPITAL_INR', async () => {
+    const harness = build({ MAX_LOTS_PER_ORDER: '50' }, { openingCapitalInr: 150_000 });
     await harness.orchestrator.start();
     await triggerBreakout(harness);
     const dropped = harness.events.find((event) => event.type === 'signal_dropped');

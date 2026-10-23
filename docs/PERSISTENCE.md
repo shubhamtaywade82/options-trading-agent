@@ -30,6 +30,8 @@ Migrations are in `src/persistence/migrations.ts`, applied in order, each in its
 
 `004_paper_venue`: `paper_wallets` (balance cannot go negative), `paper_positions` (a position closes once; a trigger refuses any change to a closed one), `paper_orders` and `paper_wallet_entries` (append-only, same as `trade_events`). Every cash movement records the balance it leaves.
 
+`005_paper_withdrawals`: `paper_withdrawals` (append-only, one row per week or month). A withdrawal debits the wallet with a cash entry `WITHDRAWAL:<period>`, so wallet entries no longer all reference an order. Exits credit proceeds less estimated round-trip charges. `npm run withdraw` takes a share of the last completed period's net P&L; `npm run reconcile` checks `initial + realised P&L − open premium − withdrawn = balance`. The agent sizes off the day's opening capital (wallet cash + open premium − today's realised), so profit compounds and withdrawals reduce it.
+
 The migrator refuses to run when an applied migration's checksum (sha256) has changed, or when the database holds a version this build does not know.
 
 ## Modes and accounts

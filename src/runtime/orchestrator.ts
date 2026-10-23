@@ -26,8 +26,8 @@ export interface OrchestratorFeed extends FeedPort {
 export interface OrchestratorServices {
   /** Pre-restored book for the current IST day. A fresh book is created when omitted. */
   readonly dayBook?: DayBook;
-  /** Account balance carried in from earlier days, before today's realised P&L. CAPITAL_INR when omitted. */
-  readonly openingBalanceInr?: number;
+  /** Account capital at the start of the day, after earlier P&L and withdrawals. CAPITAL_INR when omitted. */
+  readonly openingCapitalInr?: number;
   readonly market: MarketPort;
   readonly feed: OrchestratorFeed;
   readonly execution: ExecutionPort;
@@ -93,7 +93,7 @@ export class Orchestrator {
     this.now = services.now ?? Date.now;
     this.strategySession = new StrategySession(config.session.initialPosture, config.strategy.enabledStrategies);
     this.book = services.dayBook ?? new DayBook(this.now(), config.exits.cooldownSeconds * 1000);
-    this.dailyLossLimitInr = (config.capital.inr * config.capital.maxDailyLossPct) / 100;
+    this.dailyLossLimitInr = ((services.openingCapitalInr ?? config.capital.inr) * config.capital.maxDailyLossPct) / 100;
     for (const spec of specs) {
       this.agents.set(spec.symbol, this.createAgent(spec));
       this.spotIndex.set(instrumentKey(spec.spot), spec.symbol);
@@ -329,7 +329,7 @@ export class Orchestrator {
 
   private computeBalances(realizedPnl: number, dayPnl: number) {
     const initial = this.config.capital.inr;
-    const opening = this.services.openingBalanceInr ?? initial;
+    const opening = this.services.openingCapitalInr ?? initial;
     const current = Number((opening + realizedPnl).toFixed(2));
     const allocated = Number(this.allocatedCapitalInr().toFixed(2));
     return {
@@ -352,7 +352,7 @@ export class Orchestrator {
       phaseDetail: this.phaseDetail,
       capitalInr: balances.initialCapitalInr,
       ...balances,
-      riskBudgetInr: (balances.initialCapitalInr * this.config.capital.maxRiskPerTradePct) / 100,
+      riskBudgetInr: (balances.currentBalanceInr * this.config.capital.maxRiskPerTradePct) / 100,
       dailyLossLimitInr: this.dailyLossLimitInr,
       maxTradesPerDay: this.config.capital.maxTradesPerDay,
       maxOpenPositions: this.config.capital.maxOpenPositions,
@@ -478,6 +478,7 @@ export class Orchestrator {
       onHalt: (underlying, reason) => this.onHalt(underlying, reason),
       now: this.now,
       strategySession: this.strategySession,
+      ...(this.services.openingCapitalInr === undefined ? {} : { openingCapitalInr: this.services.openingCapitalInr }),
       ...(this.services.gate === undefined ? {} : { gate: this.services.gate }),
     });
   }
