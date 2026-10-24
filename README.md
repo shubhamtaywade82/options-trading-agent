@@ -16,7 +16,8 @@ research plane were removed, not adapted. See [What was removed](#what-was-remov
 | Long CE / long PE on index options (buy-to-open only) | Any option selling, spreads that sell premium, or short options |
 | NSE_FNO and BSE_FNO index options | Equities, futures, commodities, crypto |
 | DhanHQ REST + WebSocket market data and super-order execution | Other brokers |
-| Three modes on live market data: `paper`, `sandbox`, `live` | Historical option backtesting (not yet, see Known limits) |
+| Three modes on live market data: `paper`, `sandbox`, `live` | Automatic tuning from backtest results |
+| Offline historical replay on real option premiums ([Time Machine](docs/TIME_MACHINE.md)) | |
 
 ## Quick start
 
@@ -230,6 +231,8 @@ before relying on it. The first check it runs is the login.
 | `npm run smoke:live` | Read-only check of the open assumptions against live Dhan data: scrip master, expiries, option-chain fields, warmup bars and clock, funds, open broker positions. Places no orders. | Dhan |
 | `npm run journal:summary [YYYY-MM-DD]` | Summarises a day's journal: trades, wins and losses, realised P&L, exit reasons, dropped-signal reasons, halts. | none |
 | `npm run report:performance [-- --from YYYY-MM-DD --to YYYY-MM-DD --json]` | Results across every journal day, overall and by strategy, posture, underlying, option type, exit reason, entry hour, days to expiry and day: trades, win rate, net P&L, expectancy per trade, profit factor, average R, charges. Plus the signal funnel and every drop reason. Groups under 30 trades are flagged as too few to judge. One mode and client only. | none |
+| `npm run timemachine -- fetch …` | Builds a research dataset: intraday spot bars plus Dhan rolling-option premiums for ATM±N, re-keyed by real strike. Read-only. See [docs/TIME_MACHINE.md](docs/TIME_MACHINE.md). | Dhan |
+| `npm run timemachine -- run --data FILE` | Replays the live rules on that dataset (same strategy, bracket, sizing, pre-trade gate and charges code), then a block bootstrap of days and Monte Carlo day paths. Prints target-first / stop-first / unresolved rates with Wilson intervals, mean net R with a 95% interval, an out-of-sample check, and a verdict: `INSUFFICIENT_EVIDENCE`, `NO_TRADE` or `EDGE_SUPPORTED`. | none |
 
 Run `smoke:live` before a live session, and `journal:summary` after every paper session. Use
 `report:performance` to judge settings, and change a setting only on a group with enough trades. Each entry
@@ -242,7 +245,7 @@ Operator test trades are journalled as strategy `test`, so they never count as a
 npm run check   # typecheck + build + tests
 ```
 
-The suite has 134 tests, all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
+The suite has 464 tests, all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
 
 - the state machine's full transition table and illegal-transition rejection
 - indicators, bar aggregation, and the ORB+SuperTrend signal, including session-boundary
@@ -253,6 +256,9 @@ The suite has 134 tests, all offline (the advisor is also exercised over HTTP ag
 - the live adapter against a fake broker: placement classification, fill confirmation,
   exit net-quantity guard, short-position halt, reconciliation, and duplicate suppression
 - the Ollama advisor's fail-closed behaviour
+- the Time Machine: rolling-option parsing and strike pivot, dataset validation, replay fills (target, stop,
+  ambiguous bar, gap-through, time stop, EOD, data gap, spread), the live gate inside the replay, Wilson and
+  bootstrap intervals, path drawdowns, and every verdict
 - end-to-end runtime scenarios: winning trade, EOD flatten, gap-through stop plus
   daily-loss breach, advisor veto, stale data, unconfirmed entry halt, shutdown flatten,
   and refusal to start with broker positions open
@@ -289,8 +295,9 @@ These are assumptions the code depends on that the SDK docs do not settle:
 
 ## Known limits
 
-- No backtester for index options. Historical option premium replay needs a validated data
-  source. The SDK exposes `expiredOptionsData`, but it is not wired here.
+- The Time Machine's data source (`/charts/rollingoption`) has not been checked against a live response from this
+  environment. Run `timemachine fetch --dump-raw` once before trusting a dataset. It cannot replay the chain gate
+  or quote-based liquidity gates. See [docs/TIME_MACHINE.md](docs/TIME_MACHINE.md#verification-required-before-trusting-a-dataset).
 - Paper fills model neither queue position nor partial fills, and slippage is a flat bps
   parameter. Paper P&L is an approximation.
 - The strategy's indicator parameters are not optimised. Treat paper results as a smoke test.
@@ -329,6 +336,7 @@ src/
   llm/                 Ollama advisor
   ops/                 event log, console logger
   runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring, read-only views
+  research/            Time Machine: dataset and rolling-option pivot, historical replay, bootstrap and paths (offline)
   ui/                  operator cockpit: pure renderer (cockpit.ts) and Ink app (App.tsx)
   index.tsx            entry point: cockpit on a terminal, plain logs otherwise
 tests/                 offline suite (node:test via tsx)
