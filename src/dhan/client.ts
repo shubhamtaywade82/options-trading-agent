@@ -20,6 +20,7 @@ export interface DhanClientOptions {
    * credentials, and sends orders, positions, funds and controls to the sandbox on these credentials.
    */
   readonly sandbox?: SandboxConfig;
+  readonly timeoutMs?: number;
 }
 
 /** The SDK options that switch a client to sandbox orders. Empty for live and paper, which send orders only to production or nowhere. */
@@ -57,8 +58,9 @@ function sandboxOptions(sandbox: SandboxConfig | undefined): {
 export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanClientOptions = {}): Promise<DhanClient> {
   const baseURL = dhan.baseUrl === undefined ? {} : { baseURL: dhan.baseUrl };
   const sandbox = sandboxOptions(options.sandbox);
+  const timeout = options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs };
   if (dhan.auth.kind === 'static') {
-    return new DhanClient({ clientId: dhan.clientId, token: dhan.auth.accessToken, ...baseURL, ...sandbox });
+    return new DhanClient({ clientId: dhan.clientId, token: dhan.auth.accessToken, ...baseURL, ...sandbox, ...timeout });
   }
 
   const { pin, totpSecret } = dhan.auth;
@@ -106,6 +108,7 @@ export async function createDhanClient(dhan: AgentConfig['dhan'], options: DhanC
     },
     ...baseURL,
     ...sandbox,
+    ...timeout,
   });
   // Built directly, not through client.auth.enableAutoTokenManagement, because that call replaces
   // the provider in the client config. REST and both WebSocket feeds must share `provide`.

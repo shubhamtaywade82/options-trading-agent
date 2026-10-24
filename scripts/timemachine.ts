@@ -6,7 +6,7 @@
  *   # 1. Build a dataset (read-only Dhan calls: intraday spot bars + /charts/rollingoption)
  *   npm run timemachine -- fetch --underlying NIFTY --from 2026-04-01 --to 2026-09-30 --lot-size 75
  *        [--expiry-flag WEEK] [--expiry-code 1] [--offsets 10] [--tick-size 0.05] [--spacing-ms 400]
- *        [--out data/research/NIFTY-2026-04-01-2026-09-30.json] [--dump-raw]
+ *        [--timeout-ms 30000] [--out data/research/NIFTY-2026-04-01-2026-09-30.json] [--dump-raw]
  *
  *   # 2. Replay it with the current config (no credentials, no network)
  *   npm run timemachine -- run --data data/research/NIFTY-2026-04-01-2026-09-30.json
@@ -121,6 +121,7 @@ async function fetchDataset(): Promise<void> {
     throw new Error('--expiry-flag must be WEEK or MONTH');
   }
   const spacingMs = numberArgument('--spacing-ms', 400, (value) => value >= 0);
+  const timeoutMs = numberArgument('--timeout-ms', 30_000, (value) => value > 0);
   const out = argument('--out') ?? `data/research/${underlying}-${fromDate}-${toDate}.json`;
 
   const { createDhanClient } = await import('../src/dhan/client.js');
@@ -130,7 +131,7 @@ async function fetchDataset(): Promise<void> {
   const { istParts } = await import('../src/time/ist.js');
 
   const config = loadConfig({ ...process.env, MODE: 'paper' });
-  const client = await createDhanClient(config.dhan, { logger: createConsoleLogger() });
+  const client = await createDhanClient(config.dhan, { logger: createConsoleLogger(), timeoutMs });
   const master = new InstrumentMaster(client.instruments, () => istParts(Date.now()).date);
   const market = new DhanMarketData(client, { istShiftedTimestamps: config.feed.istShiftedTimestamps });
   const spotRef = await master.resolveSpot(underlying);
