@@ -23,6 +23,7 @@
     "smoke:feed": "tsx scripts/smoke-feed.ts",
     "journal:summary": "tsx scripts/journal-summary.ts",
     "report:performance": "tsx scripts/performance-report.ts",
+    "timemachine": "tsx scripts/timemachine.ts",
     "reconcile": "tsx scripts/reconcile.ts",
     "withdraw": "tsx scripts/withdraw.ts",
     "cockpit:demo": "tsx scripts/cockpit-demo.ts",
