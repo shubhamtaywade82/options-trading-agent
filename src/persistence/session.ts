@@ -160,7 +160,7 @@ export async function openSession(
 
     if (lease !== undefined && ledger !== undefined) {
       const isPaper = config.mode === 'paper';
-      if (!(await lease.acquire(isPaper))) {
+      if (!(await lease.acquire())) {
         throw new Error(
           `another run holds the trading lease for ${account}. A crashed run releases it when its lease expires, plus the order timeout; start again after that`,
         );
