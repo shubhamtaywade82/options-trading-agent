@@ -54,7 +54,9 @@ export function toOptionContract(row: Instrument, underlying: string, optionSegm
   const strike = positiveNumber(row.strikePrice);
   const expiry = normalizeExpiry(row.expiryDate);
   const lotSize = positiveNumber(row.lotSize);
-  const tickSize = positiveNumber(row.tickSize);
+  // Scrip master TICK_SIZE is in paise (5 = ₹0.05); read as rupees it rounded every price to ₹5.
+  const tickSizePaise = positiveNumber(row.tickSize);
+  const tickSize = tickSizePaise === undefined ? undefined : tickSizePaise / 100;
   if (strike === undefined || expiry === undefined || lotSize === undefined || tickSize === undefined) {
     return undefined;
   }
