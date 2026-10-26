@@ -211,16 +211,13 @@ async function runReplay(): Promise<void> {
   env.DATABASE_URL ??= 'postgres://offline-research@127.0.0.1:5432/offline_research';
   const config = loadConfig(env, configPath);
   const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
-  const { replay: liveReplay, divergences } = replayConfigFrom(config);
-  const ivCrushExitPts = argument('--iv-exit-pts') === undefined ? undefined : numberArgument('--iv-exit-pts', 0, (value) => value > 0);
-  const replay = { ...liveReplay, ivCrushExitPts };
-  const notes = ivCrushExitPts === undefined ? divergences : [...divergences, `IV-crush exit at ${ivCrushExitPts} vol points is research-only; the live agent has no such exit`];
+  const { replay, divergences } = replayConfigFrom(config);
   const fallbackCosts = defaultCostModel(config);
   const costs: CostModel = {
     halfSpreadPct: numberArgument('--half-spread-pct', fallbackCosts.halfSpreadPct, (value) => value >= 0 && value <= 20),
     stopSlippagePct: numberArgument('--stop-slippage-pct', fallbackCosts.stopSlippagePct, (value) => value >= 0 && value <= 20),
   };
-  const report = runTimeMachine(dataset, replay, costs, notes, {
+  const report = runTimeMachine(dataset, replay, costs, divergences, {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
     seed: numberArgument('--seed', DEFAULT_TIME_MACHINE_OPTIONS.seed, (value) => Number.isInteger(value) && value >= 0 && value < 2 ** 32),
     iterations: numberArgument('--iterations', DEFAULT_TIME_MACHINE_OPTIONS.iterations, (value) => Number.isInteger(value) && value >= 100 && value <= 1_000_000),

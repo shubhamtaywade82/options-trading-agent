@@ -130,9 +130,9 @@ Facts verified from the SDK source:
 served 1-minute bars as well as 5-minute ones. They are stored per option bar as optional fields, so older
 datasets without them still load. IV is the source's annualised implied volatility in percent.
 
-`run --iv-exit-pts N` adds a research-only exit: once the held strike's IV closes N vol points below its
-entry-bar IV, the replay exits at the next bar's open (`IV_CRUSH`). The live agent has no such exit, and the
-report says so. Bars without IV never trigger it.
+An exit on falling IV (leave once the held strike's IV is 1.5–3 vol points below entry) was tested on
+NIFTY 2025-10..2026-09, SENSEX and BANKNIFTY 2026-04..09 and changed mean net R by under 0.02 either way, so
+it was removed. `fetch --interval 1` pulls 1-minute bars; `run` needs `BAR_MINUTES` to match the dataset.
 
 ## Verification required before trusting a dataset
 
@@ -144,8 +144,9 @@ These items cannot be verified from this environment (no broker credentials):
    `parseDataset` refuses bars outside 09:15–15:30 IST, which catches a 5h30m error but not a smaller one.
 3. **Offset band.** How many ATM offsets Dhan serves for each index and expiry type. Lower `--offsets` if
    requests fail. A large `DATA_GAP` count means the band is too narrow for the moves in the range.
-4. **Expiry code at the roll.** Whether `expiryCode 1` on expiry day refers to that day's expiry or the next.
-   This decides whether expiry-day theta is in the sample.
+4. **Expiry code at the roll.** Checked for NIFTY weekly on July 2026 1-minute data: on each Tuesday the ATM
+   straddle at 15:20 was ₹3–13 against ₹120–365 on other days, so `expiryCode 1` on expiry day is that day's
+   expiry and expiry-day theta is in the sample. Not yet checked for SENSEX or BANKNIFTY.
 5. **Expiry dates.** The rolling source does not return them, so the expiry-day entry cutoff is skipped (the
    report warns). An expiry calendar per underlying would close this.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
