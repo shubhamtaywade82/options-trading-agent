@@ -19,7 +19,7 @@ const NIFTY_CALL = row({
   strikePrice: 22_450,
   expiryDate: '2026-10-15 14:30:00',
   lotSize: 75,
-  tickSize: 0.05,
+  tickSize: 5,
   displayName: 'NIFTY 15 OCT 22450 CALL',
 });
 
