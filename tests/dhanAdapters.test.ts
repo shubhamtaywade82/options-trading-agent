@@ -40,6 +40,13 @@ describe('chart mapping', () => {
     assert.equal(bar?.time, istEpoch('2026-10-12', '09:15'));
   });
 
+  it('drops bars outside the 09:15-15:30 session, as live bars do', () => {
+    const inSession = istEpoch('2026-10-26', '15:25') / 1000;
+    const afterClose = istEpoch('2026-10-26', '18:40') / 1000;
+    const bars = mapChartColumns({ open: [1, 1], high: [1, 1], low: [1, 1], close: [1, 1], timestamp: [inSession, afterClose] }, false);
+    assert.deepEqual(bars.map((bar) => bar.time), [inSession * 1000]);
+  });
+
   it('fails the whole batch on mismatched columns or an impossible bar', () => {
     assert.throws(() => mapChartColumns({ open: [1, 2], high: [1], low: [1], close: [1], timestamp: [1] }, false), /mismatched/);
     assert.throws(() => mapChartColumns({ open: [1], high: [0.5], low: [1], close: [1], timestamp: [1] }, false), /invalid chart bar/);

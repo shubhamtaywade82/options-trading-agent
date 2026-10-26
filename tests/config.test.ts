@@ -243,7 +243,7 @@ describe('loadConfig posture and YAML loading', () => {
     assert.equal(config.strategy.maxBarsSinceFlip, 4);
     assert.equal(config.strategy.minDistanceAtr, 0.2);
     assert.equal(config.contract.minDaysToExpiry, 0);
-    assert.equal(config.contract.maxDaysToExpiry, 4);
+    assert.equal(config.contract.maxDaysToExpiry, 6);
     assert.equal(config.chainAnalysis.enabled, true);
     assert.equal(config.chainAnalysis.minHeadroomPts, 15);
   });

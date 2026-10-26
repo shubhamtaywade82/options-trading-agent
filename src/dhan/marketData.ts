@@ -2,7 +2,7 @@ import type { DhanClient } from '@nemesis-oss/dhanhq-sdk';
 import type { Candle, InstrumentRef } from '../domain/types.js';
 import type { ChainLeg, ChainSnapshot, ChainStrike } from '../options/selector.js';
 import { MemoryRateGate, type RateGate } from '../persistence/rateGate.js';
-import { dhanEpochSecondsToMs, istParts } from '../time/ist.js';
+import { dhanEpochSecondsToMs, isMarketSessionOpen, istParts } from '../time/ist.js';
 
 /** Dhan rate-limits `/optionchain` to one call every three seconds. */
 export const OPTION_CHAIN_MIN_INTERVAL_MS = 3_000;
@@ -51,6 +51,11 @@ export function mapChartColumns(
     const finite = [candle.time, candle.open, candle.high, candle.low, candle.close].every(Number.isFinite);
     if (!finite || candle.high < candle.low || candle.low <= 0) {
       throw new Error(`invalid chart bar at index ${i}`);
+    }
+    // Dhan can append a zero-volume bar after the close (seen at 18:40 IST on 2026-10-26). Live bars drop
+    // post-close ticks, so history drops these too, or warmup indicators see a bar the live series never has.
+    if (!isMarketSessionOpen(candle.time)) {
+      continue;
     }
     bars.set(candle.time, candle);
   }

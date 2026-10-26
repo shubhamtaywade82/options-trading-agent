@@ -58,7 +58,7 @@ strategy:
 # Contract selection & expiry constraints
 contract:
   min_days_to_expiry: 0
-  max_days_to_expiry: 4        # Capped at 4 DTE: avoids sluggish, low-delta 8+ DTE contracts
+  max_days_to_expiry: 6        # 6 keeps every weekly expiry in reach (NIFTY Wed/Thu, SENSEX Fri sat out at 4) and still excludes 8+ DTE
 
 # Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
 chain_analysis:
