@@ -18,8 +18,8 @@ export interface ResearchSession {
   readonly expiry?: string | undefined;
   readonly spot: readonly Candle[];
   /** Strike (as a decimal string) to that strike's bars, ascending by time. */
-  readonly calls: Readonly<Record<string, readonly Candle[]>>;
-  readonly puts: Readonly<Record<string, readonly Candle[]>>;
+  readonly calls: Readonly<Record<string, readonly OptionBar[]>>;
+  readonly puts: Readonly<Record<string, readonly OptionBar[]>>;
 }
 
 export interface ResearchDataset {
@@ -49,6 +49,12 @@ const candleSchema = z.object({
   volume: z.number().nonnegative(),
 });
 
+/** Datasets fetched before IV/OI were requested carry neither field. */
+const optionBarSchema = candleSchema.extend({
+  iv: z.number().nonnegative().optional(),
+  oi: z.number().nonnegative().optional(),
+});
+
 const sessionSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   lotSize: z.number().int().positive(),
@@ -56,8 +62,8 @@ const sessionSchema = z.object({
   strikeStep: z.number().positive(),
   expiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   spot: z.array(candleSchema),
-  calls: z.record(z.string(), z.array(candleSchema)),
-  puts: z.record(z.string(), z.array(candleSchema)),
+  calls: z.record(z.string(), z.array(optionBarSchema)),
+  puts: z.record(z.string(), z.array(optionBarSchema)),
 });
 
 const datasetSchema = z.object({
@@ -129,7 +135,7 @@ export function parseDataset(raw: unknown): ResearchDataset {
   return dataset;
 }
 
-export function legBars(session: ResearchSession, optionType: OptionType, strike: number): readonly Candle[] | undefined {
+export function legBars(session: ResearchSession, optionType: OptionType, strike: number): readonly OptionBar[] | undefined {
   return (optionType === 'CE' ? session.calls : session.puts)[strikeKey(strike)];
 }
 
@@ -143,8 +149,14 @@ export function sessionStrikes(session: ResearchSession, optionType: OptionType)
     .sort((a, b) => a - b);
 }
 
+/** A premium bar with the source's implied volatility (annualised %) and open interest, when fetched. */
+export interface OptionBar extends Candle {
+  readonly iv?: number | undefined;
+  readonly oi?: number | undefined;
+}
+
 /** One bar of a rolling (ATM-relative) option series, tagged with the real strike it priced at that bar. */
-export interface RollingBar extends Candle {
+export interface RollingBar extends OptionBar {
   readonly strike: number;
 }
 
@@ -190,6 +202,8 @@ export function parseRollingOptionResponse(raw: unknown, optionType: OptionType,
   const close = numberColumn(record, 'close', length);
   const strike = numberColumn(record, 'strike', length);
   const volume = Array.isArray(record['volume']) ? numberColumn(record, 'volume', length) : [];
+  const iv = Array.isArray(record['iv']) ? numberColumn(record, 'iv', length) : [];
+  const oi = Array.isArray(record['oi']) ? numberColumn(record, 'oi', length) : [];
   const bars: RollingBar[] = [];
   for (let i = 0; i < length; i += 1) {
     const bar: RollingBar = {
@@ -200,6 +214,8 @@ export function parseRollingOptionResponse(raw: unknown, optionType: OptionType,
       close: close[i] as number,
       volume: volume[i] ?? 0,
       strike: strike[i] as number,
+      ...(iv[i] === undefined ? {} : { iv: iv[i] }),
+      ...(oi[i] === undefined ? {} : { oi: oi[i] }),
     };
     // A zero or negative premium is not a trade print; it is a gap in the source. Skip the bar rather than
     // price a fill off it. Inconsistent OHLC on a positive print means the parse is wrong, so that refuses.
@@ -219,8 +235,8 @@ export function parseRollingOptionResponse(raw: unknown, optionType: OptionType,
  * ATM at 11:00 becomes one continuous series. When two offsets report the same (strike, bar) the first is kept
  * and the disagreement counted, so a dataset with many conflicts can be refused by the caller.
  */
-export function pivotByStrike(series: readonly (readonly RollingBar[])[]): { byStrike: Map<number, Candle[]>; conflicts: number } {
-  const cells = new Map<number, Map<number, Candle>>();
+export function pivotByStrike(series: readonly (readonly RollingBar[])[]): { byStrike: Map<number, OptionBar[]>; conflicts: number } {
+  const cells = new Map<number, Map<number, OptionBar>>();
   let conflicts = 0;
   for (const bars of series) {
     for (const bar of bars) {
@@ -231,7 +247,7 @@ export function pivotByStrike(series: readonly (readonly RollingBar[])[]): { byS
         cells.set(strike, byTime);
       }
       const existing = byTime.get(bar.time);
-      const candle: Candle = { time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume };
+      const { strike: _strike, ...candle } = bar;
       if (existing === undefined) {
         byTime.set(bar.time, candle);
       } else if (existing.open !== candle.open || existing.high !== candle.high || existing.low !== candle.low || existing.close !== candle.close) {
@@ -239,7 +255,7 @@ export function pivotByStrike(series: readonly (readonly RollingBar[])[]): { byS
       }
     }
   }
-  const byStrike = new Map<number, Candle[]>();
+  const byStrike = new Map<number, OptionBar[]>();
   for (const [strike, byTime] of cells) {
     byStrike.set(strike, [...byTime.values()].sort((a, b) => a.time - b.time));
   }
@@ -249,15 +265,15 @@ export function pivotByStrike(series: readonly (readonly RollingBar[])[]): { byS
 /** Splits spot and per-strike premium bars into IST sessions. Days without spot bars are dropped. */
 export function buildSessions(input: {
   spot: readonly Candle[];
-  calls: ReadonlyMap<number, readonly Candle[]>;
-  puts: ReadonlyMap<number, readonly Candle[]>;
+  calls: ReadonlyMap<number, readonly OptionBar[]>;
+  puts: ReadonlyMap<number, readonly OptionBar[]>;
   lotSize: number;
   tickSize: number;
   fromDate: string;
   toDate: string;
 }): ResearchSession[] {
-  const byDate = new Map<string, { spot: Candle[]; calls: Record<string, Candle[]>; puts: Record<string, Candle[]> }>();
-  const day = (date: string): { spot: Candle[]; calls: Record<string, Candle[]>; puts: Record<string, Candle[]> } => {
+  const byDate = new Map<string, { spot: Candle[]; calls: Record<string, OptionBar[]>; puts: Record<string, OptionBar[]> }>();
+  const day = (date: string): { spot: Candle[]; calls: Record<string, OptionBar[]>; puts: Record<string, OptionBar[]> } => {
     let entry = byDate.get(date);
     if (entry === undefined) {
       entry = { spot: [], calls: {}, puts: {} };

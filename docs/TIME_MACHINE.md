@@ -124,6 +124,16 @@ Facts verified from the SDK source:
   `{ data: { ce | pe: { open, high, low, close, strike, timestamp, volume? } } }` and refuses anything else with
   the keys it found.
 
+### Implied volatility and open interest
+
+`fetch` also requests `iv` and `oi`. A live account returned both columns, plus `spot`, on 2026-10-26, and
+served 1-minute bars as well as 5-minute ones. They are stored per option bar as optional fields, so older
+datasets without them still load. IV is the source's annualised implied volatility in percent.
+
+`run --iv-exit-pts N` adds a research-only exit: once the held strike's IV closes N vol points below its
+entry-bar IV, the replay exits at the next bar's open (`IV_CRUSH`). The live agent has no such exit, and the
+report says so. Bars without IV never trigger it.
+
 ## Verification required before trusting a dataset
 
 These items cannot be verified from this environment (no broker credentials):

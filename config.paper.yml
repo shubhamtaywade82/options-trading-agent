@@ -89,10 +89,10 @@ limits:
 
 # Exit Strategy & Targets
 exits:
-  stop_loss_pct: 30            # 30% stop loss
-  target_rr: 1.5               # 1:1.5 Risk to Reward (+45% target on premium; higher probability of hitting than 2.0R)
+  stop_loss_pct: 50            # Wide premium stop: 30% was hit by noise. Time Machine NIFTY/SENSEX/BN 2025-10..2026-09
+  target_rr: 1.0               # Take 1R: the edge, where any, is in the first 30 min; 1.5R mostly expired unhit
   runner_mode: false           # false = realistic achievable TP; true = uncapped runner
-  max_hold_minutes: 90         # 90 min hold: lets trend develop, preventing premature lunchtime time-stop exits
+  max_hold_minutes: 30         # 50%/1R/30min was the only exit set >= 0R on all four replay datasets; 30%/1.5R/90min was the worst
   trailing_jump_pct: 8         # Step up stop loss by 8% as price advances (locks in profit tighter)
   breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+24% gain)
 

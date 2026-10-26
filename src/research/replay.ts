@@ -8,7 +8,7 @@ import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst 
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
-import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
+import { legBars, sessionStrikes, type OptionBar, type ResearchDataset, type ResearchSession } from './dataset.js';
 
 /** The live settings a replay honours. Built from AgentConfig so a replay runs the rules the agent would run. */
 export interface ReplayConfig {
@@ -24,6 +24,11 @@ export interface ReplayConfig {
   readonly entryLimitBufferPct: number;
   readonly expiryDayEntryCutoffMinute: number;
   readonly exits: AgentConfig['exits'];
+  /**
+   * Research only, not a live setting: exit at the next bar open once the held strike's IV is this many vol
+   * points below its entry-bar IV. Needs a dataset fetched with IV; bars without IV never trigger it.
+   */
+  readonly ivCrushExitPts?: number | undefined;
   readonly capital: Pick<AgentConfig['capital'], 'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder'>;
 }
 
@@ -38,7 +43,7 @@ export interface CostModel {
   readonly stopSlippagePct: number;
 }
 
-export type ReplayExitReason = 'STOP_LOSS' | 'TARGET' | 'TIME_STOP' | 'EOD_FLATTEN' | 'DAILY_LOSS' | 'STRUCTURE_BREAK' | 'DATA_GAP';
+export type ReplayExitReason = 'STOP_LOSS' | 'TARGET' | 'TIME_STOP' | 'EOD_FLATTEN' | 'DAILY_LOSS' | 'STRUCTURE_BREAK' | 'IV_CRUSH' | 'DATA_GAP';
 
 export interface ReplayTrade {
   readonly date: string;
@@ -148,8 +153,9 @@ interface PendingEntry {
 }
 
 interface HeldPosition extends PendingEntry {
-  readonly bars: ReadonlyMap<number, Candle>;
+  readonly bars: ReadonlyMap<number, OptionBar>;
   readonly entryTime: number;
+  readonly entryIv: number | undefined;
   readonly entryLimit: number;
   readonly entryPrice: number;
   readonly initialStopPrice: number;
@@ -345,6 +351,7 @@ function replaySession(
       ...entry,
       bars,
       entryTime: time,
+      entryIv: bar.iv,
       entryLimit,
       entryPrice,
       initialStopPrice: bracket.stopLossPrice,
@@ -404,6 +411,10 @@ function replaySession(
       return;
     }
     held.lastMark = bar.close;
+    const ivDrop = held.entryIv === undefined || bar.iv === undefined ? undefined : held.entryIv - bar.iv;
+    if (config.ivCrushExitPts !== undefined && ivDrop !== undefined && ivDrop >= config.ivCrushExitPts) {
+      held.flaggedExit ??= 'IV_CRUSH';
+    }
     // The trailing stop moves on this bar's high but takes effect from the next bar, never inside this one.
     if (held.trailingJump !== undefined && held.trailingJump > 0) {
       held.highWaterMark = Math.max(held.highWaterMark, bar.high);

@@ -166,6 +166,12 @@ describe('rolling option parsing', () => {
     assert.deepEqual(byStrike.get(100)?.map((candle) => [candle.time, candle.close]), [[1, 10], [2, 12]]);
     assert.equal(conflicts, 1);
   });
+
+  it('keeps IV and OI through parsing and the strike pivot when the response has them', () => {
+    const raw = { data: { ce: { open: [10], high: [12], low: [9], close: [11], strike: [100], iv: [18.5], oi: [4200], timestamp: [t0] } } };
+    const { byStrike } = pivotByStrike([parseRollingOptionResponse(raw, 'CE', false)]);
+    assert.deepEqual(byStrike.get(100)?.map((candle) => [candle.iv, candle.oi]), [[18.5, 4200]]);
+  });
 });
 
 describe('research dataset validation', () => {
@@ -244,6 +250,19 @@ describe('historical replay', () => {
     const [trade] = replayDataset(dataset([session(DAY)]), CONFIG, NO_COSTS).trades;
     assert.equal(trade?.exitReason, 'EOD_FLATTEN');
     assert.equal(trade?.exitTime, istEpoch(DAY, '15:15'));
+  });
+
+  it('exits at the next open once the held strike\'s IV falls the research threshold below entry', () => {
+    const base = session(DAY);
+    const ivAt = (time: number): number => (time < istEpoch(DAY, '09:40') ? 20 : 17.5);
+    const withIv = { ...base, calls: { ...base.calls, '100': (base.calls['100'] ?? []).map((candle) => ({ ...candle, iv: ivAt(candle.time) })) } };
+    const [crushed] = replayDataset(dataset([withIv]), { ...CONFIG, ivCrushExitPts: 2 }, NO_COSTS).trades;
+    assert.equal(crushed?.exitReason, 'IV_CRUSH');
+    assert.equal(crushed?.exitTime, istEpoch(DAY, '09:45'));
+    const [tolerated] = replayDataset(dataset([withIv]), { ...CONFIG, ivCrushExitPts: 3 }, NO_COSTS).trades;
+    assert.equal(tolerated?.exitReason, 'EOD_FLATTEN');
+    const [noIv] = replayDataset(dataset([session(DAY)]), { ...CONFIG, ivCrushExitPts: 2 }, NO_COSTS).trades;
+    assert.equal(noIv?.exitReason, 'EOD_FLATTEN', 'bars without IV never trigger the exit');
   });
 
   it('applies the time stop from the entry time', () => {

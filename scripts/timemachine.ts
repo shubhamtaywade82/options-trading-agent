@@ -114,6 +114,7 @@ async function fetchDataset(): Promise<void> {
     throw new Error('--lot-size is required: lot sizes change, so the one in force over the range must be given');
   }
   const tickSize = numberArgument('--tick-size', 0.05, (value) => value > 0);
+  const barMinutes = numberArgument('--interval', 5, (value) => [1, 5, 15, 25, 60].includes(value));
   const offsets = numberArgument('--offsets', 10, (value) => Number.isInteger(value) && value >= 0 && value <= 10);
   const expiryCode = numberArgument('--expiry-code', 1, (value) => Number.isInteger(value) && value >= 1 && value <= 3);
   const expiryFlag = (argument('--expiry-flag') ?? 'WEEK').toUpperCase();
@@ -141,7 +142,7 @@ async function fetchDataset(): Promise<void> {
   const dumped = new Set<OptionType>();
   for (const window of windows(fromDate, toDate)) {
     console.error(`${underlying} ${window.from}..${window.to}: spot bars`);
-    spot.push(...(await withRetry(`spot ${window.from}`, () => market.intradayCandles(spotRef, 5, window.from, window.to))));
+    spot.push(...(await withRetry(`spot ${window.from}`, () => market.intradayCandles(spotRef, barMinutes, window.from, window.to))));
     for (const optionType of ['CE', 'PE'] as const) {
       for (let offset = -offsets; offset <= offsets; offset += 1) {
         const strike = offset === 0 ? 'ATM' : offset > 0 ? `ATM+${offset}` : `ATM${offset}`;
@@ -155,8 +156,8 @@ async function fetchDataset(): Promise<void> {
             expiryCode,
             strike,
             drvOptionType: optionType === 'CE' ? 'CALL' : 'PUT',
-            interval: '5',
-            requiredData: ['open', 'high', 'low', 'close', 'volume', 'strike'],
+            interval: String(barMinutes),
+            requiredData: ['open', 'high', 'low', 'close', 'volume', 'strike', 'iv', 'oi'],
             fromDate: window.from,
             toDate: window.to,
           }),
@@ -180,7 +181,7 @@ async function fetchDataset(): Promise<void> {
     version: 1,
     underlying,
     optionSegment,
-    barMinutes: 5,
+    barMinutes,
     source: {
       kind: 'dhan_rollingoption',
       expiryFlag,
@@ -210,13 +211,16 @@ async function runReplay(): Promise<void> {
   env.DATABASE_URL ??= 'postgres://offline-research@127.0.0.1:5432/offline_research';
   const config = loadConfig(env, configPath);
   const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
-  const { replay, divergences } = replayConfigFrom(config);
+  const { replay: liveReplay, divergences } = replayConfigFrom(config);
+  const ivCrushExitPts = argument('--iv-exit-pts') === undefined ? undefined : numberArgument('--iv-exit-pts', 0, (value) => value > 0);
+  const replay = { ...liveReplay, ivCrushExitPts };
+  const notes = ivCrushExitPts === undefined ? divergences : [...divergences, `IV-crush exit at ${ivCrushExitPts} vol points is research-only; the live agent has no such exit`];
   const fallbackCosts = defaultCostModel(config);
   const costs: CostModel = {
     halfSpreadPct: numberArgument('--half-spread-pct', fallbackCosts.halfSpreadPct, (value) => value >= 0 && value <= 20),
     stopSlippagePct: numberArgument('--stop-slippage-pct', fallbackCosts.stopSlippagePct, (value) => value >= 0 && value <= 20),
   };
-  const report = runTimeMachine(dataset, replay, costs, divergences, {
+  const report = runTimeMachine(dataset, replay, costs, notes, {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
     seed: numberArgument('--seed', DEFAULT_TIME_MACHINE_OPTIONS.seed, (value) => Number.isInteger(value) && value >= 0 && value < 2 ** 32),
     iterations: numberArgument('--iterations', DEFAULT_TIME_MACHINE_OPTIONS.iterations, (value) => Number.isInteger(value) && value >= 100 && value <= 1_000_000),
