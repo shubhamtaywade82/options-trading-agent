@@ -146,7 +146,9 @@ These items cannot be verified from this environment (no broker credentials):
    requests fail. A large `DATA_GAP` count means the band is too narrow for the moves in the range.
 4. **Expiry code at the roll.** Checked for NIFTY weekly on July 2026 1-minute data: on each Tuesday the ATM
    straddle at 15:20 was ₹3–13 against ₹120–365 on other days, so `expiryCode 1` on expiry day is that day's
-   expiry and expiry-day theta is in the sample. Not yet checked for SENSEX or BANKNIFTY.
+   expiry and expiry-day theta is in the sample. BSE agrees: on SENSEX 2026-04..09 5-minute data the median
+   15:20 ATM straddle was ₹60 on Thursdays (expiry) against ₹510–970 on other weekdays; the few high Thursdays
+   pair with low Wednesdays, consistent with holiday-shifted expiries. BANKNIFTY (monthly) not yet checked.
 5. **Expiry dates.** The rolling source does not return them, so the expiry-day entry cutoff is skipped (the
    report warns). An expiry calendar per underlying would close this.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
