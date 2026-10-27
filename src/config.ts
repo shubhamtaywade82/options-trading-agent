@@ -11,6 +11,10 @@ import { parseRedisUrl, validatePostgresUrl } from './persistence/urls.js';
 import { parseMinuteOfDay } from './time/ist.js';
 
 /** Index symbols this agent knows how to trade, with the segment their options list on. */
+// Real-money ceilings, deliberately not configurable: a stray .env (MAX_RISK_PER_TRADE_PCT=30 was found on
+// 2026-10-27) must stop a live start, not size a live order.
+const LIVE_MAX_RISK_PER_TRADE_PCT = 2;
+const LIVE_MAX_DAILY_LOSS_PCT = 6;
 const LATEST_FLATTEN_MINUTE = 15 * 60 + 15;
 
 export const KNOWN_UNDERLYINGS: Readonly<Record<string, OptionSegment>> = {
@@ -149,6 +153,8 @@ export interface AgentConfig {
     readonly brokerKillSwitchOnBreach: boolean;
     readonly reconcileIntervalMs: number;
     readonly orderTimeoutMs: number;
+    /** Plain-text POST target for operator alerts (an ntfy.sh topic URL works). Acts as a secret; never logged. */
+    readonly alertWebhookUrl: string | undefined;
   };
   readonly persistence: {
     /** PostgreSQL. Required in every mode: the ledger and lease for live and sandbox, the paper venue for paper. Credentials inside the URL are never logged. */
@@ -514,6 +520,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       brokerKillSwitchOnBreach: flag(env, 'BROKER_KILL_SWITCH_ON_BREACH', true),
       reconcileIntervalMs: number(env, 'RECONCILE_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000, integer: true }),
       orderTimeoutMs: number(env, 'ORDER_TIMEOUT_MS', 30_000, { min: 1_000, max: 300_000, integer: true }),
+      alertWebhookUrl: parseAlertWebhookUrl(env),
     },
     persistence: parsePersistence(env, mode),
   };
@@ -625,6 +632,14 @@ function parsePersistence(env: Env, mode: TradingMode): AgentConfig['persistence
   };
 }
 
+function parseAlertWebhookUrl(env: Env): string | undefined {
+  const url = optionalText(env, 'ALERT_WEBHOOK_URL');
+  if (url !== undefined && !url.startsWith('https://')) {
+    throw new Error('ALERT_WEBHOOK_URL must be an https URL');
+  }
+  return url;
+}
+
 /**
  * A fingerprint of the trading-relevant configuration, recorded on every run so a ledger row can be
  * tied to the settings that produced it. Secrets and connection strings are excluded by construction:
@@ -661,5 +676,11 @@ function validateCrossFields(config: AgentConfig): void {
   }
   if (config.capital.maxRiskPerTradePct > config.capital.maxDailyLossPct) {
     throw new Error('MAX_RISK_PER_TRADE_PCT must not exceed MAX_DAILY_LOSS_PCT');
+  }
+  if (config.mode === 'live' && config.capital.maxRiskPerTradePct > LIVE_MAX_RISK_PER_TRADE_PCT) {
+    throw new Error(`live mode caps MAX_RISK_PER_TRADE_PCT at ${LIVE_MAX_RISK_PER_TRADE_PCT}, got ${config.capital.maxRiskPerTradePct}`);
+  }
+  if (config.mode === 'live' && config.capital.maxDailyLossPct > LIVE_MAX_DAILY_LOSS_PCT) {
+    throw new Error(`live mode caps MAX_DAILY_LOSS_PCT at ${LIVE_MAX_DAILY_LOSS_PCT}, got ${config.capital.maxDailyLossPct}`);
   }
 }

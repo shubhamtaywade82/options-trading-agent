@@ -13,20 +13,30 @@
  *        [--config config.paper.yml] [--seed 19] [--iterations 10000] [--horizon 20] [--split 0.6]
  *        [--half-spread-pct 1] [--stop-slippage-pct 1] [--drawdown-alarm 30000] [--json] [--trades trades.csv]
  *
+ *   # 3. Replay several indices as one account (shared daily limit, per-side and open-position caps)
+ *   npm run timemachine -- portfolio --data A.json,B.json,C.json [--config config.paper.yml] [--per-side 1]
+ *
  * Split a fetch at every lot-size change: one dataset carries one lot size per range.
  */
 import 'dotenv/config';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadConfig, KNOWN_UNDERLYINGS } from '../src/config.js';
+import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
-import { defaultCostModel, replayConfigFrom, type CostModel } from '../src/research/replay.js';
+import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
+import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
+import { summarize } from '../src/research/stats.js';
 import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
 
 /** Dhan's intraday chart window is 90 days and the rolling-option one 180; 30-day windows stay well inside both. */
 const WINDOW_DAYS = 30;
+/**
+ * Every replay is another test on the same days; the best of k variants is optimistic by about a factor of k.
+ * This log keeps k countable per dataset.
+ */
+const RUN_LOG = 'data/research/runs.jsonl';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
@@ -199,24 +209,32 @@ async function fetchDataset(): Promise<void> {
   console.log(`wrote ${out}: ${dataset.sessions.length} sessions, ${dataset.source.conflictingBars} conflicting bars`);
 }
 
-async function runReplay(): Promise<void> {
-  const dataPath = required('--data');
-  const configPath = argument('--config');
-  // The replay never calls the broker. Placeholders satisfy config validation without real credentials.
+/** The replay never calls the broker. Placeholders satisfy config validation without real credentials. */
+function offlineConfig(configPath: string | undefined): AgentConfig {
   const env: Record<string, string | undefined> = { ...process.env, MODE: 'paper' };
   env.DHAN_CLIENT_ID ??= 'offline-research';
   if (env.DHAN_ACCESS_TOKEN === undefined && env.DHAN_PIN === undefined && env.DHAN_TOTP_SECRET === undefined) {
     env.DHAN_ACCESS_TOKEN = 'offline-research';
   }
   env.DATABASE_URL ??= 'postgres://offline-research@127.0.0.1:5432/offline_research';
-  const config = loadConfig(env, configPath);
-  const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
-  const { replay, divergences } = replayConfigFrom(config);
+  return loadConfig(env, configPath);
+}
+
+function costsArgument(config: AgentConfig): CostModel {
   const fallbackCosts = defaultCostModel(config);
-  const costs: CostModel = {
+  return {
     halfSpreadPct: numberArgument('--half-spread-pct', fallbackCosts.halfSpreadPct, (value) => value >= 0 && value <= 20),
     stopSlippagePct: numberArgument('--stop-slippage-pct', fallbackCosts.stopSlippagePct, (value) => value >= 0 && value <= 20),
   };
+}
+
+async function runReplay(): Promise<void> {
+  const dataPath = required('--data');
+  const configPath = argument('--config');
+  const config = offlineConfig(configPath);
+  const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
+  const { replay, divergences } = replayConfigFrom(config);
+  const costs = costsArgument(config);
   const report = runTimeMachine(dataset, replay, costs, divergences, {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
     seed: numberArgument('--seed', DEFAULT_TIME_MACHINE_OPTIONS.seed, (value) => Number.isInteger(value) && value >= 0 && value < 2 ** 32),
@@ -233,7 +251,49 @@ async function runReplay(): Promise<void> {
     );
     await writeFile(tradesPath, [header, ...rows].join('\n') + '\n');
   }
+  const run = {
+    ts: new Date().toISOString(),
+    data: dataPath,
+    config: configPath ?? null,
+    configFingerprint: configFingerprint(config),
+    costs,
+    trades: report.overall.trades,
+    meanR: report.overall.meanR,
+    verdict: report.verdict,
+  };
+  await mkdir(dirname(RUN_LOG), { recursive: true });
+  await appendFile(RUN_LOG, `${JSON.stringify(run)}\n`);
   console.log(flag('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
+}
+
+/**
+ * Replays several indices under one account: each index runs with no daily limit, then the shared daily limit
+ * and the per-side and open-position caps are applied across them on one timeline.
+ */
+async function runPortfolio(): Promise<void> {
+  const dataPaths = required('--data').split(',');
+  const config = offlineConfig(argument('--config'));
+  const costs = costsArgument(config);
+  const { replay } = replayConfigFrom(config);
+  const unlimited = { ...replay, capital: { ...replay.capital, maxDailyLossPct: 100 } };
+  const trades: PortfolioTrade[] = [];
+  const dates = new Set<string>();
+  for (const dataPath of dataPaths) {
+    const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
+    const result = replayDataset(dataset, unlimited, costs);
+    result.dates.forEach((date) => dates.add(date));
+    trades.push(...result.trades.filter((trade) => trade.exitReason !== 'DATA_GAP').map((trade) => ({ ...trade, underlying: dataset.underlying })));
+  }
+  const rules = {
+    dailyLossLimitInr: (config.capital.inr * config.capital.maxDailyLossPct) / 100,
+    maxPositionsPerSide: numberArgument('--per-side', config.capital.maxPositionsPerSide, (value) => Number.isInteger(value) && value >= 1),
+    maxOpenPositions: config.capital.maxOpenPositions,
+  };
+  const { taken, skipped } = simulatePortfolio(trades, rules);
+  const summary = summarize([...taken].sort((a, b) => a.exitTime - b.exitTime), dates.size);
+  console.log(`Portfolio: ${dataPaths.length} indices, ${dates.size} days, per side ${rules.maxPositionsPerSide}, open ${rules.maxOpenPositions}, daily limit ₹${rules.dailyLossLimitInr}`);
+  console.log(`  trades ${summary.trades} of ${trades.length}; skipped ${JSON.stringify(skipped)}`);
+  console.log(`  total net ₹${summary.totalNetInr.toFixed(0)}, mean net R ${summary.meanR}, win rate ${summary.winRate}, profit factor ${summary.profitFactor}, max drawdown ₹${summary.maxDrawdownInr.toFixed(0)}`);
 }
 
 async function main(): Promise<void> {
@@ -242,8 +302,10 @@ async function main(): Promise<void> {
     await fetchDataset();
   } else if (command === 'run') {
     await runReplay();
+  } else if (command === 'portfolio') {
+    await runPortfolio();
   } else {
-    throw new Error('usage: npm run timemachine -- fetch|run [options] (see scripts/timemachine.ts)');
+    throw new Error('usage: npm run timemachine -- fetch|run|portfolio [options] (see scripts/timemachine.ts)');
   }
 }
 

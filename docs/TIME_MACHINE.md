@@ -88,12 +88,25 @@ Live code that the replay calls unchanged: `StrategySession.evaluate` (all five 
 What is **not** replayed. The report prints this list with every run:
 
 - The chain OI-resistance gate (`CHAIN_ANALYSIS`). There is no historical option chain, so trades it would have
-  vetoed are included.
+  vetoed are included. From the next session the agent saves one chain per index per bar to
+  `data/research/chains/chains-YYYY-MM-DD.jsonl` (about 12 MB a day for three indices); once a few months exist,
+  the replay can apply the gate on recorded days.
 - The chain-bias vote in the context gate. It is replayed as `NEUTRAL`, which makes the gate stricter, not looser.
 - `MAX_SPREAD_PCT`, `MIN_OPEN_INTEREST` and `MIN_VOLUME`. Bars carry no quotes. The default half-spread is
   `MAX_SPREAD_PCT / 2`, the widest spread the live gate accepts, so the default cost model is the worst accepted case.
 - Expiry choice. Expiry follows the dataset's `--expiry-code`, not `MIN_DAYS_TO_EXPIRY`/`MAX_DAYS_TO_EXPIRY`.
 - Concurrent CE and PE positions. The replay holds one position at a time.
+
+## Portfolio replay
+
+`run` replays one index with one position at a time, but live trades several indices from one account. `portfolio
+--data A.json,B.json,…` replays each index with no daily limit, then applies the account-wide gates on one
+timeline: the shared daily loss limit against realised P&L plus every open stop, `MAX_POSITIONS_PER_SIDE`
+(override with `--per-side`) and `MAX_OPEN_POSITIONS`. It is an approximation: a trade the portfolio skips cannot
+free its index for a different entry, because the single-index replay never generated one.
+
+On NIFTY, SENSEX and BANKNIFTY 2026-04..09 (paper config, half-spread 0.25%), one position per side gave ₹178k
+with a ₹187k day-end drawdown and 5 days losing ₹30k or more, against ₹216k, ₹315k and 9 days at two per side.
 
 ## Verdict
 
@@ -106,7 +119,9 @@ What is **not** replayed. The report prints this list with every run:
 `EDGE_SUPPORTED` means only that this sample does not contradict a positive expectancy after modelled costs. It
 does not authorise live trading. Every parameter sweep is another test on the same days: if you try k
 configurations and keep the best, its interval is optimistic by roughly a factor of k. Judge a chosen setting on
-days that were not used to choose it.
+days that were not used to choose it. Every `run` appends its dataset, config fingerprint, cost model, trade
+count, mean net R and verdict to `data/research/runs.jsonl`, so the number of variants tried on a dataset (the k
+above) can be counted.
 
 ## Data source: Dhan `/charts/rollingoption`
 

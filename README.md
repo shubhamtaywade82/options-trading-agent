@@ -163,6 +163,7 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Clock alignment | `assertWarmupClock` | Startup refuses if bar timestamps are inconsistent with the wall clock (wrong epoch convention). |
 | Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. Until then only the position's bracket legs and Dhan's own intraday square-off (from about 15:18 IST, with a charge) protect it: no agent exit runs. |
 | Flatten before the broker does | `loadConfig` | `FLATTEN_BY` must be 15:15 IST or earlier, before Dhan auto-squares intraday positions. |
+| Live risk ceilings | `loadConfig` | `MODE=live` refuses `MAX_RISK_PER_TRADE_PCT` above 2 and `MAX_DAILY_LOSS_PCT` above 6, whatever `.env` or the YAML says. Not configurable. |
 | Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal file (`data/journal/events-YYYY-MM-DD.jsonl`). A malformed line in that file refuses startup. |
 
 ## Execution invariants (live)
@@ -233,6 +234,11 @@ before relying on it. The first check it runs is the login.
 | `npm run report:performance [-- --from YYYY-MM-DD --to YYYY-MM-DD --json]` | Results across every journal day, overall and by strategy, posture, underlying, option type, exit reason, entry hour, days to expiry and day: trades, win rate, net P&L, expectancy per trade, profit factor, average R, charges. Plus the signal funnel and every drop reason. Groups under 30 trades are flagged as too few to judge. One mode and client only. | none |
 | `npm run timemachine -- fetch …` | Builds a research dataset: intraday spot bars plus Dhan rolling-option premiums for ATM±N, re-keyed by real strike. Read-only. See [docs/TIME_MACHINE.md](docs/TIME_MACHINE.md). | Dhan |
 | `npm run timemachine -- run --data FILE` | Replays the live rules on that dataset (same strategy, bracket, sizing, pre-trade gate and charges code), then a block bootstrap of days and Monte Carlo day paths. Prints target-first / stop-first / unresolved rates with Wilson intervals, mean net R with a 95% interval, an out-of-sample check, and a verdict: `INSUFFICIENT_EVIDENCE`, `NO_TRADE` or `EDGE_SUPPORTED`. | none |
+| `scripts/session.sh start\|stop` | Starts the paper agent in a detached tmux session (`tmux attach -t options-agent` for the cockpit), or stops it with SIGTERM. Cron runs it on weekdays at 08:45 and 15:45 IST. A non-zero exit sends a crash alert. | Dhan |
+
+Set `ALERT_WEBHOOK_URL` (https, for example an ntfy.sh topic URL) to receive daily-loss stops, kill switch,
+halts, rejected entries and exits, late fills and audit gaps as plain-text POSTs. Delivery is best effort and
+never blocks trading. Treat the URL as a secret: anyone who knows an ntfy topic can read it.
 
 Run `smoke:live` before a live session, and `journal:summary` after every paper session. Use
 `report:performance` to judge settings, and change a setting only on a group with enough trades. Each entry
@@ -276,11 +282,11 @@ These are assumptions the code depends on that the SDK docs do not settle:
    SDK does not document the semantics once the entry has traded. If a leg cancel fails and
    the position is still long, the exit is refused and the underlying halts. Confirm the
    sequence on sandbox.
-2. **Epoch convention.** `DHAN_EPOCH_IST_SHIFTED` must match the feed. Startup checks this
-   against warmup bars, but confirm against one live bar before trusting it.
-3. **Chain and scrip-master fields.** Field mapping (`last_price`, `top_bid_price`,
-   `top_ask_price`, `security_id`, `lotSize`, `tickSize`, `expiryDate`) is taken from the SDK
-   types and must be checked against a live response.
+2. **Epoch convention.** Verified 2026-10-26/27: `DHAN_EPOCH_IST_SHIFTED=false` matches live bars
+   (09:15 IST opens at 03:45 UTC), and Dhan's stray after-close history bar is now dropped.
+3. **Chain and scrip-master fields.** Verified 2026-10-27 by `smoke:live` on NIFTY, BANKNIFTY and
+   SENSEX: no chain leg lacks ltp, bid, ask, OI, volume or security id. The scrip master's
+   `TICK_SIZE` is in paise and is converted to rupees (₹0.05).
 4. **Freeze limits.** `MAX_LOTS_PER_ORDER` is user-set. Dhan's per-order freeze quantity for
    index options is not hardcoded here and must be set to the current exchange value.
 5. **Broker kill-switch semantics.** Whether an activated kill switch also squares off open
@@ -288,10 +294,26 @@ These are assumptions the code depends on that the SDK docs do not settle:
    path engages it only after flat for that reason.
    The local breach state is restored from today's journal on restart. The broker-side switch is
    the durable control: after a breach, reset it in the Dhan console only after reviewing the day.
-6. **Holidays.** There is no NSE holiday calendar. On a holiday there are no bars and no
-   signals, but the process still runs. Do not start it on exchange holidays.
+6. **Holidays.** There is no NSE/BSE holiday calendar. The weekday cron starts the agent on
+   holidays too; with no ticks there are no bars or signals, and the 15:45 stop ends it.
 7. **Intraday warmup depth.** `WARMUP_DAYS` determines how many days of 5-minute bars are
    seeded. Confirm the Dhan response length for your chosen bar size.
+
+### Staged rollout to real money
+
+Do these in order, and do not start a stage until the previous one is clean:
+
+1. **Paper evidence.** At least 30 paper trades on the current settings
+   (`npm run report:performance -- --from <first day>`) with positive net expectancy. The Time
+   Machine shows these rules near breakeven, so this gate may not pass.
+2. **Sandbox.** `MODE=sandbox` with `DHAN_SANDBOX_*` for at least one full session. Watch one
+   entry, its stop and target legs, a manual exit (`c` in the cockpit, which exercises item 1
+   above), and the EOD flatten. Compare every order against the sandbox order book by hand:
+   no tool here reconciles against Dhan.
+3. **Live, one lot.** `MODE=live`, `LIVE_TRADING_ACK` set, `MAX_LOTS_PER_ORDER=1`, risk inside the
+   built-in ceilings (2% per trade, 6% a day). Start it in the cockpit, not under cron, and check
+   Dhan's order book against the journal after each trade and at the end of the day.
+4. **Scale.** Raise lots only after a week of one-lot live sessions that match the journal.
 
 ## Known limits
 

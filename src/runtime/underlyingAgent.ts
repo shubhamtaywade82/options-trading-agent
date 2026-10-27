@@ -17,21 +17,21 @@ import {
 import type { EntryOrder, ExecutionEvent, ExecutionPort, ExitOrder } from '../execution/ports.js';
 import type { EntrySnapshot, TradeAdvisor } from '../llm/advisor.js';
 import { BarSeries, CandleBuilder } from '../market/barSeries.js';
-import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
+import { calculateTrailingStop, roundTripChargesInr, type BracketLevels } from '../options/pricing.js';
 import { analyzeOptionChain, checkOptionBuyingConfluence } from '../options/chainAnalyzer.js';
 import { contextVerdict, marketContext, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
-import { pickExpiry, selectContract } from '../options/selector.js';
-import { sizePosition } from '../options/sizing.js';
+import { pickExpiry, selectContract, type ChainSnapshot } from '../options/selector.js';
+import { sizePosition, type SizingResult } from '../options/sizing.js';
 import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession } from '../strategy/session.js';
 import { ema, superTrend } from '../market/indicators.js';
 import type { AgentView, CandidateView, DropView, ExitView, PositionView, SignalView } from './views.js';
 import type { EventLog } from '../ops/eventLog.js';
 import type { Logger } from '../ops/logger.js';
-import { dayDifference } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { DayBook } from '../risk/dayBook.js';
-import { evaluatePreTrade } from '../risk/riskEngine.js';
+import { evaluatePreTrade, type RiskVerdict } from '../risk/riskEngine.js';
+import { buildEntrySnapshot, planEntryPrices, type EntryPrices, type TwoSidedQuote } from './entryPlan.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { SerialQueue } from './serialQueue.js';
 import { withDeadline } from './deadline.js';
@@ -63,9 +63,12 @@ export interface AgentDependencies {
   readonly openingCapitalInr?: number;
 }
 
-type Preparation =
-  | { readonly ok: true; readonly order: EntryOrder; readonly snapshot: EntrySnapshot }
-  | { readonly ok: false; readonly code: string; readonly detail: string };
+type Rejection = { readonly ok: false; readonly code: string; readonly detail: string };
+type Preparation = { readonly ok: true; readonly order: EntryOrder; readonly snapshot: EntrySnapshot } | Rejection;
+
+function rejected(code: string, detail: string): Rejection {
+  return { ok: false, code, detail };
+}
 
 /** After a venue rejection, wait before retrying an exit so a broken endpoint is not hammered. */
 const EXIT_RETRY_BACKOFF_MS = 10_000;
@@ -711,116 +714,147 @@ export class UnderlyingAgent {
 
   /** Builds and validates one entry from a signal. Every rejection carries a stable code. */
   private async prepareEntry(signal: Signal, slot: SideSlot): Promise<Preparation> {
-    const { config, spec, market } = this.deps;
     const now = this.now();
     const today = istParts(now);
-    const fail = (code: string, detail: string): Preparation => ({ ok: false, code, detail });
-
     const killSwitchReason = this.deps.book.snapshot().killSwitchReason;
     if (killSwitchReason !== undefined) {
-      return fail('KILL_SWITCH_ACTIVE', killSwitchReason);
+      return rejected('KILL_SWITCH_ACTIVE', killSwitchReason);
     }
+    const choice = await this.chooseContract(signal, today.date);
+    if (!choice.ok) {
+      return choice;
+    }
+    const { expiry, contract, quote } = choice;
+    const prices = planEntryPrices(quote.ask, contract.tickSize, this.deps.config);
+    if (!prices.ok) {
+      return rejected('BRACKET_UNREPRESENTABLE', `cannot place stop and target at premium ${prices.entryLimit} on tick ${contract.tickSize}`);
+    }
+    const funds = await this.deps.market.availableFunds();
+    const sizing = this.sizeEntry(prices.bracket, contract, funds);
+    if (sizing.lots < 1) {
+      return rejected(
+        'RISK_BUDGET_TOO_SMALL',
+        `one lot risks ${(prices.bracket.riskPerUnit * contract.lotSize).toFixed(2)} against a budget of ${sizing.riskBudgetInr.toFixed(2)} (limited by ${sizing.limitedBy})`,
+      );
+    }
+    const verdict = this.preTradeVerdict({ prices, sizing, contract, quote, funds, isExpiryDay: expiry === today.date, slot });
+    if (!verdict.approved) {
+      return rejected(verdict.violations[0]?.code ?? 'RISK_REJECTED', verdict.violations.map((violation) => `${violation.code}: ${violation.detail}`).join('; '));
+    }
+    const { bracket, targetPrice } = prices;
+    const snapshot = buildEntrySnapshot({ underlying: this.symbol, signal, contract, quote, expiry, today, bracket, targetPrice, lots: sizing.lots, riskInr: verdict.riskInr });
+    this.rememberCandidate(snapshot, contract, sizing.quantity, quote.bid, now);
+    const advice = await this.adviseEntry(snapshot);
+    if (advice !== undefined) {
+      return advice;
+    }
+    this.sequence += 1;
+    return { ok: true, snapshot, order: this.entryOrder(correlationIdFor('E', now, this.sequence), contract, sizing.quantity, prices) };
+  }
 
-    const expiries = await market.listExpiries(spec.spot);
-    const expiry = pickExpiry(expiries, today.date, config.contract.minDaysToExpiry, config.contract.maxDaysToExpiry);
+  /** Expiry, chain gates and contract selection. The quote returned is two-sided. */
+  private async chooseContract(
+    signal: Signal,
+    todayDate: string,
+  ): Promise<{ readonly ok: true; readonly expiry: string; readonly contract: OptionContract; readonly quote: TwoSidedQuote } | Rejection> {
+    const { config, spec, market } = this.deps;
+    const expiry = pickExpiry(await market.listExpiries(spec.spot), todayDate, config.contract.minDaysToExpiry, config.contract.maxDaysToExpiry);
     if (expiry === undefined) {
       const window = config.contract.maxDaysToExpiry > 0
         ? `between ${config.contract.minDaysToExpiry} and ${config.contract.maxDaysToExpiry} day(s) out`
         : `at least ${config.contract.minDaysToExpiry} day(s) out`;
-      return fail('NO_EXPIRY', `no expiry ${window}`);
+      return rejected('NO_EXPIRY', `no expiry ${window}`);
     }
-
     const chain = await market.optionChain(spec.spot, expiry);
-    if (config.chainAnalysis.enabled) {
-      const analysis = analyzeOptionChain(chain, signal.spot);
-      const confluence = checkOptionBuyingConfluence(analysis, signal.direction, config.chainAnalysis.minHeadroomPts);
-      if (!confluence.ok) {
-        return fail('OPTION_CHAIN_RESISTANCE', confluence.reason ?? 'option chain resistance detected');
-      }
+    const chainRejection = this.chainRejection(signal, chain);
+    if (chainRejection !== undefined) {
+      return chainRejection;
     }
-    if (config.context.enabled && signal.strategy !== 'test') {
-      const verdict = contextVerdict(marketContext(this.bars.all()), signal.direction, analyzeOptionChain(chain, signal.spot).bias);
-      if (!verdict.ok) {
-        return fail('CONTEXT_REJECTED', verdict.reason);
-      }
-      this.deps.logger.info('context supports entry', { underlying: this.symbol, direction: signal.direction, context: verdict.reason });
-    }
-    const contracts = await market.optionContracts(this.symbol, spec.optionSegment);
     const selection = selectContract({
       spot: signal.spot,
       direction: signal.direction,
       expiry,
       chain,
-      contracts,
+      contracts: await market.optionContracts(this.symbol, spec.optionSegment),
       offsetSteps: config.contract.strikeOffsetSteps,
       maxSpreadPct: config.contract.maxSpreadPct,
       minOpenInterest: config.contract.minOpenInterest,
       minVolume: config.contract.minVolume,
     });
     if (!selection.ok) {
-      return fail(selection.code, selection.detail);
+      return rejected(selection.code, selection.detail);
     }
     const { contract, quote } = selection;
     if (quote.ask === undefined || quote.bid === undefined) {
-      return fail('QUOTE_MISSING', `no two-sided quote on ${contract.symbol}`);
+      return rejected('QUOTE_MISSING', `no two-sided quote on ${contract.symbol}`);
     }
+    return { ok: true, expiry, contract, quote: { ...quote, ask: quote.ask, bid: quote.bid } };
+  }
 
-    // The entry is a LIMIT at this price, so any fill is at or below it and the realised risk stays inside the
-    // budget. Sizing off the bare ask with a MARKET order let a slipped fill widen the fixed stop distance.
-    const entryLimit = roundUpToTick(quote.ask * (1 + config.contract.entryLimitBufferPct / 100), contract.tickSize);
-    const bracket = bracketLevels({
-      entryReference: entryLimit,
-      stopLossPct: config.exits.stopLossPct,
-      targetRr: config.exits.targetRr,
-      tickSize: contract.tickSize,
-      trailingJumpPct: config.exits.trailingJumpPct,
-    });
-    if (bracket === undefined) {
-      return fail('BRACKET_UNREPRESENTABLE', `cannot place stop and target at premium ${entryLimit} on tick ${contract.tickSize}`);
+  /** The OI-resistance gate and the market-context gate, both read off the same chain. */
+  private chainRejection(signal: Signal, chain: ChainSnapshot): Rejection | undefined {
+    const { config } = this.deps;
+    if (config.chainAnalysis.enabled) {
+      const confluence = checkOptionBuyingConfluence(analyzeOptionChain(chain, signal.spot), signal.direction, config.chainAnalysis.minHeadroomPts);
+      if (!confluence.ok) {
+        return rejected('OPTION_CHAIN_RESISTANCE', confluence.reason ?? 'option chain resistance detected');
+      }
     }
-    const targetPrice = config.exits.runnerMode
-      ? roundDownToTick(bracket.entryReference + Math.max(10 * bracket.riskPerUnit, bracket.entryReference * 5), contract.tickSize)
-      : bracket.targetPrice;
+    if (config.context.enabled && signal.strategy !== 'test') {
+      const verdict = contextVerdict(marketContext(this.bars.all()), signal.direction, analyzeOptionChain(chain, signal.spot).bias);
+      if (!verdict.ok) {
+        return rejected('CONTEXT_REJECTED', verdict.reason);
+      }
+      this.deps.logger.info('context supports entry', { underlying: this.symbol, direction: signal.direction, context: verdict.reason });
+    }
+    return undefined;
+  }
 
-    const funds = await market.availableFunds();
+  private sizeEntry(bracket: BracketLevels, contract: OptionContract, funds: number): SizingResult {
     // Compounds: risk is a share of the day's opening capital plus what the day has realised. Premium already
-    // paid for open positions stays in that base; the funds check below decides only what is affordable.
+    // paid for open positions stays in that base; the funds check decides only what is affordable.
     const capital = Math.max(0, this.openingCapitalInr + this.deps.book.snapshot().realizedPnlInr);
-    const sizing = sizePosition({
+    return sizePosition({
       capitalInr: capital,
-      maxRiskPerTradePct: config.capital.maxRiskPerTradePct,
+      maxRiskPerTradePct: this.deps.config.capital.maxRiskPerTradePct,
       availableFundsInr: funds,
       entryReference: bracket.entryReference,
       stopLossPrice: bracket.stopLossPrice,
       lotSize: contract.lotSize,
-      maxLotsPerOrder: config.capital.maxLotsPerOrder,
+      maxLotsPerOrder: this.deps.config.capital.maxLotsPerOrder,
     });
-    if (sizing.lots < 1) {
-      return fail(
-        'RISK_BUDGET_TOO_SMALL',
-        `one lot risks ${(bracket.riskPerUnit * contract.lotSize).toFixed(2)} against a budget of ${sizing.riskBudgetInr.toFixed(2)} (limited by ${sizing.limitedBy})`,
-      );
-    }
+  }
 
+  private preTradeVerdict(input: {
+    readonly prices: Extract<EntryPrices, { ok: true }>;
+    readonly sizing: SizingResult;
+    readonly contract: OptionContract;
+    readonly quote: TwoSidedQuote;
+    readonly funds: number;
+    readonly isExpiryDay: boolean;
+    readonly slot: SideSlot;
+  }): RiskVerdict {
+    const { config, spec, book } = this.deps;
+    const { prices, sizing, contract } = input;
     // Re-read after every await: another underlying may have changed the book while this one was waiting.
     // The clock too: the expiry, chain and funds calls took time, and the quote's age must include it.
-    const snapshot = this.deps.book.snapshot();
+    const snapshot = book.snapshot();
     const gateNow = this.now();
-    const verdict = evaluatePreTrade({
+    return evaluatePreTrade({
       side: 'BUY',
-      entryReference: bracket.entryReference,
-      stopLossPrice: bracket.stopLossPrice,
-      targetPrice,
+      entryReference: prices.bracket.entryReference,
+      stopLossPrice: prices.bracket.stopLossPrice,
+      targetPrice: prices.targetPrice,
       lots: sizing.lots,
       lotSize: contract.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
-      availableFundsInr: funds,
+      availableFundsInr: input.funds,
       nowMs: gateNow,
       minuteOfDay: istParts(gateNow).minuteOfDay,
       entryStartMinute: config.session.entryStartMinute,
       entryEndMinute: config.session.entryEndMinute,
-      isExpiryDay: expiry === today.date,
+      isExpiryDay: input.isExpiryDay,
       expiryDayCutoffMinute: config.contract.expiryDayEntryCutoffMinute,
       killSwitchActive: snapshot.killSwitchReason !== undefined,
       dailyPnlInr: snapshot.dayPnlInr,
@@ -831,85 +865,60 @@ export class UnderlyingAgent {
       maxTradesPerDay: config.capital.maxTradesPerDay,
       openPositions: snapshot.openPositions,
       maxOpenPositions: config.capital.maxOpenPositions,
-      sideOpen: this.deps.book.isSideOpen(this.symbol, slot.optionType) || slot.position !== undefined,
-      underlyingOpenPositions: this.deps.book.underlyingOpenPositions(this.symbol),
+      sideOpen: book.isSideOpen(this.symbol, input.slot.optionType) || input.slot.position !== undefined,
+      underlyingOpenPositions: book.underlyingOpenPositions(this.symbol),
       maxPositionsPerUnderlying: config.capital.maxPositionsPerUnderlying,
-      cooldownUntilMs: this.deps.book.cooldownUntilFor(this.symbol),
+      cooldownUntilMs: book.cooldownUntilFor(this.symbol),
       spotTickAgeMs: this.deps.feed.ageMs(spec.spot),
-      optionQuoteAgeMs: gateNow - quote.observedAt,
+      optionQuoteAgeMs: gateNow - input.quote.observedAt,
       staleMs: config.feed.staleMs,
     });
-    if (!verdict.approved) {
-      return fail(
-        verdict.violations[0]?.code ?? 'RISK_REJECTED',
-        verdict.violations.map((violation) => `${violation.code}: ${violation.detail}`).join('; '),
-      );
-    }
+  }
 
-    const entrySnapshot: EntrySnapshot = {
-      underlying: this.symbol,
-      direction: signal.direction,
-      optionSymbol: contract.symbol,
-      strike: contract.strike,
-      expiry,
-      daysToExpiry: dayDifference(today.date, expiry),
-      minuteOfDayIst: today.minuteOfDay,
-      spot: signal.spot,
-      entryReference: bracket.entryReference,
-      stopLossPrice: bracket.stopLossPrice,
-      targetPrice,
-      spreadPct: ((quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2)) * 100,
-      openInterest: quote.oi ?? 0,
-      lots: sizing.lots,
-      riskInr: verdict.riskInr,
-      strategy: signal.strategy ?? 'unknown',
-      signalReasons: signal.reasons,
-    };
-
+  private rememberCandidate(snapshot: EntrySnapshot, contract: OptionContract, quantity: number, bid: number, at: number): void {
     this.lastCandidate = {
       contractSymbol: contract.symbol,
       optionType: contract.optionType,
       strike: contract.strike,
-      expiry,
-      entryReference: bracket.entryReference,
-      bid: quote.bid,
-      spreadPct: entrySnapshot.spreadPct,
-      openInterest: entrySnapshot.openInterest,
-      lots: sizing.lots,
-      quantity: sizing.quantity,
-      stopLossPrice: bracket.stopLossPrice,
-      targetPrice,
-      riskInr: verdict.riskInr,
-      at: now,
+      expiry: snapshot.expiry,
+      entryReference: snapshot.entryReference,
+      bid,
+      spreadPct: snapshot.spreadPct,
+      openInterest: snapshot.openInterest,
+      lots: snapshot.lots,
+      quantity,
+      stopLossPrice: snapshot.stopLossPrice,
+      targetPrice: snapshot.targetPrice,
+      riskInr: snapshot.riskInr,
+      at,
     };
+  }
 
-    if (this.deps.advisor !== undefined) {
-      const advice = await this.deps.advisor.review(entrySnapshot);
-      this.record('advisor_verdict', { decision: advice.decision, confidence: advice.confidence, source: advice.source, reason: advice.reason });
-      if (advice.decision !== 'ENTER') {
-        return fail('ADVISOR_SKIP', `${advice.source}: ${advice.reason}`);
-      }
+  /** The advisor can only stop an entry. Returns the rejection, or undefined to proceed. */
+  private async adviseEntry(snapshot: EntrySnapshot): Promise<Rejection | undefined> {
+    if (this.deps.advisor === undefined) {
+      return undefined;
     }
+    const advice = await this.deps.advisor.review(snapshot);
+    this.record('advisor_verdict', { decision: advice.decision, confidence: advice.confidence, source: advice.source, reason: advice.reason });
+    return advice.decision === 'ENTER' ? undefined : rejected('ADVISOR_SKIP', `${advice.source}: ${advice.reason}`);
+  }
 
-    this.sequence += 1;
-    const correlationId = correlationIdFor('E', now, this.sequence);
+  private entryOrder(correlationId: string, contract: OptionContract, quantity: number, prices: Extract<EntryPrices, { ok: true }>): EntryOrder {
+    const { exits } = this.deps.config;
     return {
-      ok: true,
-      snapshot: entrySnapshot,
-      order: {
-        side: 'BUY',
-        correlationId,
-        underlying: this.symbol,
-        contract,
-        quantity: sizing.quantity,
-        entryReference: bracket.entryReference,
-        stopLossPrice: bracket.stopLossPrice,
-        targetPrice,
-        initialStopPrice: bracket.stopLossPrice,
-        trailingJump: bracket.trailingJump,
-        breakevenAtRr: config.exits.breakevenAtRr,
-        runner: config.exits.runnerMode,
-      },
+      side: 'BUY',
+      correlationId,
+      underlying: this.symbol,
+      contract,
+      quantity,
+      entryReference: prices.bracket.entryReference,
+      stopLossPrice: prices.bracket.stopLossPrice,
+      targetPrice: prices.targetPrice,
+      initialStopPrice: prices.bracket.stopLossPrice,
+      trailingJump: prices.bracket.trailingJump,
+      breakevenAtRr: exits.breakevenAtRr,
+      runner: exits.runnerMode,
     };
   }
 

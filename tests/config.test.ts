@@ -37,6 +37,14 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ ...live, LIVE_TRADING_ACK: LIVE_ACK_PHRASE }).mode, 'live');
   });
 
+  it('refuses live risk above the real-money ceilings, whatever .env says', () => {
+    const live = { ...BASE, MODE: 'live', LIVE_TRADING_ACK: LIVE_ACK_PHRASE, DATABASE_URL: 'postgres://ledger.internal/agent', REDIS_URL: 'redis://cache.internal:6379/0' };
+    assert.throws(() => loadConfig({ ...live, MAX_RISK_PER_TRADE_PCT: '30', MAX_DAILY_LOSS_PCT: '50' }), /caps MAX_RISK_PER_TRADE_PCT at 2/);
+    assert.throws(() => loadConfig({ ...live, MAX_DAILY_LOSS_PCT: '10' }), /caps MAX_DAILY_LOSS_PCT at 6/);
+    assert.equal(loadConfig({ ...live, MAX_RISK_PER_TRADE_PCT: '2', MAX_DAILY_LOSS_PCT: '6' }).capital.maxRiskPerTradePct, 2);
+    assert.equal(loadConfig({ ...BASE, MAX_RISK_PER_TRADE_PCT: '30', MAX_DAILY_LOSS_PCT: '50' }).capital.maxRiskPerTradePct, 30, 'paper is not capped');
+  });
+
   it('accepts exactly three modes: live, sandbox and paper', () => {
     const sandbox = { ...BASE, MODE: 'sandbox', ...SANDBOX };
     assert.equal(loadConfig({ ...BASE, MODE: 'paper' }).mode, 'paper');

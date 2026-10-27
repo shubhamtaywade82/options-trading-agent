@@ -80,6 +80,9 @@ export class OllamaTradeAdvisor implements TradeAdvisor {
             { role: 'user', content: JSON.stringify(snapshot) },
           ],
           options: { temperature: 0 },
+          // Thinking models (MiniCPM5) took 8-21 s with a reasoning trace and 0.4-0.8 s without it on 2026-10-27;
+          // past LLM_TIMEOUT_MS every reply fails closed to SKIP, which vetoes every entry.
+          think: false,
           timeoutMs: this.timeoutMs,
         },
         ADVISORY_SCHEMA,

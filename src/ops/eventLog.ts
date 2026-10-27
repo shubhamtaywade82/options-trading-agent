@@ -21,6 +21,8 @@ export interface EventLogOptions {
   /** When set, events are also written to the ledger. Absent in journal-only mode. */
   readonly ledger?: LedgerWriter;
   readonly onError?: (error: unknown) => void;
+  /** Sees every event after it is queued for the journal; operator alerts hang off this. Must not throw. */
+  readonly onEvent?: (type: string, payload: Readonly<Record<string, unknown>>) => void;
   readonly now?: () => number;
   /** Events waiting for the ledger. Past this, the journal keeps them and the next start backfills. */
   readonly maxOutbox?: number;
@@ -76,6 +78,7 @@ export class EventLog {
   record(type: string, payload: Readonly<Record<string, unknown>>): void {
     const entry = this.next(type, payload);
     this.append(entry.file, entry.line, false).catch(() => undefined);
+    this.options.onEvent?.(type, payload);
     if (this.options.ledger !== undefined) {
       this.enqueue(entry.row);
     }
@@ -87,6 +90,7 @@ export class EventLog {
    */
   async durable(type: string, payload: Readonly<Record<string, unknown>>): Promise<void> {
     const entry = this.next(type, payload);
+    this.options.onEvent?.(type, payload);
     this.durableInFlight += 1;
     try {
       await this.append(entry.file, entry.line, true);

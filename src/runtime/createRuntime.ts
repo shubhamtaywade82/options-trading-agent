@@ -19,6 +19,8 @@ import type { UnderlyingSpec } from '../domain/types.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EventLog, journalFileName } from '../ops/eventLog.js';
+import { createAlertSink } from '../ops/alerts.js';
+import { ChainRecorder } from '../ops/chainRecorder.js';
 import { restoreDayBook } from '../ops/dayState.js';
 import { DayBook } from '../risk/dayBook.js';
 import { createConsoleLogger, RingLogger, type Logger } from '../ops/logger.js';
@@ -85,6 +87,7 @@ async function compose(
     scope,
     ...(session.ledger === undefined ? {} : { ledger: session.ledger }),
     onError: (error) => logger.error('event log write failed', { error: errorMessage(error, session.secrets) }),
+    ...(config.ops.alertWebhookUrl === undefined ? {} : { onEvent: createAlertSink(config.ops.alertWebhookUrl, logger) }),
     now,
   });
 
@@ -217,7 +220,33 @@ async function compose(
     gate,
     closeSession: (reason) => session.close(reason, events.unconfirmedEvents()),
   });
+  startChainRecorder(config, specs, market, logger, now);
   return { orchestrator, logger, records };
+}
+
+const CHAIN_RECORD_CHECK_MS = 30_000;
+
+/** Read-only and unref'd: it never holds the process open, and a fetch in flight at exit is harmless. */
+function startChainRecorder(config: AgentConfig, specs: readonly UnderlyingSpec[], market: MarketPort, logger: Logger, now: () => number): void {
+  const recorder = new ChainRecorder({
+    market,
+    specs,
+    directory: 'data/research/chains',
+    barMinutes: config.strategy.barMinutes,
+    minDaysToExpiry: config.contract.minDaysToExpiry,
+    maxDaysToExpiry: config.contract.maxDaysToExpiry,
+    logger,
+  });
+  let inFlight = false;
+  setInterval(() => {
+    if (inFlight) {
+      return;
+    }
+    inFlight = true;
+    void recorder.recordIfDue(now()).finally(() => {
+      inFlight = false;
+    });
+  }, CHAIN_RECORD_CHECK_MS).unref();
 }
 
 /**

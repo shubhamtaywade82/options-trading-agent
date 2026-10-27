@@ -75,6 +75,16 @@ describe('EventLog daily journal', () => {
     );
   });
 
+  it('hands every recorded and durable event to onEvent, for operator alerts', async () => {
+    const clock = istEpoch('2026-10-14', '10:00');
+    const seen: string[] = [];
+    const log = new EventLog({ directory: join(directory, 'hook'), runId: RUN, scope: SCOPE, now: () => clock, onEvent: (type) => seen.push(type) });
+    log.record('halted', { underlying: 'NIFTY' });
+    await log.durable('daily_loss_breach', { dayPnlInr: -1 });
+    await log.flush();
+    assert.deepEqual(seen, ['halted', 'daily_loss_breach']);
+  });
+
   it('creates the directory on first write and keeps lines whole under concurrent records', async () => {
     const clock = istEpoch('2026-10-14', '10:00');
     const log = new EventLog({ directory: join(directory, 'nested', 'deeper'), runId: RUN, scope: SCOPE, now: () => clock });
