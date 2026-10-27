@@ -188,11 +188,18 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
   const strat = snapshot.strategy === undefined ? '' : `  ${chalk.magenta.bold(snapshot.strategy.posture.toUpperCase())} ${dim(snapshot.strategy.strategies.filter((s) => s.on).map((s) => s.label).join('+') || 'none')}`;
   const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}${strat}`;
   const sessionOpen = isMarketSessionOpen(snapshot.at);
+  const minute = istParts(snapshot.at).minuteOfDay;
+  const inWindow =
+    snapshot.entryStartMinute === undefined ||
+    snapshot.entryEndMinute === undefined ||
+    (minute >= snapshot.entryStartMinute && minute < snapshot.entryEndMinute);
   const statusTag = !sessionOpen
     ? dim('market CLOSED')
     : snapshot.day.killSwitchReason !== undefined
       ? red('entries BLOCKED')
-      : green('entries OPEN');
+      : !inWindow
+        ? yellow(`entries CLOSED (${formatMinuteOfDay(snapshot.entryEndMinute!)})`)
+        : green('entries OPEN');
   const right = `${dim(formatIstClock(snapshot.at))} ${statusTag} `;
   const gap = Math.max(1, inner - stringWidth(left) - stringWidth(right));
   return [
@@ -432,20 +439,27 @@ function peakLines(snapshot: CockpitSnapshot, width: number): string[] {
 
 function riskColumn(snapshot: CockpitSnapshot, width: number): string[] {
   const day = snapshot.day;
-  const lossUsedPct = day.dayPnlInr < 0 && snapshot.dailyLossLimitInr > 0 ? (-day.dayPnlInr / snapshot.dailyLossLimitInr) * 100 : 0;
+  const effectiveLoss = day.effectiveDayPnlInr ?? day.dayPnlInr;
+  const lossUsedPct = effectiveLoss < 0 && snapshot.dailyLossLimitInr > 0 ? (-effectiveLoss / snapshot.dailyLossLimitInr) * 100 : 0;
   const openCount = day.openPositions ?? day.openUnderlyings.length;
   const tradesStr = snapshot.maxTradesPerDay > 0
     ? (day.tradesToday >= snapshot.maxTradesPerDay ? bad(`${day.tradesToday}/${snapshot.maxTradesPerDay}`) : `${day.tradesToday}/${snapshot.maxTradesPerDay}`)
     : `${day.tradesToday} (unlimited)`;
+  const lossLine = day.dailyLossBrakeEnabled === false
+    ? fit(warn('loss [BRAKE OFF: UNLIMITED]'), width)
+    : snapshot.dailyLossLimitInr >= snapshot.currentBalanceInr
+      ? fit(warn('loss limit ≥ capital: no daily stop'), width)
+      : fit(
+          `loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}${day.dailyLossBaselineInr ? ` [reset @ ${formatInrWhole(day.dailyLossBaselineInr)}]` : ''}`,
+          width,
+        );
   return [
     fit(cyanBold(`DAY ${day.dayKey}`), width),
     fit(`P&L ${formatSignedInr(day.dayPnlInr)}`, width),
     fit(`  realised ${formatSignedInr(day.realizedPnlInr)}`, width),
     fit(`  open P&L ${formatSignedInr(day.unrealizedPnlInr)}`, width),
     ...peakLines(snapshot, width),
-    snapshot.dailyLossLimitInr >= snapshot.currentBalanceInr
-      ? fit(warn('loss limit ≥ capital: no daily stop'), width)
-      : fit(`loss ${riskBar(lossUsedPct, 12)} ${lossUsedPct.toFixed(0)}% of ${formatInrWhole(snapshot.dailyLossLimitInr)}`, width),
+    lossLine,
     fit(`trades ${tradesStr}  open ${openCount}/${snapshot.maxOpenPositions}`, width),
     ...capitalLines(snapshot, width),
     ...(day.killSwitchReason === undefined
@@ -540,7 +554,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   ←→ chain   [] pos   p posture   1/2 strat   t test trade   c/k/s confirm   Ctrl+C×2 quit');
+  const keys = dim(' ↑↓ select   ←→ chain   [] pos   p posture   1/2 strat   t test   c/k/s confirm   r reset dd   d brake   Ctrl+C×2 quit');
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }

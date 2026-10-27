@@ -187,7 +187,7 @@ async function compose(
     await settleExpiredPositions(venue, specs, market, config.strategy.barMinutes, logger);
   }
 
-  const dayBook = new DayBook(now(), config.exits.cooldownSeconds * 1000);
+  const dayBook = new DayBook(now(), config.exits.cooldownSeconds * 1000, config.capital.enforceDailyLoss);
   const dayKey = istParts(now()).date;
   const lines =
     session.ledger === undefined

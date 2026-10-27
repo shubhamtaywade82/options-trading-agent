@@ -81,6 +81,11 @@ describe('evaluatePreTrade', () => {
     assert.ok(!codes(approvedInput({ dailyPnlInr: -2999 })).includes('DAILY_LOSS_LIMIT'));
   });
 
+  it('bypasses daily loss limits when enforceDailyLoss is false', () => {
+    assert.ok(!codes(approvedInput({ dailyPnlInr: -5000, enforceDailyLoss: false })).includes('DAILY_LOSS_LIMIT'));
+    assert.ok(!codes(approvedInput({ openRiskInr: 5000, enforceDailyLoss: false })).includes('DAILY_LOSS_AT_RISK'));
+  });
+
   it('enforces the entry window and the expiry-day cutoff', () => {
     assert.ok(codes(approvedInput({ minuteOfDay: 569 })).includes('OUTSIDE_ENTRY_WINDOW'));
     assert.ok(codes(approvedInput({ minuteOfDay: 870 })).includes('OUTSIDE_ENTRY_WINDOW'));
@@ -232,5 +237,31 @@ describe('DayBook', () => {
     assert.equal(book.snapshot().openPositions, 1);
     assert.equal(book.snapshot().unrealizedPnlInr, -200);
     assert.equal(book.snapshot().realizedPnlInr, 500);
+  });
+
+  it('resets drawdown baseline and clears breach latch and kill switch', () => {
+    const book = new DayBook(istEpoch('2026-10-12', '09:20'), 0);
+    book.recordClose({ underlying: 'NIFTY', pnlInr: -2000, closedAtMs: istEpoch('2026-10-12', '09:30') });
+    book.recordDailyLossBreach('breached');
+    assert.equal(book.snapshot().effectiveDayPnlInr, -2000);
+    assert.match(book.snapshot().killSwitchReason ?? '', /breached/);
+
+    const baseline = book.resetDrawdownBaseline();
+    assert.equal(baseline, -2000);
+    const snap = book.snapshot();
+    assert.equal(snap.effectiveDayPnlInr, 0);
+    assert.equal(snap.effectiveRealizedPnlInr, 0);
+    assert.equal(snap.realizedPnlInr, -2000);
+    assert.equal(snap.dailyLossBaselineInr, -2000);
+    assert.equal(snap.killSwitchReason, undefined);
+    assert.equal(snap.dailyLossBreach, undefined);
+  });
+
+  it('allows toggling daily loss brake on DayBook', () => {
+    const book = new DayBook(istEpoch('2026-10-12', '09:20'), 0, true);
+    assert.equal(book.isDailyLossBrakeEnabled(), true);
+    book.setDailyLossBrake(false);
+    assert.equal(book.isDailyLossBrakeEnabled(), false);
+    assert.equal(book.snapshot().dailyLossBrakeEnabled, false);
   });
 });

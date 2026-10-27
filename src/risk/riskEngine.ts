@@ -42,6 +42,8 @@ export interface PreTradeInput {
   readonly killSwitchActive: boolean;
   readonly dailyPnlInr: number;
   readonly dailyLossLimitInr: number;
+  /** Whether the daily loss brake is actively enforced. True when omitted. */
+  readonly enforceDailyLoss?: boolean;
   /** Realised P&L today, without marks: the open positions are counted at their stops instead. */
   readonly realizedPnlInr: number;
   /** What every open or pending position loses if its stop is hit, across all underlyings. */
@@ -82,7 +84,7 @@ function checkAccountLimits(input: PreTradeInput, add: AddViolation): void {
   if (input.killSwitchActive) {
     add('KILL_SWITCH_ACTIVE', 'kill switch is active; no new entries');
   }
-  if (input.dailyPnlInr <= -input.dailyLossLimitInr) {
+  if (input.enforceDailyLoss !== false && input.dailyLossLimitInr > 0 && input.dailyPnlInr <= -input.dailyLossLimitInr) {
     add('DAILY_LOSS_LIMIT', `day P&L ${input.dailyPnlInr.toFixed(2)} at or below -${input.dailyLossLimitInr.toFixed(2)}`);
   }
   if (input.maxTradesPerDay > 0 && input.tradesToday >= input.maxTradesPerDay) {
@@ -150,12 +152,14 @@ function checkOrderSizing(input: PreTradeInput, add: AddViolation): number {
     add('RISK_EXCEEDS_BUDGET', `risk ${riskInr.toFixed(2)} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
   }
   // Several open positions could together breach the daily loss limit if all hit stops.
-  const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - riskInr;
-  if (worstCaseDayPnl < -input.dailyLossLimitInr) {
-    add(
-      'DAILY_LOSS_AT_RISK',
-      `if every open stop and this one hit, day P&L would be ${worstCaseDayPnl.toFixed(2)}, beyond -${input.dailyLossLimitInr.toFixed(2)}`,
-    );
+  if (input.enforceDailyLoss !== false && input.dailyLossLimitInr > 0) {
+    const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - riskInr;
+    if (worstCaseDayPnl < -input.dailyLossLimitInr) {
+      add(
+        'DAILY_LOSS_AT_RISK',
+        `if every open stop and this one hit, day P&L would be ${worstCaseDayPnl.toFixed(2)}, beyond -${input.dailyLossLimitInr.toFixed(2)}`,
+      );
+    }
   }
   const premiumInr = input.lots * input.lotSize * input.entryReference;
   if (premiumInr > input.availableFundsInr) {

@@ -150,11 +150,17 @@ export interface CockpitSnapshot {
   readonly staleMs: number;
   readonly contractMaxSpreadPct: number;
   readonly contractMinOpenInterest: number;
+  readonly entryStartMinute?: number;
+  readonly entryEndMinute?: number;
   readonly day: {
     readonly dayKey: string;
     readonly realizedPnlInr: number;
     readonly unrealizedPnlInr: number;
     readonly dayPnlInr: number;
+    readonly effectiveDayPnlInr?: number;
+    readonly effectiveRealizedPnlInr?: number;
+    readonly dailyLossBaselineInr?: number;
+    readonly dailyLossBrakeEnabled?: boolean;
     readonly tradesToday: number;
     readonly openUnderlyings: readonly string[];
     readonly openPositions: number;

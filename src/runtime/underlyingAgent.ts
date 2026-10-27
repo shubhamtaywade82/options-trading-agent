@@ -857,9 +857,10 @@ export class UnderlyingAgent {
       isExpiryDay: input.isExpiryDay,
       expiryDayCutoffMinute: config.contract.expiryDayEntryCutoffMinute,
       killSwitchActive: snapshot.killSwitchReason !== undefined,
-      dailyPnlInr: snapshot.dayPnlInr,
+      dailyPnlInr: snapshot.effectiveDayPnlInr,
       dailyLossLimitInr: this.dailyLossLimitInr,
-      realizedPnlInr: snapshot.realizedPnlInr,
+      enforceDailyLoss: snapshot.dailyLossBrakeEnabled,
+      realizedPnlInr: snapshot.effectiveRealizedPnlInr,
       openRiskInr: snapshot.openRiskInr,
       tradesToday: snapshot.tradesToday,
       maxTradesPerDay: config.capital.maxTradesPerDay,
@@ -1193,7 +1194,8 @@ export class UnderlyingAgent {
     if (slot.structureExit) {
       return 'STRUCTURE_BREAK';
     }
-    if (this.deps.book.snapshot().dayPnlInr <= -this.dailyLossLimitInr) {
+    const bookSnap = this.deps.book.snapshot();
+    if (bookSnap.dailyLossBrakeEnabled && bookSnap.effectiveDayPnlInr <= -this.dailyLossLimitInr) {
       return 'DAILY_LOSS';
     }
     if (istParts(now).minuteOfDay >= this.deps.config.exits.flattenByMinute) {

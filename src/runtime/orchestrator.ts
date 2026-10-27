@@ -94,7 +94,7 @@ export class Orchestrator {
   ) {
     this.now = services.now ?? Date.now;
     this.strategySession = new StrategySession(config.session.initialPosture, config.strategy.enabledStrategies);
-    this.book = services.dayBook ?? new DayBook(this.now(), config.exits.cooldownSeconds * 1000);
+    this.book = services.dayBook ?? new DayBook(this.now(), config.exits.cooldownSeconds * 1000, config.capital.enforceDailyLoss);
     this.dailyLossLimitInr = ((services.openingCapitalInr ?? config.capital.inr) * config.capital.maxDailyLossPct) / 100;
     for (const spec of specs) {
       this.agents.set(spec.symbol, this.createAgent(spec));
@@ -367,6 +367,8 @@ export class Orchestrator {
       staleMs: this.config.feed.staleMs,
       contractMaxSpreadPct: this.config.contract.maxSpreadPct,
       contractMinOpenInterest: this.config.contract.minOpenInterest,
+      entryStartMinute: this.config.session.entryStartMinute,
+      entryEndMinute: this.config.session.entryEndMinute,
       day,
       underlyings: this.specs.flatMap((spec) => {
         const agent = this.agents.get(spec.symbol);
@@ -412,13 +414,38 @@ export class Orchestrator {
     if (halted !== undefined) {
       return `cannot clear: ${halted.symbol} is halted (${halted.haltedBecause}); restart after review`;
     }
-    if (day.dayPnlInr <= -this.dailyLossLimitInr) {
-      return 'cannot clear: the daily loss limit is breached for today';
+    if (day.dailyLossBrakeEnabled && day.effectiveDayPnlInr <= -this.dailyLossLimitInr) {
+      return 'cannot clear: the daily loss limit is breached for today (press r to reset drawdown)';
     }
     this.book.clearKillSwitch();
     this.durableEvent('operator_entry_clear', {});
     this.services.logger.warn('operator cleared the entry block');
     return 'entry block cleared; new entries may resume';
+  }
+
+  /** Resets session drawdown baseline to current P&L, providing fresh daily loss budget. */
+  resetDailyDrawdown(): string {
+    const baseline = this.book.resetDrawdownBaseline();
+    this.durableEvent('daily_loss_reset', { baselineInr: baseline });
+    this.services.logger.info('daily drawdown baseline reset', { baselineInr: baseline });
+    this.notifyView();
+    return `drawdown reset: fresh ₹${Math.round(this.dailyLossLimitInr).toLocaleString('en-IN')} loss budget active`;
+  }
+
+  /** Toggles daily loss brake. Refused in live mode for account safety. */
+  toggleDailyLossBrake(): string {
+    if (this.config.mode === 'live') {
+      return 'cannot toggle: daily loss brake is mandatory in live mode';
+    }
+    const next = !this.book.isDailyLossBrakeEnabled();
+    this.book.setDailyLossBrake(next);
+    if (!next) {
+      this.book.clearKillSwitch();
+    }
+    this.durableEvent('daily_loss_brake_toggled', { enabled: next });
+    this.services.logger.warn('daily loss brake toggled', { enabled: next });
+    this.notifyView();
+    return `daily loss brake ${next ? 'ENABLED' : 'DISABLED'}`;
   }
 
   /** Cycles posture (scout -> aligned -> confirmed) across all underlyings without restart. */
@@ -525,15 +552,18 @@ export class Orchestrator {
 
   private enforceDailyLoss(): void {
     const snapshot = this.book.snapshot();
-    // Keyed on the breach latch, not the kill switch. An operator block may already hold the switch,
-    // and that must not stop the breach being journaled or the broker switch being armed.
-    if (snapshot.dayPnlInr > -this.dailyLossLimitInr || snapshot.dailyLossBreach !== undefined) {
+    if (!snapshot.dailyLossBrakeEnabled) {
       return;
     }
-    const reason = `daily loss ${snapshot.dayPnlInr.toFixed(2)} breached -${this.dailyLossLimitInr.toFixed(2)}`;
+    // Keyed on the breach latch, not the kill switch. An operator block may already hold the switch,
+    // and that must not stop the breach being journaled or the broker switch being armed.
+    if (snapshot.effectiveDayPnlInr > -this.dailyLossLimitInr || snapshot.dailyLossBreach !== undefined) {
+      return;
+    }
+    const reason = `daily loss ${snapshot.effectiveDayPnlInr.toFixed(2)} breached -${this.dailyLossLimitInr.toFixed(2)}`;
     this.book.recordDailyLossBreach(reason);
     this.services.logger.error('daily loss limit breached; flattening', { reason });
-    this.durableEvent('daily_loss_breach', { dayPnlInr: snapshot.dayPnlInr, limitInr: this.dailyLossLimitInr });
+    this.durableEvent('daily_loss_breach', { dayPnlInr: snapshot.effectiveDayPnlInr, limitInr: this.dailyLossLimitInr });
     this.brokerKillReason ??= reason;
   }
 

@@ -76,6 +76,7 @@ export interface AgentConfig {
     readonly maxPositionsPerSide: number;
     readonly maxTradesPerDay: number;
     readonly maxLotsPerOrder: number;
+    readonly enforceDailyLoss: boolean;
   };
   readonly contract: {
     readonly minDaysToExpiry: number;
@@ -322,6 +323,7 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_open_positions': 'MAX_OPEN_POSITIONS',
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
+  'limits.enforce_daily_loss': 'ENFORCE_DAILY_LOSS',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
   'contract.min_days_to_expiry': 'MIN_DAYS_TO_EXPIRY',
   'contract.max_days_to_expiry': 'MAX_DAYS_TO_EXPIRY',
@@ -450,6 +452,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       maxPositionsPerSide: number(env, 'MAX_POSITIONS_PER_SIDE', 1, { min: 1, max: 5, integer: true }),
       maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
+      enforceDailyLoss: flag(env, 'ENFORCE_DAILY_LOSS', true),
     },
     contract: {
       minDaysToExpiry: number(env, 'MIN_DAYS_TO_EXPIRY', 0, { min: 0, max: 60, integer: true }),
@@ -682,5 +685,8 @@ function validateCrossFields(config: AgentConfig): void {
   }
   if (config.mode === 'live' && config.capital.maxDailyLossPct > LIVE_MAX_DAILY_LOSS_PCT) {
     throw new Error(`live mode caps MAX_DAILY_LOSS_PCT at ${LIVE_MAX_DAILY_LOSS_PCT}, got ${config.capital.maxDailyLossPct}`);
+  }
+  if (config.mode === 'live' && !config.capital.enforceDailyLoss) {
+    throw new Error('live mode requires ENFORCE_DAILY_LOSS=true; daily loss brake cannot be disabled with real money');
   }
 }

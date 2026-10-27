@@ -96,6 +96,23 @@ describe('restoreDayBook operator actions', () => {
     assert.equal(cleared.snapshot().dailyLossBreach, undefined, 'a clear after the breach must not re-latch on restart');
     assert.equal(cleared.snapshot().killSwitchReason, undefined);
   });
+
+  it('restores a daily-loss reset and brake toggles', () => {
+    const book = new DayBook(Date.parse(T('10:00')), 0);
+    restoreDayBook(
+      book,
+      [
+        line(T('11:00'), 'trade_closed', { underlying: 'NIFTY', pnlInr: -2500 }),
+        line(T('11:05'), 'daily_loss_reset', { baselineInr: -2500 }),
+        line(T('11:10'), 'daily_loss_brake_toggled', { enabled: false }),
+      ],
+      SESSION_DAY,
+    );
+    const snap = book.snapshot();
+    assert.equal(snap.dailyLossBaselineInr, -2500);
+    assert.equal(snap.effectiveDayPnlInr, 0);
+    assert.equal(snap.dailyLossBrakeEnabled, false);
+  });
 });
 
 describe('DayBook breach latch', () => {

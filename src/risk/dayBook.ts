@@ -10,6 +10,14 @@ export interface DaySnapshot {
   readonly realizedPnlInr: number;
   readonly unrealizedPnlInr: number;
   readonly dayPnlInr: number;
+  /** P&L relative to the session drawdown baseline (0 unless reset). */
+  readonly effectiveDayPnlInr: number;
+  /** Realized P&L relative to the session drawdown baseline. */
+  readonly effectiveRealizedPnlInr: number;
+  /** Session baseline against which drawdown is measured. */
+  readonly dailyLossBaselineInr: number;
+  /** Whether the daily loss brake is actively enforced. */
+  readonly dailyLossBrakeEnabled: boolean;
   /** Loss if every open or pending position hits its stop. */
   readonly openRiskInr: number;
   readonly tradesToday: number;
@@ -30,6 +38,8 @@ export class DayBook {
   private dayKey: string;
   private realized = 0;
   private trades = 0;
+  private pnlBaseline = 0;
+  private brakeEnabled = true;
   private readonly openPnl = new Map<string, number>();
   private readonly openRisk = new Map<string, number>();
   private readonly openSides = new Set<string>();
@@ -40,8 +50,10 @@ export class DayBook {
   constructor(
     nowMs: number,
     private readonly cooldownMs: number,
+    brakeEnabled = true,
   ) {
     this.dayKey = istParts(nowMs).date;
+    this.brakeEnabled = brakeEnabled;
   }
 
   /** Resets per-day counters when the IST date changes. Idempotent within a day. */
@@ -53,6 +65,7 @@ export class DayBook {
     this.dayKey = dayKey;
     this.realized = 0;
     this.trades = 0;
+    this.pnlBaseline = 0;
     this.cooldownUntil.clear();
   }
 
@@ -137,6 +150,25 @@ export class DayBook {
     this.dailyLossBreach = undefined;
   }
 
+  /** Absorbs current P&L as the session baseline, re-arming a fresh daily loss budget. */
+  resetDrawdownBaseline(): number {
+    this.pnlBaseline = this.realized;
+    this.clearKillSwitch();
+    return this.pnlBaseline;
+  }
+
+  setDrawdownBaseline(baselineInr: number): void {
+    this.pnlBaseline = baselineInr;
+  }
+
+  setDailyLossBrake(enabled: boolean): void {
+    this.brakeEnabled = enabled;
+  }
+
+  isDailyLossBrakeEnabled(): boolean {
+    return this.brakeEnabled;
+  }
+
   cooldownUntilFor(underlying: string): number | undefined {
     return this.cooldownUntil.get(underlying);
   }
@@ -163,6 +195,10 @@ export class DayBook {
       realizedPnlInr: this.realized,
       unrealizedPnlInr: unrealized,
       dayPnlInr: this.realized + unrealized,
+      effectiveDayPnlInr: this.realized + unrealized - this.pnlBaseline,
+      effectiveRealizedPnlInr: this.realized - this.pnlBaseline,
+      dailyLossBaselineInr: this.pnlBaseline,
+      dailyLossBrakeEnabled: this.brakeEnabled,
       openRiskInr,
       tradesToday: this.trades,
       openUnderlyings: [...underlyings].sort(),

@@ -23,7 +23,15 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
     if (line.trim() === '') {
       return;
     }
-    let event: { ts?: unknown; type?: unknown; underlying?: unknown; pnlInr?: unknown; reason?: unknown };
+    let event: {
+      ts?: unknown;
+      type?: unknown;
+      underlying?: unknown;
+      pnlInr?: unknown;
+      reason?: unknown;
+      baselineInr?: unknown;
+      enabled?: unknown;
+    };
     try {
       event = JSON.parse(line) as typeof event;
     } catch {
@@ -66,6 +74,19 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
       case 'daily_loss_breach':
         book.recordDailyLossBreach('daily loss limit breached earlier today');
         applied += 1;
+        break;
+      case 'daily_loss_reset':
+        if (typeof event.baselineInr === 'number') {
+          book.setDrawdownBaseline(event.baselineInr);
+          book.clearKillSwitch();
+          applied += 1;
+        }
+        break;
+      case 'daily_loss_brake_toggled':
+        if (typeof event.enabled === 'boolean') {
+          book.setDailyLossBrake(event.enabled);
+          applied += 1;
+        }
         break;
       // Replayed in journal order, so a clear that followed a breach clears it here too, as it did at runtime.
       case 'operator_entry_block':

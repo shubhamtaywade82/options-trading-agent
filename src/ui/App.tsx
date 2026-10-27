@@ -9,7 +9,7 @@ export const CONFIRM_WINDOW_MS = 5000;
 const DEFAULT_COLS = 160;
 const DEFAULT_ROWS = 50;
 
-type Action = 'close' | 'block' | 'stop';
+type Action = 'close' | 'block' | 'stop' | 'reset_drawdown' | 'toggle_brake';
 interface Pending {
   readonly action: Action;
   readonly symbol: string | undefined;
@@ -32,6 +32,10 @@ function confirmPrompt(pending: Pending): string {
       return 'press k again within 5s to toggle the entry block';
     case 'stop':
       return 'press s again within 5s to stop: open positions are flattened first';
+    case 'reset_drawdown':
+      return 'press r again within 5s to confirm reset of daily drawdown threshold';
+    case 'toggle_brake':
+      return 'press d again within 5s to toggle daily loss brake';
   }
 }
 
@@ -105,6 +109,10 @@ export default function App({ runtime }: { runtime: Runtime }) {
       setNotice(orchestrator.toggleEntryBlock());
     } else if (action === 'stop') {
       void stopAndExit();
+    } else if (action === 'reset_drawdown') {
+      setNotice(orchestrator.resetDailyDrawdown());
+    } else if (action === 'toggle_brake') {
+      setNotice(orchestrator.toggleDailyLossBrake());
     }
   };
 
@@ -221,8 +229,16 @@ export default function App({ runtime }: { runtime: Runtime }) {
       request('stop', undefined);
       return;
     }
+    if (input === 'r') {
+      request('reset_drawdown', undefined);
+      return;
+    }
+    if (input === 'd') {
+      request('toggle_brake', undefined);
+      return;
+    }
     if (input === '?') {
-      setNotice('↑↓ select · ←→ chain · [] pos scroll · p posture · 1-5 strat · t test trade · c close · k block · s stop (×2)');
+      setNotice('↑↓ select · ←→ chain · [] pos · p posture · 1-5 strat · t test · c close · k block · s stop · r reset dd · d brake');
     }
   });
 

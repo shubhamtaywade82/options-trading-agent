@@ -219,6 +219,14 @@ describe('cockpit content', () => {
     assert.match(text, /entries BLOCKED/);
     assert.match(text, /kill switch ON/);
     assert.match(text, /operator entry block/);
+
+    const pastWindow = snapshot({
+      at: istEpoch(SESSION_DAY, '14:30'),
+      entryStartMinute: 9 * 60 + 15,
+      entryEndMinute: 14 * 60,
+    });
+    const closedText = renderOptionsCockpit(pastWindow, { width: 170, height: 48, selected: 0, notice: undefined, logs }).map(plain).join('\n');
+    assert.match(closedText, /entries CLOSED \(14:00\)/);
   });
 
   it('reports the live capital and balance breakdown in the risk column', () => {
