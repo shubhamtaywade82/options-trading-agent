@@ -211,7 +211,8 @@ async function runReplay(): Promise<void> {
   env.DATABASE_URL ??= 'postgres://offline-research@127.0.0.1:5432/offline_research';
   const config = loadConfig(env, configPath);
   const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
-  const { replay, divergences } = replayConfigFrom(config);
+  const { replay: liveReplay, divergences } = replayConfigFrom(config);
+  const replay = { ...liveReplay, fitRiskToDailyRoom: flag('--fit-daily-room') };
   const fallbackCosts = defaultCostModel(config);
   const costs: CostModel = {
     halfSpreadPct: numberArgument('--half-spread-pct', fallbackCosts.halfSpreadPct, (value) => value >= 0 && value <= 20),

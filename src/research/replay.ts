@@ -24,6 +24,8 @@ export interface ReplayConfig {
   readonly entryLimitBufferPct: number;
   readonly expiryDayEntryCutoffMinute: number;
   readonly exits: AgentConfig['exits'];
+  /** Research only: shrink a trade's risk to the room left under the daily loss limit instead of skipping it. */
+  readonly fitRiskToDailyRoom?: boolean | undefined;
   readonly capital: Pick<AgentConfig['capital'], 'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder'>;
 }
 
@@ -290,9 +292,10 @@ function replaySession(
       ? roundDownToTick(bracket.entryReference + Math.max(10 * bracket.riskPerUnit, bracket.entryReference * 5), tick)
       : bracket.targetPrice;
     const capital = Math.max(0, config.capital.inr + day.realizedInr);
+    const roomPct = capital > 0 ? ((dailyLossLimitInr + day.realizedInr) / capital) * 100 : 0;
     const sizing = sizePosition({
       capitalInr: capital,
-      maxRiskPerTradePct: config.capital.maxRiskPerTradePct,
+      maxRiskPerTradePct: config.fitRiskToDailyRoom ? Math.min(config.capital.maxRiskPerTradePct, roomPct) : config.capital.maxRiskPerTradePct,
       availableFundsInr: capital,
       entryReference: bracket.entryReference,
       stopLossPrice: bracket.stopLossPrice,
