@@ -80,21 +80,16 @@ export class OllamaTradeAdvisor implements TradeAdvisor {
             { role: 'user', content: JSON.stringify(snapshot) },
           ],
           options: { temperature: 0 },
-          // Thinking models (MiniCPM5) took 8-21 s with a reasoning trace and 0.4-0.8 s without it on 2026-10-27;
-          // past LLM_TIMEOUT_MS every reply fails closed to SKIP, which vetoes every entry.
+          // MiniCPM5 takes 0.4-0.8s without thinking trace vs 8-21s with it; past timeoutMs every reply fails closed.
           think: false,
+          keep_alive: '30m',
           timeoutMs: this.timeoutMs,
         },
         ADVISORY_SCHEMA,
       );
       const checked = ADVISORY_SCHEMA.safeParse(decision);
       if (!checked.success) {
-        return {
-          decision: 'SKIP',
-          confidence: 1,
-          reason: 'advisor reply failed schema validation',
-          source: 'fail_closed',
-        };
+        return { decision: 'SKIP', confidence: 1, reason: 'advisor reply failed schema validation', source: 'fail_closed' };
       }
       return { ...checked.data, source: 'llm' };
     } catch (error) {

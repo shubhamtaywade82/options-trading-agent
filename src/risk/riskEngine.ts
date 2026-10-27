@@ -8,6 +8,7 @@ export type RiskCode =
   | 'UNDERLYING_ALREADY_OPEN'
   | 'UNDERLYING_SIDE_ALREADY_OPEN'
   | 'UNDERLYING_POSITION_LIMIT'
+  | 'SIDE_POSITION_LIMIT'
   | 'COOLDOWN_ACTIVE'
   | 'OUTSIDE_ENTRY_WINDOW'
   | 'EXPIRY_DAY_CUTOFF'
@@ -53,6 +54,8 @@ export interface PreTradeInput {
   readonly sideOpen?: boolean;
   readonly underlyingOpenPositions?: number;
   readonly maxPositionsPerUnderlying?: number;
+  readonly sideOpenPositions?: number;
+  readonly maxPositionsPerSide?: number;
   readonly cooldownUntilMs: number | undefined;
 
   /** Age of the latest spot tick; undefined when no tick has ever arrived. */
@@ -73,21 +76,9 @@ export interface RiskVerdict {
   readonly riskInr: number;
 }
 
-/**
- * Pre-trade gate. Pure: it reads only its input and returns every violation,
- * so a rejected trade is explained completely in the event log. Nothing here
- * can be bypassed by the LLM advisor or the strategy.
- */
-export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
-  const violations: RiskViolation[] = [];
-  const add = (code: RiskCode, detail: string): void => {
-    violations.push({ code, detail });
-  };
+type AddViolation = (code: RiskCode, detail: string) => void;
 
-  if (input.side !== 'BUY') {
-    add('NOT_A_BUY_ORDER', `entry side is ${input.side}; this agent only buys options`);
-  }
-
+function checkAccountLimits(input: PreTradeInput, add: AddViolation): void {
   if (input.killSwitchActive) {
     add('KILL_SWITCH_ACTIVE', 'kill switch is active; no new entries');
   }
@@ -97,6 +88,9 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (input.maxTradesPerDay > 0 && input.tradesToday >= input.maxTradesPerDay) {
     add('TRADE_COUNT_LIMIT', `${input.tradesToday} entries today, limit ${input.maxTradesPerDay}`);
   }
+}
+
+function checkPositionLimits(input: PreTradeInput, add: AddViolation): void {
   if (input.openPositions >= input.maxOpenPositions) {
     add('OPEN_POSITION_LIMIT', `${input.openPositions} open, limit ${input.maxOpenPositions}`);
   }
@@ -106,15 +100,15 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (input.underlyingOpen === true) {
     add('UNDERLYING_ALREADY_OPEN', 'this underlying already has an open position or pending entry');
   }
-  if (
-    input.maxPositionsPerUnderlying !== undefined &&
-    (input.underlyingOpenPositions ?? 0) >= input.maxPositionsPerUnderlying
-  ) {
-    add(
-      'UNDERLYING_POSITION_LIMIT',
-      `${input.underlyingOpenPositions ?? 0} open for underlying, limit ${input.maxPositionsPerUnderlying}`,
-    );
+  if (input.maxPositionsPerUnderlying !== undefined && (input.underlyingOpenPositions ?? 0) >= input.maxPositionsPerUnderlying) {
+    add('UNDERLYING_POSITION_LIMIT', `${input.underlyingOpenPositions ?? 0} open for underlying, limit ${input.maxPositionsPerUnderlying}`);
   }
+  if (input.maxPositionsPerSide !== undefined && (input.sideOpenPositions ?? 0) >= input.maxPositionsPerSide) {
+    add('SIDE_POSITION_LIMIT', `${input.sideOpenPositions ?? 0} open for side, limit ${input.maxPositionsPerSide}`);
+  }
+}
+
+function checkTimingLimits(input: PreTradeInput, add: AddViolation): void {
   if (input.cooldownUntilMs !== undefined && input.nowMs < input.cooldownUntilMs) {
     add('COOLDOWN_ACTIVE', `cooldown until ${new Date(input.cooldownUntilMs).toISOString()}`);
   }
@@ -124,13 +118,18 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (input.isExpiryDay && input.minuteOfDay >= input.expiryDayCutoffMinute) {
     add('EXPIRY_DAY_CUTOFF', `expiry-day entries stop at minute ${input.expiryDayCutoffMinute}`);
   }
+}
+
+function checkDataFreshness(input: PreTradeInput, add: AddViolation): void {
   if (input.spotTickAgeMs === undefined || input.spotTickAgeMs > input.staleMs) {
     add('SPOT_DATA_STALE', `spot tick age ${input.spotTickAgeMs ?? 'unknown'} ms exceeds ${input.staleMs} ms`);
   }
   if (input.optionQuoteAgeMs === undefined || input.optionQuoteAgeMs > input.staleMs) {
     add('OPTION_QUOTE_STALE', `option quote age ${input.optionQuoteAgeMs ?? 'unknown'} ms exceeds ${input.staleMs} ms`);
   }
+}
 
+function checkOrderPricing(input: PreTradeInput, add: AddViolation): void {
   if (!(input.entryReference > 0) || !Number.isFinite(input.entryReference)) {
     add('PREMIUM_INVALID', `entry reference ${input.entryReference} is not a positive premium`);
   }
@@ -143,12 +142,14 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   if (!Number.isInteger(input.lots) || input.lots < 1 || input.lots > input.maxLotsPerOrder) {
     add('LOTS_OUT_OF_RANGE', `lots ${input.lots} outside [1, ${input.maxLotsPerOrder}]`);
   }
+}
 
+function checkOrderSizing(input: PreTradeInput, add: AddViolation): number {
   const riskInr = input.lots * input.lotSize * (input.entryReference - input.stopLossPrice);
   if (riskInr > input.maxRiskInr) {
     add('RISK_EXCEEDS_BUDGET', `risk ${riskInr.toFixed(2)} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
   }
-  // Each trade fits its own budget, but several open at once could together lose more than the day allows.
+  // Several open positions could together breach the daily loss limit if all hit stops.
   const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - riskInr;
   if (worstCaseDayPnl < -input.dailyLossLimitInr) {
     add(
@@ -156,11 +157,33 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
       `if every open stop and this one hit, day P&L would be ${worstCaseDayPnl.toFixed(2)}, beyond -${input.dailyLossLimitInr.toFixed(2)}`,
     );
   }
-
   const premiumInr = input.lots * input.lotSize * input.entryReference;
   if (premiumInr > input.availableFundsInr) {
     add('INSUFFICIENT_FUNDS', `premium ${premiumInr.toFixed(2)} exceeds available funds ${input.availableFundsInr.toFixed(2)}`);
   }
+  return riskInr;
+}
+
+/**
+ * Pre-trade gate. Pure: it reads only its input and returns every violation,
+ * so a rejected trade is explained completely in the event log. Nothing here
+ * can be bypassed by the LLM advisor or the strategy.
+ */
+export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
+  const violations: RiskViolation[] = [];
+  const add: AddViolation = (code, detail) => {
+    violations.push({ code, detail });
+  };
+
+  if (input.side !== 'BUY') {
+    add('NOT_A_BUY_ORDER', `entry side is ${input.side}; this agent only buys options`);
+  }
+  checkAccountLimits(input, add);
+  checkPositionLimits(input, add);
+  checkTimingLimits(input, add);
+  checkDataFreshness(input, add);
+  checkOrderPricing(input, add);
+  const riskInr = checkOrderSizing(input, add);
 
   return { approved: violations.length === 0, violations, riskInr };
 }

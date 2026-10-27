@@ -866,6 +866,8 @@ export class UnderlyingAgent {
       openPositions: snapshot.openPositions,
       maxOpenPositions: config.capital.maxOpenPositions,
       sideOpen: book.isSideOpen(this.symbol, input.slot.optionType) || input.slot.position !== undefined,
+      sideOpenPositions: book.sideOpenPositions(input.slot.optionType),
+      maxPositionsPerSide: config.capital.maxPositionsPerSide,
       underlyingOpenPositions: book.underlyingOpenPositions(this.symbol),
       maxPositionsPerUnderlying: config.capital.maxPositionsPerUnderlying,
       cooldownUntilMs: book.cooldownUntilFor(this.symbol),

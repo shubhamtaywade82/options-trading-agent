@@ -128,6 +128,11 @@ describe('evaluatePreTrade', () => {
     assert.ok(!codes(approvedInput({ underlyingOpenPositions: 1, maxPositionsPerUnderlying: 2 })).includes('UNDERLYING_POSITION_LIMIT'));
   });
 
+  it('rejects when side positions across all indices reach maxPositionsPerSide', () => {
+    assert.ok(codes(approvedInput({ sideOpenPositions: 1, maxPositionsPerSide: 1 })).includes('SIDE_POSITION_LIMIT'));
+    assert.ok(!codes(approvedInput({ sideOpenPositions: 0, maxPositionsPerSide: 1 })).includes('SIDE_POSITION_LIMIT'));
+  });
+
   it('allows entry when another side is open on the same underlying if under limit', () => {
     const verdict = evaluatePreTrade(
       approvedInput({
@@ -211,6 +216,8 @@ describe('DayBook', () => {
     book.recordEntry('NIFTY', 'PE');
     assert.equal(book.isSideOpen('NIFTY', 'CE'), true);
     assert.equal(book.isSideOpen('NIFTY', 'PE'), true);
+    assert.equal(book.sideOpenPositions('CE'), 1);
+    assert.equal(book.sideOpenPositions('PE'), 1);
     assert.equal(book.underlyingOpenPositions('NIFTY'), 2);
     assert.equal(book.snapshot().openPositions, 2);
 

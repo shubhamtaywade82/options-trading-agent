@@ -108,6 +108,16 @@ export class DayBook {
     return count;
   }
 
+  sideOpenPositions(optionType: OptionType): number {
+    let count = 0;
+    for (const key of this.openSides) {
+      if (key.endsWith(`:${optionType}`)) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
   activateKillSwitch(reason: string): void {
     this.killSwitchReason ??= reason;
   }

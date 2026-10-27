@@ -243,7 +243,7 @@ describe('loadConfig posture and YAML loading', () => {
     assert.equal(config.capital.maxTradesPerDay, 0);
     assert.equal(config.exits.cooldownSeconds, 900);
     assert.equal(config.capital.maxOpenPositions, 6);
-    assert.equal(config.capital.maxPositionsPerSide, 2);
+    assert.equal(config.capital.maxPositionsPerSide, 1);
     assert.equal(config.session.entryStartMinute, 9 * 60 + 15);
     assert.equal(config.session.entryEndMinute, 14 * 60);
     assert.equal(config.exits.flattenByMinute, 15 * 60 + 15);

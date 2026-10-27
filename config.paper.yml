@@ -84,7 +84,7 @@ limits:
   cooldown_seconds: 900        # 15 min per underlying after an exit: stops re-buying the same strike right after a stop-out
   max_open_positions: 6        # Max 6 concurrent positions so all underlyings can take positions
   max_positions_per_underlying: 2 # Up to 2 positions per underlying (1 CE + 1 PE)
-  max_positions_per_side: 2    # NIFTY/BANKNIFTY/SENSEX move together: 3 CEs at once is one bet at 3x risk
+  max_positions_per_side: 1    # Limits correlated risk: at most 1 CE and 1 PE open across all indices
   broker_kill_switch_on_breach: false # Avoids tripping broker kill switch during paper runs
 
 # Exit Strategy & Targets

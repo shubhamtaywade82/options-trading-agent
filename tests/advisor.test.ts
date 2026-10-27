@@ -48,6 +48,8 @@ describe('OllamaTradeAdvisor', () => {
     assert.deepEqual(verdict, { decision: 'ENTER', confidence: 0.7, reason: 'clean breakout', source: 'llm' });
     assert.equal(captured.request?.['model'], 'qwen3:8b');
     assert.equal(captured.request?.['timeoutMs'], 8_000);
+    assert.equal(captured.request?.['think'], false);
+    assert.equal(captured.request?.['keep_alive'], '30m');
     assert.deepEqual(captured.request?.['options'], { temperature: 0 });
   });
 
