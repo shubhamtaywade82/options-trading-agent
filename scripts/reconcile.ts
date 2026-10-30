@@ -235,7 +235,7 @@ async function loadAuditRecords(pool: Pool, clientId: string): Promise<{
   const [posRes, orderRes, entryRes, withdrawalRes] = await Promise.all([
     pool.query<PositionRow>('SELECT position_id, underlying, exchange_segment, quantity, average_price::float8 AS average_price, stop_loss_price::float8 AS stop_loss_price, target_price::float8 AS target_price, status, opened_at, closed_at, exit_price::float8 AS exit_price, exit_reason, realized_pnl_inr::float8 AS realized_pnl FROM paper_positions WHERE client_id = $1 ORDER BY opened_at', [clientId]),
     pool.query<OrderRow>('SELECT correlation_id, position_id, kind, side, quantity, price::float8 AS price, at FROM paper_orders WHERE client_id = $1 ORDER BY at', [clientId]),
-    pool.query<WalletEntryRow>('SELECT id::text AS id, correlation_id, delta_inr::float8 AS delta, balance_after_inr::float8 AS balance_after, at FROM paper_wallet_entries WHERE client_id = $1 ORDER BY id', [clientId]),
+    pool.query<WalletEntryRow>('SELECT id::text AS id, correlation_id, delta_inr::float8 AS delta, balance_after_inr::float8 AS balance_after, at FROM paper_wallet_entries WHERE client_id = $1 ORDER BY paper_wallet_entries.id', [clientId]),
     pool.query<{ period: string; amount: number }>('SELECT period, amount_inr::float8 AS amount FROM paper_withdrawals WHERE client_id = $1', [clientId]),
   ]);
   const withdrawals = new Map(withdrawalRes.rows.map((row) => [`WITHDRAWAL:${row.period}`, row.amount]));
