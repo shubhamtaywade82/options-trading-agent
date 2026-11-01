@@ -53,12 +53,14 @@ export function asPriceEvent(value: unknown): PriceEvent | undefined {
 
 /**
  * Live LTP feed over the Dhan market socket. Ticks are keyed by the composite
- * `exchangeSegment:securityId` and carry the local receipt time so staleness
- * is judged on what this process actually saw, not on the exchange clock.
+ * `exchangeSegment:securityId`. Staleness runs from the older of local receipt
+ * and exchange time, so neither a dead socket nor a delayed packet looks fresh.
  * Reconnection and re-subscription are handled by the SDK.
  */
 /** Allowance for clock skew between this host and the exchange's trade stamps. */
 const FUTURE_LTT_TOLERANCE_MS = 60_000;
+/** A tick whose exchange time lags receipt by more than this is reported once: feed delay, or a host clock running fast. */
+const LATE_LTT_WARN_MS = 5_000;
 
 export class DhanFeed {
   private readonly listeners = new Set<(tick: Tick) => void>();
@@ -66,6 +68,7 @@ export class DhanFeed {
   private readonly subscriptions = new Map<string, InstrumentRef>();
   private started = false;
   private warnedFutureLtt = false;
+  private warnedLateLtt = false;
 
   constructor(
     private readonly client: FeedClient,
@@ -139,7 +142,7 @@ export class DhanFeed {
     };
   }
 
-  /** Milliseconds since this process last received a tick for the instrument; undefined if never. */
+  /** Milliseconds since the last tick's exchange time, or its receipt if that is earlier; undefined if never. */
   ageMs(ref: InstrumentRef, nowMs = this.now()): number | undefined {
     const received = this.lastReceived.get(instrumentKey(ref));
     return received === undefined ? undefined : nowMs - received;
@@ -161,13 +164,22 @@ export class DhanFeed {
     if (!this.subscriptions.has(key)) {
       return;
     }
-    this.lastReceived.set(key, receivedAt);
     const ltt = dhanEpochSecondsToMs(event.ltt, this.options.istShiftedTimestamps);
+    // A delayed packet must not look fresh, so age runs from the older of receipt and exchange time. A future LTT
+    // (wrong convention, reported below) falls back to receipt time.
+    this.lastReceived.set(key, Math.min(receivedAt, ltt));
     // A trade cannot happen after it is received. A tick from the future means the LTT convention is wrong, which
     // moves bars and fill times by 5h30m, so it is reported loudly, once.
     if (ltt > receivedAt + FUTURE_LTT_TOLERANCE_MS && !this.warnedFutureLtt) {
       this.warnedFutureLtt = true;
       this.options.logger?.error('feed LTT is ahead of the clock; check DHAN_FEED_IST_SHIFTED', { aheadMs: ltt - receivedAt });
+    }
+    if (receivedAt - ltt > LATE_LTT_WARN_MS && !this.warnedLateLtt) {
+      this.warnedLateLtt = true;
+      this.options.logger?.warn('feed tick exchange time lags receipt; entries refuse stale ticks. Check feed delay or host clock (NTP)', {
+        key,
+        lagMs: receivedAt - ltt,
+      });
     }
     const tick: Tick = {
       exchangeSegment: event.exchangeSegment,

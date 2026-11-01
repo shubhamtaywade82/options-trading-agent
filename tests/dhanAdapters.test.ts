@@ -245,6 +245,32 @@ describe('feed', () => {
     assert.equal(feed.ageMs({ exchangeSegment: 'NSE_FNO', securityId: '48001' }), undefined);
   });
 
+  it('should age a tick by its exchange time when the packet arrives late', async () => {
+    let handler: ((value: unknown) => void) | undefined;
+    const client = {
+      ws: {
+        market: {
+          on: (event: string, listener: (value: unknown) => void) => {
+            if (event === 'tick') {
+              handler = listener;
+            }
+          },
+          connect: async () => undefined,
+          subscribe: () => undefined,
+          unsubscribe: () => undefined,
+        },
+        connect: async () => undefined,
+        disconnect: () => undefined,
+      },
+    };
+    const now = 1_700_000_100_000;
+    const feed = new DhanFeed(client as never, { istShiftedTimestamps: false, now: () => now });
+    await feed.start();
+    feed.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
+    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_500, ltt: 1_700_000_000 });
+    assert.equal(feed.ageMs({ exchangeSegment: 'IDX_I', securityId: '13' }), 100_000, 'a packet received now with a 100 s old trade is 100 s stale');
+  });
+
   it('should convert IST-stamped LTT to UTC, and report a tick stamped in the future once', async () => {
     let handler: ((value: unknown) => void) | undefined;
     const errors: string[] = [];
