@@ -5,6 +5,8 @@ import { ema, superTrend } from '../market/indicators.js';
 export interface OrbSupertrendParams {
   readonly underlying: string;
   readonly orbMinutes: number;
+  /** Bar size, so an opening range missing a bar can be told from a complete one. */
+  readonly barMinutes: number;
   readonly supertrendPeriod: number;
   readonly supertrendMultiplier: number;
   readonly emaFast: number;
@@ -18,23 +20,33 @@ export interface OrbSupertrendParams {
   readonly minDistanceAtr?: number | undefined;
 }
 
-/** High and low of the bars on one IST date that open within [fromMinute, toMinute). Undefined when there are none. */
+/**
+ * High and low of the bars on one IST date that open within [fromMinute, toMinute). Undefined unless every bar of
+ * that window is present: a range built from part of it is a different, narrower level.
+ */
 export function sessionRange(
   bars: readonly Candle[],
   dateKey: string,
-  fromMinute: number,
-  toMinute: number,
+  window: { readonly fromMinute: number; readonly toMinute: number; readonly barMinutes: number },
 ): { high: number; low: number } | undefined {
   let high = Number.NEGATIVE_INFINITY;
   let low = Number.POSITIVE_INFINITY;
+  const opens = new Set<number>();
   for (const bar of bars) {
     const parts = istParts(bar.time);
-    if (parts.date === dateKey && parts.minuteOfDay >= fromMinute && parts.minuteOfDay < toMinute) {
+    if (parts.date === dateKey && parts.minuteOfDay >= window.fromMinute && parts.minuteOfDay < window.toMinute) {
       high = Math.max(high, bar.high);
       low = Math.min(low, bar.low);
+      opens.add(parts.minuteOfDay);
     }
   }
-  return Number.isFinite(high) && Number.isFinite(low) ? { high, low } : undefined;
+  const expectedBars = Math.ceil((window.toMinute - window.fromMinute) / window.barMinutes);
+  return opens.size === expectedBars ? { high, low } : undefined;
+}
+
+/** The opening-range window of `params`. */
+export function openingRangeWindow(params: OrbSupertrendParams): { fromMinute: number; toMinute: number; barMinutes: number } {
+  return { fromMinute: params.sessionOpenMinute, toMinute: params.sessionOpenMinute + params.orbMinutes, barMinutes: params.barMinutes };
 }
 
 /**
@@ -115,7 +127,7 @@ function prepareBreak(bars: readonly Candle[], params: OrbSupertrendParams): Pre
   if (signalParts.minuteOfDay < orbEndMinute) {
     return undefined;
   }
-  const range = sessionRange(bars, signalParts.date, params.sessionOpenMinute, orbEndMinute);
+  const range = sessionRange(bars, signalParts.date, openingRangeWindow(params));
   if (range === undefined) {
     return undefined;
   }

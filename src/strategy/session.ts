@@ -1,7 +1,7 @@
 import type { Candle, Direction, Signal } from '../domain/types.js';
 import { ema, superTrend, adaptiveSuperTrend } from '../market/indicators.js';
 import { istParts } from '../time/ist.js';
-import { evaluateOrbSupertrend, openingRangeCross, sessionRange, type OrbSupertrendParams } from './orbSupertrend.js';
+import { evaluateOrbSupertrend, openingRangeCross, openingRangeWindow, sessionRange, type OrbSupertrendParams } from './orbSupertrend.js';
 
 export const POSTURES = ['scout', 'aligned', 'confirmed'] as const;
 export type StrategyPosture = (typeof POSTURES)[number];
@@ -140,7 +140,7 @@ function rangeConfirmed(bars: readonly Candle[], params: OrbSupertrendParams): S
     return undefined;
   }
   const day = istParts(last.time).date;
-  const range = sessionRange(bars, day, params.sessionOpenMinute, params.sessionOpenMinute + params.orbMinutes);
+  const range = sessionRange(bars, day, openingRangeWindow(params));
   if (range === undefined) {
     return undefined;
   }
@@ -207,8 +207,7 @@ function trendConfirmed(
     return undefined;
   }
   const day = istParts(last.time).date;
-  const orbEnd = params.sessionOpenMinute + params.orbMinutes;
-  const range = sessionRange(bars, day, params.sessionOpenMinute, orbEnd);
+  const range = sessionRange(bars, day, openingRangeWindow(params));
   if (range === undefined) {
     return undefined;
   }

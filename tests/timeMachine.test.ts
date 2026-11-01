@@ -35,6 +35,7 @@ const CONFIG: ReplayConfig = {
   enabledStrategies: ['range'],
   strategy: {
     orbMinutes: 15,
+    barMinutes: 5,
     supertrendPeriod: 10,
     supertrendMultiplier: 3,
     emaFast: 9,

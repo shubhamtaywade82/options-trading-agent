@@ -10,6 +10,7 @@ const PREVIOUS_DAY = '2026-10-09';
 const PARAMS: OrbSupertrendParams = {
   underlying: 'NIFTY',
   orbMinutes: 15,
+  barMinutes: 5,
   supertrendPeriod: 10,
   supertrendMultiplier: 3,
   emaFast: 9,
@@ -64,6 +65,12 @@ describe('evaluateOrbSupertrend', () => {
   it('produces no signal while the opening range is still forming', () => {
     const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 101.5]);
     assert.equal(evaluateOrbSupertrend([...risingWarmup(), ...today], PARAMS), undefined);
+  });
+
+  it('produces no signal when an opening-range bar is missing', () => {
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [...ORB_CLOSES, 100.1, 100.2, 100.3, 101.5]);
+    const withGap = today.filter((_, index) => index !== 1);
+    assert.equal(evaluateOrbSupertrend([...risingWarmup(), ...withGap], PARAMS), undefined, 'a range from two of three bars is not the opening range');
   });
 
   it('produces no signal outside the entry window', () => {

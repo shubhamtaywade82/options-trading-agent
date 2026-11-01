@@ -22,7 +22,7 @@ import { analyzeOptionChain, checkOptionBuyingConfluence } from '../options/chai
 import { contextVerdict, marketContext, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import { pickExpiry, selectContract, type ChainSnapshot } from '../options/selector.js';
 import { sizePosition, type SizingResult } from '../options/sizing.js';
-import { evaluateOrbSupertrend, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
+import { evaluateOrbSupertrend, openingRangeWindow, sessionRange, type OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession } from '../strategy/session.js';
 import { ema, superTrend } from '../market/indicators.js';
 import type { AgentView, CandidateView, DropView, ExitView, PositionView, SignalView } from './views.js';
@@ -159,6 +159,7 @@ export class UnderlyingAgent {
     this.orb = {
       underlying: this.symbol,
       orbMinutes: strategy.orbMinutes,
+      barMinutes: strategy.barMinutes,
       supertrendPeriod: strategy.supertrendPeriod,
       supertrendMultiplier: strategy.supertrendMultiplier,
       emaFast: strategy.emaFast,
@@ -411,7 +412,7 @@ export class UnderlyingAgent {
     const orb =
       lastParts === undefined
         ? undefined
-        : sessionRange(bars, lastParts.date, NSE_SESSION_OPEN_MINUTE, NSE_SESSION_OPEN_MINUTE + strategy.orbMinutes);
+        : sessionRange(bars, lastParts.date, openingRangeWindow(this.orb));
     const openPositions = this.openPositions;
     const positions = openPositions.map((p) => {
       const slot = this.slotForOptionType(p.contract.optionType);

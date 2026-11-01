@@ -148,6 +148,8 @@ describe('loadConfig', () => {
   it('rejects bar sizes that Dhan intraday charts do not offer', () => {
     assert.throws(() => loadConfig({ ...BASE, BAR_MINUTES: '3' }), /BAR_MINUTES/);
     assert.equal(loadConfig({ ...BASE, BAR_MINUTES: '15' }).strategy.barMinutes, 15);
+    assert.throws(() => loadConfig({ ...BASE, BAR_MINUTES: '25' }), /ORB_MINUTES/, 'a 15-minute range cannot be built from 25-minute bars');
+    assert.throws(() => loadConfig({ ...BASE, BAR_MINUTES: '15', ORB_MINUTES: '20' }), /ORB_MINUTES/);
   });
 
   it('enforces the session ordering: entry window, then flatten, before the close', () => {

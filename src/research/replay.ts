@@ -105,6 +105,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
       enabledStrategies: strategy.enabledStrategies,
       strategy: {
         orbMinutes: strategy.orbMinutes,
+        barMinutes: strategy.barMinutes,
         supertrendPeriod: strategy.supertrendPeriod,
         supertrendMultiplier: strategy.supertrendMultiplier,
         emaFast: strategy.emaFast,

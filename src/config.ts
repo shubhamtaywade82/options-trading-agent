@@ -671,6 +671,10 @@ function validateCrossFields(config: AgentConfig): void {
   if (![1, 5, 15, 25, 60].includes(strategy.barMinutes)) {
     throw new Error('BAR_MINUTES must be one of 1, 5, 15, 25, 60 (Dhan intraday chart intervals)');
   }
+  // The opening range is built from whole bars; 15 minutes of 25-minute bars is no range at all.
+  if (strategy.orbMinutes % strategy.barMinutes !== 0) {
+    throw new Error(`ORB_MINUTES (${strategy.orbMinutes}) must be a whole number of BAR_MINUTES (${strategy.barMinutes})`);
+  }
   if (!(strategy.emaFast < strategy.emaSlow)) {
     throw new Error('EMA_FAST must be shorter than EMA_SLOW');
   }

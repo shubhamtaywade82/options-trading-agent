@@ -24,7 +24,7 @@ search. An AI research layer on top of a strategy set with no edge only searches
 | Unconfirmed entry dropped after 10 min | Fixed in code (OTA-102) | Dropped only when the super order book shows it settled or absent; restart already refuses to start with a live broker order or unadoptable position |
 | Broker kill switch: no retry or confirmation | Fixed in code (OTA-103) | Activation reads the switch back; a failure retries every 30 s and journals `broker_kill_switch_failed` (an alert) once per failure streak |
 | Feed freshness from receipt time only | Fixed in code (OTA-104) | `DhanFeed.ageMs` runs from min(receipt, exchange LTT); a lagging LTT is logged once (feed delay or fast host clock) |
-| 25/60-min bars accepted with a 15-min ORB | **Open** | `src/config.ts` validates `BAR_MINUTES` and `ORB_MINUTES` separately |
+| 25/60-min bars accepted with a 15-min ORB | Fixed in code (OTA-105) | Config requires `ORB_MINUTES` to be a whole number of `BAR_MINUTES`; `sessionRange` returns no range unless every opening-range bar is present (NIFTY 2026H replay: 553 trades vs 555) |
 | Late fill while HALTED left unmanaged | Fixed | `canExit` allows `HALTED && !exitSent` (`underlyingAgent.ts:1131`) |
 | Daily P&L gross of costs | Fixed | `closedPnl` books net of `roundTripChargesInr` |
 | Sizing on reference price under a MARKET fill | Fixed | Entry is a LIMIT at ask × (1 + buffer) and sizing uses that limit (`entryPlan.ts`) |
