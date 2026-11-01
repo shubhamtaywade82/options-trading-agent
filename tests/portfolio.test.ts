@@ -32,6 +32,7 @@ function trade(underlying: string, direction: Direction, entryMinute: number, ex
     exitReason: netPnlInr < 0 ? 'STOP_LOSS' : 'TARGET',
     ambiguousBar: false,
     gapThroughStop: false,
+    context: { regime: 'TRENDING', trendAlignment: 'WITH', timeBucket: 'OPEN', expiryDay: false },
   };
 }
 

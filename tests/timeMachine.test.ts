@@ -22,6 +22,7 @@ import {
   type TradeSample,
 } from '../src/research/stats.js';
 import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
+import { contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
 import { weeklyExpiryDates } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
@@ -405,6 +406,48 @@ describe('weekly expiry calendar', () => {
 
   it('has no rule for an index whose expiry convention is unverified', () => {
     assert.equal(weeklyExpiryDates('BANKNIFTY', ['2026-10-13']), undefined);
+  });
+});
+
+describe('context cells', () => {
+  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0 };
+
+  it('tags each replayed trade with the context at its signal', () => {
+    const result = replayDataset(dataset([session(DAY, { '10:00': [10, 16.5, 10, 16] })]), CONFIG, NO_COSTS);
+    const context = result.trades[0]?.context;
+    assert.equal(context?.timeBucket, 'OPEN');
+    assert.equal(context?.expiryDay, false);
+    assert.ok(['TRENDING', 'RANGING'].includes(context?.regime ?? ''));
+    assert.ok(['WITH', 'AGAINST', 'NEUTRAL'].includes(context?.trendAlignment ?? ''));
+  });
+
+  it('reports each strategy per context value, and corrects the bar for every cell tested', () => {
+    const result = replayDataset(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const report = contextCells(result, new Map(), options);
+    const open = report.cells.find((cell) => cell.key === 'range | timeBucket=OPEN');
+    assert.equal(open?.trades, 50);
+    assert.equal(open?.verdict, 'EDGE_SUPPORTED');
+    assert.equal(report.testsCounted, report.cells.length);
+    assert.match(formatCells(report), /range \| timeBucket=OPEN/);
+  });
+
+  it('says INSUFFICIENT_EVIDENCE for a cell below the minimum trade count', () => {
+    const result = replayDataset(dataset(days(10, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const report = contextCells(result, new Map(), options);
+    assert.ok(report.cells.every((cell) => cell.verdict === 'INSUFFICIENT_EVIDENCE'));
+  });
+
+  it('charges earlier runs on the same data against the significance bar', () => {
+    const result = replayDataset(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const fresh = contextCells(result, new Map(), options);
+    const reused = contextCells(result, new Map(), { ...options, priorRuns: 9 });
+    assert.equal(reused.testsCounted, fresh.testsCounted * 10);
+  });
+
+  it('splits days into VIX terciles from each day\'s opening VIX', () => {
+    const vix = ['2026-10-12', '2026-10-13', '2026-10-14'].map((date, index) => bar(istEpoch(date, '09:15'), 10 + index * 5, 10 + index * 5, 10 + index * 5, 10 + index * 5));
+    const terciles = vixTerciles(vix, ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15']);
+    assert.deepEqual(Object.fromEntries(terciles), { '2026-10-12': { vix: 'LOW' }, '2026-10-13': { vix: 'MID' }, '2026-10-14': { vix: 'HIGH' } });
   });
 });
 

@@ -24,11 +24,12 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
+import { contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
 import { summarize } from '../src/research/stats.js';
-import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
+import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type TimeMachineReport } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
 
 /** Dhan's intraday chart window is 90 days and the rolling-option one 180; 30-day windows stay well inside both. */
@@ -253,11 +254,13 @@ async function runReplay(): Promise<void> {
     );
     await writeFile(tradesPath, [header, ...rows].join('\n') + '\n');
   }
+  const dataSha256 = createHash('sha256').update(dataText).digest('hex');
+  const cells = flag('--cells') ? await cellReport(report, dataset, dataSha256) : undefined;
   const run = {
     ts: new Date().toISOString(),
     data: dataPath,
     // The path alone does not identify the data: a re-fetch overwrites the file.
-    dataSha256: createHash('sha256').update(dataText).digest('hex'),
+    dataSha256,
     dataQuality: report.dataQuality,
     config: configPath ?? null,
     configFingerprint: configFingerprint(config),
@@ -265,10 +268,36 @@ async function runReplay(): Promise<void> {
     trades: report.overall.trades,
     meanR: report.overall.meanR,
     verdict: report.verdict,
+    ...(cells === undefined
+      ? {}
+      : { cells: { tests: cells.testsCounted, edge: cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').map((cell) => cell.key) } }),
   };
   await mkdir(dirname(RUN_LOG), { recursive: true });
   await appendFile(RUN_LOG, `${JSON.stringify(run)}\n`);
   console.log(flag('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
+  if (cells !== undefined) {
+    console.log(`\n${formatCells(cells)}`);
+  }
+}
+
+/** Earlier logged runs on this exact data. Lines from before the hash was logged cannot be matched and are not counted. */
+async function priorRunsOn(dataSha256: string): Promise<number> {
+  const log = await readFile(RUN_LOG, 'utf8').catch(() => '');
+  return log.split('\n').filter((line) => line.includes(`"dataSha256":"${dataSha256}"`)).length;
+}
+
+/** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
+async function cellReport(report: TimeMachineReport, dataset: ResearchDataset, dataSha256: string): Promise<CellReport> {
+  const dates = dataset.sessions.map((session) => session.date);
+  const vixPath = argument('--vix');
+  const dayTags = vixPath === undefined ? new Map() : vixTerciles(JSON.parse(await readFile(vixPath, 'utf8')) as Candle[], dates);
+  return contextCells({ trades: report.trades, dates }, dayTags, {
+    iterations: numberArgument('--iterations', DEFAULT_TIME_MACHINE_OPTIONS.iterations, (value) => Number.isInteger(value) && value >= 100 && value <= 1_000_000),
+    seed: DEFAULT_TIME_MACHINE_OPTIONS.seed,
+    minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
+    splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
+    priorRuns: await priorRunsOn(dataSha256),
+  });
 }
 
 /**

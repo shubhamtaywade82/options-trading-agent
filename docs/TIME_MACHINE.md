@@ -167,3 +167,15 @@ These items cannot be verified from this environment (no broker credentials):
 5. **Expiry dates.** The rolling source does not return them, so the expiry-day entry cutoff is skipped (the
    report warns). An expiry calendar per underlying would close this.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
+
+## Context cells (`run --cells`)
+
+`run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
+at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
+A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0) is below 0.025 ÷ (cells × runs already logged on the same
+`dataSha256`), and its out-of-sample days are positive. Under 30 trades is `INSUFFICIENT_EVIDENCE`.
+
+Hold-out discipline: choose candidate cells on one period, then confirm them once on a later period that played no
+part in the choice. First pass (2026-11-02): NIFTY 2025H, 60 cells, none passed. The two best,
+`trend | trendAlignment=WITH` (P 0.0145) and `trend | regime=TRENDING` (P 0.019), were checked once on NIFTY 2026H:
+mean net R −0.020 and −0.040, `NO_TRADE`. No cell is promoted.

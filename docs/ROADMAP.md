@@ -75,8 +75,8 @@ proof that each dataset is complete and identical across runs.
 | OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line: spot bars missing, sessions with gaps, weekdays without a session. Duplicates, bad OHLC, off-grid and out-of-order bars were already refused by `parseDataset`; `DATA_GAP` share already gates the verdict | `research/timeMachine.ts` | Fixture test. Real data: 2026H sets complete; NIFTY 2025H has one short session (63 bars, Muhurat) |
 | OTA-202 | **Done.** SHA-256 of the dataset file in every `runs.jsonl` line (`dataSha256`) | `scripts/timemachine.ts` | Same file and config give identical lines except `ts` |
 | OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu).** `weeklyExpiryDates` derives expiry days for expiry-code-1 weekly rolling datasets, shifting to the prior session only when a later session that week proves a holiday. BANKNIFTY monthly still unverified, so no rule | `time/calendar.ts`, `research/replay.ts` | No effect on current paper config: `expiry_day_cutoff` 15:15 is after `entry_end` 14:00 |
-| OTA-204 | Use recorded chain snapshots (`ops/chainRecorder.ts`, live since 2026-10-27) in replay for chain bias and real bid/ask on the days they exist; elsewhere keep the configured spread and say so in the report | `research/replay.ts` | Replay on a recorded day uses snapshot spreads; report states coverage |
-| OTA-205 | India VIX bars (already fetched) as a replay feature column | `research/dataset.ts` | Available to context tagging in phase 3 |
+| OTA-204 | **Deferred.** Chain snapshots start 2026-10-27; every dataset ends 2026-09-30, so no day overlaps. Fetch Oct 27+ data first | `research/replay.ts` | — |
+| OTA-205 | **Done.** `run --cells --vix <file>` tags days by opening-VIX tercile | `research/contextCells.ts` | In cell report |
 
 Not now: a feature registry service, Greeks engine, event-calendar feed, PostgreSQL research tables. Datasets
 are JSON files with a manifest line in `runs.jsonl`; that is enough until a query needs more.
@@ -90,10 +90,10 @@ strategy family (range, trend, ema_cross, momentum, continuation × scout/confir
 
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
-| OTA-301 | Attach context tags to each replayed trade | `research/replay.ts` | Every trade row carries its tags |
-| OTA-302 | Per-cell report: n, mean net R with block-bootstrap CI, profit factor, max drawdown, verdict; cells under a minimum n print `INSUFFICIENT_EVIDENCE` | `research/stats.ts`, `scripts/timemachine.ts` | Report reproduces from dataset hash + config fingerprint |
-| OTA-303 | Multiple-testing control: count cells × variants tried on a dataset from `runs.jsonl`; widen intervals (Bonferroni is enough) before any verdict | `research/stats.ts` | A cell chosen from k candidates must clear the corrected bound |
-| OTA-304 | Hold-out discipline: choose cells on 2025 data, confirm on 2026 data never used for choosing | runbook in `TIME_MACHINE.md` | The confirm run is a single logged run per candidate |
+| OTA-301 | **Done.** Each replayed trade carries `context` (regime, trend alignment, time bucket, expiry day) | `research/replay.ts` | Test |
+| OTA-302 | **Done.** `run --cells` per-cell n, mean R, bootstrap CI, P(≤0), out-of-sample R, PF, verdict | `research/contextCells.ts` (new: `stats.ts` would pass 300 lines) | Tests |
+| OTA-303 | **Done.** Bonferroni over cells × prior runs on the same `dataSha256` | `research/contextCells.ts` | Test |
+| OTA-304 | **Done, first pass.** Runbook in `TIME_MACHINE.md`; best two 2025H cells failed on 2026H | docs | Logged runs |
 | OTA-305 | If a cell passes: gate the live entry on that cell (a context allow-list in config), nothing else | `runtime/tradingGate.ts` / entry plan | Paper agent only trades in passed cells |
 
 Not now: a strategy registry with lifecycle states, a weighted scoring formula, a ranking engine. With zero

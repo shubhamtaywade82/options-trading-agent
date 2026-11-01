@@ -4,7 +4,7 @@ import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripCharges
 import { directionToOptionType, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
 import { evaluatePreTrade } from '../risk/riskEngine.js';
-import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst } from '../strategy/marketContext.js';
+import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
 import { weeklyExpiryDates } from '../time/calendar.js';
@@ -71,6 +71,29 @@ export interface ReplayTrade {
   readonly ambiguousBar: boolean;
   /** The bar opened below the stop, so the fill was worse than the stop price. */
   readonly gapThroughStop: boolean;
+  readonly context: TradeContext;
+}
+
+/** Conditions at the signal, all known when it fired, so results can be judged per context. */
+export interface TradeContext {
+  readonly regime: MarketContext['regime'];
+  /** The day's trend against the trade's direction. */
+  readonly trendAlignment: 'WITH' | 'AGAINST' | 'NEUTRAL';
+  readonly timeBucket: 'OPEN' | 'MID' | 'LATE';
+  readonly expiryDay: boolean;
+}
+
+const MID_SESSION_MINUTE = 10 * 60 + 30;
+const LATE_SESSION_MINUTE = 12 * 60 + 30;
+
+function tradeContext(context: MarketContext, direction: Direction, signalBarTime: number, expiryDay: boolean): TradeContext {
+  const minute = istParts(signalBarTime).minuteOfDay;
+  return {
+    regime: context.regime,
+    trendAlignment: context.dayTrend === 'NEUTRAL' ? 'NEUTRAL' : context.dayTrend === direction ? 'WITH' : 'AGAINST',
+    timeBucket: minute < MID_SESSION_MINUTE ? 'OPEN' : minute < LATE_SESSION_MINUTE ? 'MID' : 'LATE',
+    expiryDay,
+  };
 }
 
 export interface ReplayResult {
@@ -147,6 +170,7 @@ interface PendingEntry {
   readonly optionType: OptionType;
   readonly strike: number;
   readonly signalBarTime: number;
+  readonly context: TradeContext;
 }
 
 interface HeldPosition extends PendingEntry {
@@ -271,6 +295,7 @@ function replaySession(
       exitReason,
       ambiguousBar: flags.ambiguousBar ?? false,
       gapThroughStop: flags.gapThroughStop ?? false,
+      context: held.context,
     });
     day.realizedInr += exitReason === 'DATA_GAP' ? 0 : netPnlInr;
     if (config.exits.cooldownSeconds > 0) {
@@ -467,7 +492,8 @@ function replaySession(
       continue;
     }
     signals += 1;
-    if (config.contextGate && !contextVerdict(marketContext(history), signal.direction, 'NEUTRAL').ok) {
+    const context = marketContext(history);
+    if (config.contextGate && !contextVerdict(context, signal.direction, 'NEUTRAL').ok) {
       drop('CONTEXT_REJECTED');
       continue;
     }
@@ -483,6 +509,7 @@ function replaySession(
       optionType,
       strike: targetEntryStrike(atm, session.strikeStep, signal.direction, config.strikeOffsetSteps),
       signalBarTime: signal.barTime,
+      context: tradeContext(context, signal.direction, signal.barTime, session.expiry === session.date),
     };
   }
 
