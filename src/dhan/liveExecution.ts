@@ -91,12 +91,38 @@ interface TrackedPosition {
   confirmed: boolean;
   exitInFlight: boolean;
   mismatchReported: boolean;
-  /** Legs the broker has confirmed cancelled. A retry cancels only the rest, so it never re-cancels a leg. */
+  /** Legs whose cancel request the broker accepted. A retry requests only the rest; the order book confirms them. */
   cancelledLegs: Set<BracketLeg>;
 }
 
 const LEG_CANCEL_ATTEMPTS = 3;
 const LEG_CANCEL_BACKOFF_MS = 250;
+/** An accepted cancel is not a cancelled leg. The super order book is polled this many times for a terminal status. */
+const LEG_STATUS_POLLS = 8;
+const LEG_STATUS_POLL_MS = 250;
+const TERMINAL_ORDER_STATUSES = new Set(['CANCELLED', 'TRADED', 'REJECTED', 'EXPIRED', 'CLOSED']);
+
+type SuperOrderRow = Awaited<ReturnType<DhanClient['superOrders']['list']>>[number];
+
+/**
+ * Bracket legs of `orderId` that could still fire, from the super order book. Undefined when the order is not in
+ * the book. A leg missing from `legDetails` counts as live: absence is not proof it was cancelled.
+ */
+export function liveBracketLegs(book: readonly SuperOrderRow[], orderId: string): BracketLeg[] | undefined {
+  const order = book.find((row) => String(row.orderId) === orderId);
+  if (order === undefined) {
+    return undefined;
+  }
+  // The entry leg is TRADED while its bracket is live, so only a closed or dead parent ends the legs with it.
+  if (order.orderStatus !== 'TRADED' && TERMINAL_ORDER_STATUSES.has(String(order.orderStatus))) {
+    return [];
+  }
+  const details = Array.isArray(order['legDetails']) ? (order['legDetails'] as Array<Record<string, unknown>>) : [];
+  return (['STOP_LOSS_LEG', 'TARGET_LEG'] as const).filter((leg) => {
+    const detail = details.find((row) => row['legName'] === leg);
+    return detail === undefined || !TERMINAL_ORDER_STATUSES.has(String(detail['orderStatus']));
+  });
+}
 
 /** Abandon an entry that never confirmed and never showed up at the broker after this long. */
 const UNCONFIRMED_ENTRY_RETENTION_MS = 10 * 60_000;
@@ -132,8 +158,9 @@ function describeError(error: unknown): string {
  *
  * Unverified assumption (flagged in the README): cancelling the STOP_LOSS_LEG
  * and TARGET_LEG of a super order is how a live bracket is detached before a
- * manual exit. The SDK does not document leg-cancel semantics, so this path must
- * be validated in a sandbox before live use.
+ * manual exit, and that the super order book lists each leg under `legDetails`
+ * with `legName` and `orderStatus`. The SDK types neither, so this path must be
+ * validated in a sandbox before live use.
  */
 export class LiveExecutionPort implements ExecutionPort {
   readonly mode: 'live' | 'sandbox';
@@ -288,14 +315,16 @@ export class LiveExecutionPort implements ExecutionPort {
         return;
       }
 
-      // Cancel the legs that are still active, retrying the ones that failed. A SELL is never sent while a leg could still fire.
-      if (!(await this.cancelBracketLegsWithRetry(tracked))) {
+      // A SELL is never sent while a leg could still fire. A cancel that errors may mean the leg already traded,
+      // so the order book decides, not the cancel response.
+      await this.cancelBracketLegsWithRetry(tracked);
+      if (!(await this.awaitLegsTerminal(tracked))) {
         this.emit({
           kind: 'EXIT_UNCONFIRMED',
           correlationId: order.correlationId,
           underlying: order.underlying,
           positionId: order.positionId,
-          reason: 'protective legs not confirmed cancelled after retries; exit not sent',
+          reason: 'protective legs not confirmed terminal by the broker; exit not sent',
         });
         return;
       }
@@ -500,8 +529,31 @@ export class LiveExecutionPort implements ExecutionPort {
     }
   }
 
-  /** Returns true when no protective leg remains active. Failures are logged; a false result blocks the exit. */
-  /** Cancels every leg not yet confirmed cancelled. Returns true only when all of them are. */
+  /** True once the super order book shows no bracket leg that could still fire. False on timeout or unreadable book. */
+  private async awaitLegsTerminal(tracked: TrackedPosition): Promise<boolean> {
+    const orderId = tracked.orderId;
+    if (orderId === undefined) {
+      return false;
+    }
+    let live: BracketLeg[] | undefined;
+    for (let poll = 1; poll <= LEG_STATUS_POLLS; poll += 1) {
+      try {
+        live = liveBracketLegs(await this.client.superOrders.list(), orderId);
+        if (live?.length === 0) {
+          return true;
+        }
+      } catch (error) {
+        this.options.logger.warn('super order book read failed', { positionId: tracked.positionId, error: describeError(error) });
+      }
+      if (poll < LEG_STATUS_POLLS) {
+        await new Promise((resolve) => setTimeout(resolve, LEG_STATUS_POLL_MS));
+      }
+    }
+    this.options.logger.error('protective legs not terminal at the broker', { positionId: tracked.positionId, orderId, live: live ?? 'order not in book' });
+    return false;
+  }
+
+  /** Requests a cancel for every leg not yet accepted. True when every request was accepted, which is not a cancelled leg. */
   private async cancelBracketLegs(tracked: TrackedPosition): Promise<boolean> {
     if (tracked.orderId === undefined) {
       return false;
@@ -526,16 +578,15 @@ export class LiveExecutionPort implements ExecutionPort {
     return allCancelled;
   }
 
-  private async cancelBracketLegsWithRetry(tracked: TrackedPosition): Promise<boolean> {
+  private async cancelBracketLegsWithRetry(tracked: TrackedPosition): Promise<void> {
     for (let attempt = 1; attempt <= LEG_CANCEL_ATTEMPTS; attempt += 1) {
       if (await this.cancelBracketLegs(tracked)) {
-        return true;
+        return;
       }
       if (attempt < LEG_CANCEL_ATTEMPTS) {
         await new Promise((resolve) => setTimeout(resolve, LEG_CANCEL_BACKOFF_MS * attempt));
       }
     }
-    return false;
   }
 
   /** The broker shows no position: the bracket or an earlier exit closed it. Reported as a protective exit. */

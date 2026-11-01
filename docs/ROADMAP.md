@@ -20,7 +20,7 @@ search. An AI research layer on top of a strategy set with no edge only searches
 
 | Finding | Status | Evidence |
 | --- | --- | --- |
-| Bracket-leg cancel treated as confirmed on request accept | **Open** | `src/dhan/liveExecution.ts` `cancelBracketLegs` adds the leg to `cancelledLegs` when `superOrders.cancel` resolves; no terminal-status read |
+| Bracket-leg cancel treated as confirmed on request accept | Fixed in code (OTA-101) | `awaitLegsTerminal` polls the super order book for a terminal leg status; `legDetails` shape still unverified against sandbox |
 | Unconfirmed entry dropped after 10 min | **Open** | `UNCONFIRMED_ENTRY_RETENTION_MS`, `liveExecution.ts:617`; state is in memory only |
 | Broker kill switch: no retry or confirmation | **Partly open** | Orchestrator waits until the book is flat (`maybeEngageBrokerKillSwitch`), but a failed `setKillSwitch` is logged once, `brokerKillSent` stays true, nothing re-reads the switch, no alert |
 | Feed freshness from receipt time only | **Open** | `src/dhan/feed.ts` stamps `receivedAt`; `ltt` is only checked for being in the future |

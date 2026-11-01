@@ -15,6 +15,8 @@ interface FakeOptions {
   cancelError?: unknown;
   positions?: Array<Record<string, unknown>>;
   positionsError?: unknown;
+  /** Replaces the default super order book, in which a leg reads CANCELLED once its cancel was accepted. */
+  superOrderBook?: () => unknown[];
 }
 
 function fakeBroker(options: FakeOptions = {}) {
@@ -24,7 +26,19 @@ function fakeBroker(options: FakeOptions = {}) {
     superCancel: [] as Array<Record<string, unknown>>,
     place: [] as Array<Record<string, unknown>>,
     kill: [] as string[],
+    superList: 0,
   };
+  const cancelledLegs = new Set<unknown>();
+  const defaultBook = () => [
+    {
+      orderId: 'SUPER-1',
+      orderStatus: 'TRADED',
+      legDetails: ['STOP_LOSS_LEG', 'TARGET_LEG'].map((legName) => ({
+        legName,
+        orderStatus: cancelledLegs.has(legName) ? 'CANCELLED' : 'PENDING',
+      })),
+    },
+  ];
   const client = {
     ws: {
       orders: {
@@ -48,7 +62,12 @@ function fakeBroker(options: FakeOptions = {}) {
         if (options.cancelError !== undefined) {
           throw options.cancelError;
         }
+        cancelledLegs.add(request['orderLeg']);
         return {};
+      },
+      list: async () => {
+        calls.superList += 1;
+        return (options.superOrderBook ?? defaultBook)();
       },
     },
     orders: {
@@ -302,6 +321,70 @@ describe('LiveExecutionPort exits', () => {
 
   it('refuses to exit while a protective leg may still be active', async () => {
     const broker = fakeBroker({ positions: [brokerRow(75)], cancelError: new ApiResponseError('leg not cancellable', 400) });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 0);
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.close();
+  });
+
+  it('waits for both legs to report CANCELLED before sending the SELL', async () => {
+    let reads = 0;
+    const book = (status: string) => [
+      { orderId: 'SUPER-1', orderStatus: 'TRADED', legDetails: [{ legName: 'STOP_LOSS_LEG', orderStatus: status }, { legName: 'TARGET_LEG', orderStatus: status }] },
+    ];
+    const broker = fakeBroker({ positions: [brokerRow(75)], superOrderBook: () => book((reads += 1) < 3 ? 'PENDING' : 'CANCELLED') });
+    const { live } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(broker.calls.superList, 3, 'polled until the broker reported both legs cancelled');
+    assert.equal(broker.calls.place.length, 1);
+    await live.close();
+  });
+
+  it('records the protective exit and sends no SELL when the stop leg traded during the cancel', async () => {
+    const broker = fakeBroker({
+      positions: [brokerRow(75)],
+      cancelError: new ApiResponseError('leg not cancellable', 400),
+      superOrderBook: () => {
+        setPositions(broker, [brokerRow(0, dayTotals(75, 7575, 75, 5250))]);
+        return [
+          { orderId: 'SUPER-1', orderStatus: 'TRADED', legDetails: [{ legName: 'STOP_LOSS_LEG', orderStatus: 'TRADED' }, { legName: 'TARGET_LEG', orderStatus: 'CANCELLED' }] },
+        ];
+      },
+    });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 0, 'a SELL here would open a short option');
+    assert.equal(events.at(-1)?.kind, 'PROTECTIVE_EXIT_FILLED');
+    await live.close();
+  });
+
+  it('refuses to exit when an accepted cancel never reaches a terminal leg status', async () => {
+    const pending = [
+      { orderId: 'SUPER-1', orderStatus: 'TRADED', legDetails: [{ legName: 'STOP_LOSS_LEG', orderStatus: 'PENDING' }, { legName: 'TARGET_LEG', orderStatus: 'CANCELLED' }] },
+    ];
+    const broker = fakeBroker({ positions: [brokerRow(75)], superOrderBook: () => pending });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 0);
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.close();
+  });
+
+  it('refuses to exit when the super order is missing from the order book', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)], superOrderBook: () => [] });
     const { live, events } = port(broker);
     await live.submitEntry(entry());
     broker.emitOrder({ orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} });
