@@ -7,6 +7,7 @@ import { evaluatePreTrade } from '../risk/riskEngine.js';
 import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
+import { weeklyExpiryDates } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
 
@@ -177,6 +178,18 @@ interface DayState {
  * bar close. Signals come from the same StrategySession the agent runs; brackets, sizing and charges from the
  * same functions. Fills are priced pessimistically wherever a 5-minute bar cannot say what happened inside it.
  */
+/**
+ * Expiry days for a rolling-option dataset, which records no expiry. Only the nearest weekly contract
+ * (expiry code 1) expires on the calendar's expiry day; other codes and monthly series get none.
+ */
+export function derivedExpiryDates(dataset: ResearchDataset): Set<string> | undefined {
+  const { kind, expiryFlag, expiryCode } = dataset.source;
+  if (kind !== 'dhan_rollingoption' || expiryFlag === 'MONTH' || (expiryCode ?? 1) !== 1) {
+    return undefined;
+  }
+  return weeklyExpiryDates(dataset.underlying, dataset.sessions.map((session) => session.date));
+}
+
 export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, costs: CostModel, divergences: readonly string[] = []): ReplayResult {
   if (dataset.barMinutes !== config.barMinutes) {
     throw new Error(`dataset bars are ${dataset.barMinutes}-minute but BAR_MINUTES is ${config.barMinutes}`);
@@ -193,9 +206,11 @@ export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, co
     drops[code] = (drops[code] ?? 0) + 1;
   };
 
+  const expiryDates = derivedExpiryDates(dataset);
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
-    const outcome = replaySession(session, warmup, dataset.optionSegment, config, costs, strategySession, params, drop);
+    const dated = session.expiry === undefined && expiryDates?.has(session.date) ? { ...session, expiry: session.date } : session;
+    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop);
     signals += outcome.signals;
     trades.push(...outcome.trades);
   });

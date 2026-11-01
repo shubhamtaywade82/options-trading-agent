@@ -22,6 +22,7 @@ import {
   type TradeSample,
 } from '../src/research/stats.js';
 import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
+import { weeklyExpiryDates } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
 
@@ -285,6 +286,15 @@ describe('historical replay', () => {
     assert.equal(result.drops['EXPIRY_DAY_CUTOFF'], 1);
   });
 
+  it('derives the weekly expiry day for a rolling-option dataset that records no expiry', () => {
+    const tuesday = session('2026-10-13');
+    const rolling = { ...dataset([session('2026-10-12'), tuesday]), source: { kind: 'dhan_rollingoption' as const, expiryFlag: 'WEEK', expiryCode: 1 } };
+    const result = replayDataset(rolling, { ...CONFIG, expiryDayEntryCutoffMinute: 9 * 60 + 30 }, NO_COSTS);
+    assert.equal(result.drops['EXPIRY_DAY_CUTOFF'], 1, 'NIFTY expires on Tuesday');
+    const nextWeek = replayDataset({ ...rolling, source: { ...rolling.source, expiryCode: 2 } }, { ...CONFIG, expiryDayEntryCutoffMinute: 9 * 60 + 30 }, NO_COSTS);
+    assert.equal(nextWeek.drops['EXPIRY_DAY_CUTOFF'], undefined, 'the next-week contract does not expire today');
+  });
+
   it('runs the live gate: MAX_TRADES_PER_DAY 0 is unlimited, 1 stops the second entry', () => {
     // Crosses the opening-range high at 09:30, falls back inside it, and crosses again at 10:30.
     const twice = (minute: number): number => (minute < 9 * 60 + 30 ? 100 : minute < 9 * 60 + 35 ? 101 : minute < 10 * 60 + 30 ? 100 : 101);
@@ -378,6 +388,23 @@ describe('statistics', () => {
     assert.deepEqual(split.inSample.map((d) => d.date), ['1', '2', '3']);
     assert.throws(() => groupByDay(['a'], [sample('b', 1)]), /outside the replayed days/);
     assert.throws(() => chronologicalSplit([], 1), RangeError);
+  });
+});
+
+describe('weekly expiry calendar', () => {
+  it('marks the expiry weekday, and the last session before it when that day is a holiday', () => {
+    // Mon 12 Oct to Fri 23 Oct 2026; Tue 20 Oct is missing (a holiday), so Mon 19 Oct is that week's expiry.
+    const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-19', '2026-10-21', '2026-10-22'];
+    assert.deepEqual([...(weeklyExpiryDates('NIFTY', dates) ?? [])], ['2026-10-13', '2026-10-19']);
+    assert.deepEqual([...(weeklyExpiryDates('SENSEX', dates) ?? [])], ['2026-10-22']);
+  });
+
+  it('does not guess a holiday shift in a trailing week that ends before the expiry weekday', () => {
+    assert.deepEqual([...(weeklyExpiryDates('NIFTY', ['2026-10-12']) ?? [])], []);
+  });
+
+  it('has no rule for an index whose expiry convention is unverified', () => {
+    assert.equal(weeklyExpiryDates('BANKNIFTY', ['2026-10-13']), undefined);
   });
 });
 
