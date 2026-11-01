@@ -427,6 +427,63 @@ describe('LiveExecutionPort exits', () => {
   });
 });
 
+describe('LiveExecutionPort unconfirmed entries', () => {
+  const ELEVEN_MINUTES = 11 * 60_000;
+
+  function clockedPort(broker: ReturnType<typeof fakeBroker>, clock: { now: number }) {
+    const live = new LiveExecutionPort(broker.client, { mode: 'live', orderTimeoutMs: 200, reconcileIntervalMs: 10, logger: SILENT, now: () => clock.now });
+    const events: ExecutionEvent[] = [];
+    live.onEvent((event) => events.push(event));
+    return { live, events };
+  }
+
+  it('should keep tracking an unconfirmed entry the order book still shows live, and adopt its late fill', async () => {
+    const clock = { now: 0 };
+    const broker = fakeBroker({ placeError: new ApiResponseError('gateway timeout', 504), superOrderBook: () => [{ orderId: 'X', correlationId: 'ENT-1', orderStatus: 'PENDING' }] });
+    const { live, events } = clockedPort(broker, clock);
+    live.start();
+    await live.submitEntry(entry());
+    clock.now = ELEVEN_MINUTES;
+    await settle();
+    setPositions(broker, [brokerRow(75)]);
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'ENTRY_FILLED', 'a fill after the retention window is still adopted');
+    await live.close();
+  });
+
+  it('should drop an unconfirmed entry once the order book shows it never reached the broker', async () => {
+    const clock = { now: 0 };
+    const broker = fakeBroker({ placeError: new ApiResponseError('gateway timeout', 504), superOrderBook: () => [] });
+    const { live, events } = clockedPort(broker, clock);
+    live.start();
+    await live.submitEntry(entry());
+    clock.now = ELEVEN_MINUTES;
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED', 'no longer tracked');
+    await live.close();
+  });
+
+  it('should keep an unconfirmed entry while the order book cannot be read', async () => {
+    const clock = { now: 0 };
+    const broker = fakeBroker({
+      placeError: new ApiResponseError('gateway timeout', 504),
+      superOrderBook: () => {
+        throw new Error('read timeout');
+      },
+    });
+    const { live, events } = clockedPort(broker, clock);
+    live.start();
+    await live.submitEntry(entry());
+    clock.now = ELEVEN_MINUTES;
+    await settle();
+    setPositions(broker, [brokerRow(75)]);
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'ENTRY_FILLED');
+    await live.close();
+  });
+});
+
 describe('LiveExecutionPort broker position rows', () => {
   /** Rows before the entry, while the position is open, and after the bracket closed it. */
   async function bracketCloseAfter(

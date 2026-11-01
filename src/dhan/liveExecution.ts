@@ -108,6 +108,12 @@ type SuperOrderRow = Awaited<ReturnType<DhanClient['superOrders']['list']>>[numb
  * Bracket legs of `orderId` that could still fire, from the super order book. Undefined when the order is not in
  * the book. A leg missing from `legDetails` counts as live: absence is not proof it was cancelled.
  */
+/** True when the super order book shows the entry settled, or never shows it at all. A live order keeps tracking. */
+export function entrySettledInBook(book: readonly SuperOrderRow[], orderId: string | undefined, correlationId: string): boolean {
+  const order = book.find((row) => (orderId !== undefined && String(row.orderId) === orderId) || row.correlationId === correlationId);
+  return order === undefined || TERMINAL_ORDER_STATUSES.has(String(order.orderStatus));
+}
+
 export function liveBracketLegs(book: readonly SuperOrderRow[], orderId: string): BracketLeg[] | undefined {
   const order = book.find((row) => String(row.orderId) === orderId);
   if (order === undefined) {
@@ -124,7 +130,10 @@ export function liveBracketLegs(book: readonly SuperOrderRow[], orderId: string)
   });
 }
 
-/** Abandon an entry that never confirmed and never showed up at the broker after this long. */
+/**
+ * An unconfirmed entry is dropped only after this long, and only once the order book shows it settled or absent.
+ * The wait covers an order the broker accepted but has not listed yet.
+ */
 const UNCONFIRMED_ENTRY_RETENTION_MS = 10 * 60_000;
 
 /**
@@ -637,6 +646,7 @@ export class LiveExecutionPort implements ExecutionPort {
       this.options.logger.warn('reconciliation read failed; will retry', { error: describeError(error) });
       return;
     }
+    let book: SuperOrderRow[] | undefined;
     for (const tracked of [...this.tracked.values()]) {
       if (tracked.exitInFlight) {
         continue;
@@ -666,8 +676,22 @@ export class LiveExecutionPort implements ExecutionPort {
         continue;
       }
       if (!tracked.confirmed && this.now() - tracked.createdAt > UNCONFIRMED_ENTRY_RETENTION_MS) {
-        this.tracked.delete(tracked.positionId);
+        book ??= await this.superOrderBook();
+        if (book !== undefined && entrySettledInBook(book, tracked.orderId, tracked.positionId)) {
+          this.options.logger.warn('unconfirmed entry settled or absent at the broker; tracking dropped', { positionId: tracked.positionId });
+          this.tracked.delete(tracked.positionId);
+        }
       }
+    }
+  }
+
+  /** The super order book, or undefined when it cannot be read. */
+  private async superOrderBook(): Promise<SuperOrderRow[] | undefined> {
+    try {
+      return await this.client.superOrders.list();
+    } catch (error) {
+      this.options.logger.warn('super order book read failed; unconfirmed entries stay tracked', { error: describeError(error) });
+      return undefined;
     }
   }
 
