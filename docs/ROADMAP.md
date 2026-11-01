@@ -72,8 +72,8 @@ proof that each dataset is complete and identical across runs.
 
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
-| OTA-201 | Dataset quality report on load: missing/duplicate/out-of-order bars, invalid OHLC, sessions missing vs calendar, `DATA_GAP` share. Print it with every `run` and refuse a dataset above a gap threshold | `research/dataset.ts` | Test on a fixture with each defect |
-| OTA-202 | SHA-256 of the dataset file in every `runs.jsonl` line (next to the config fingerprint) | `scripts/timemachine.ts` | Two runs on the same file and config give identical lines except `ts` |
+| OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line: spot bars missing, sessions with gaps, weekdays without a session. Duplicates, bad OHLC, off-grid and out-of-order bars were already refused by `parseDataset`; `DATA_GAP` share already gates the verdict | `research/timeMachine.ts` | Fixture test. Real data: 2026H sets complete; NIFTY 2025H has one short session (63 bars, Muhurat) |
+| OTA-202 | **Done.** SHA-256 of the dataset file in every `runs.jsonl` line (`dataSha256`) | `scripts/timemachine.ts` | Same file and config give identical lines except `ts` |
 | OTA-203 | Expiry calendar per underlying, so the expiry-day cutoff stops being skipped in replay (TIME_MACHINE item 5) | `time/calendar.ts` | Replay report no longer warns; BANKNIFTY monthly expiry checked like NIFTY/SENSEX |
 | OTA-204 | Use recorded chain snapshots (`ops/chainRecorder.ts`, live since 2026-10-27) in replay for chain bias and real bid/ask on the days they exist; elsewhere keep the configured spread and say so in the report | `research/replay.ts` | Replay on a recorded day uses snapshot spreads; report states coverage |
 | OTA-205 | India VIX bars (already fetched) as a replay feature column | `research/dataset.ts` | Available to context tagging in phase 3 |

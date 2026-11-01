@@ -381,6 +381,16 @@ describe('statistics', () => {
   });
 });
 
+describe('dataset quality', () => {
+  it('counts missing spot bars and weekdays with no session', () => {
+    const monday = session('2026-10-12');
+    const gappy = { ...session('2026-10-14'), spot: spotBars('2026-10-14').filter((_, index) => index < 10 || index >= 13) };
+    const report = runTimeMachine(dataset([monday, gappy]), CONFIG, NO_COSTS, [], { ...DEFAULT_TIME_MACHINE_OPTIONS, iterations: 100, drawdownAlarmInr: 5_000 });
+    assert.deepEqual(report.dataQuality, { spotBarsMissing: 3, sessionsWithSpotGaps: 1, weekdaysWithoutSession: 1 });
+    assert.match(formatReport(report), /Data quality: 3 spot bars missing across 1 sessions; 1 weekdays without a session/);
+  });
+});
+
 describe('time machine verdict', () => {
   const options = { ...DEFAULT_TIME_MACHINE_OPTIONS, iterations: 500, drawdownAlarmInr: 5_000 };
 

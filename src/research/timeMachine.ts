@@ -1,4 +1,5 @@
 import { MIN_TRADES_TO_JUDGE } from '../ops/performanceReport.js';
+import { NSE_SESSION_CLOSE_MINUTE, NSE_SESSION_OPEN_MINUTE, shiftDateKey } from '../time/ist.js';
 import type { ResearchDataset } from './dataset.js';
 import { replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from './replay.js';
 import {
@@ -45,8 +46,37 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
  */
 export type TimeMachineVerdict = 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE' | 'EDGE_SUPPORTED';
 
+export interface DataQuality {
+  readonly spotBarsMissing: number;
+  readonly sessionsWithSpotGaps: number;
+  /** Weekdays between the first and last session with no session. Includes exchange holidays: there is no holiday calendar. */
+  readonly weekdaysWithoutSession: number;
+}
+
+/** Spot bars missing from full sessions, and weekdays absent from the date range. */
+export function dataQuality(dataset: ResearchDataset): DataQuality {
+  const expectedBars = (NSE_SESSION_CLOSE_MINUTE - NSE_SESSION_OPEN_MINUTE) / dataset.barMinutes;
+  let spotBarsMissing = 0;
+  let sessionsWithSpotGaps = 0;
+  for (const session of dataset.sessions) {
+    const missing = Math.max(0, expectedBars - session.spot.length);
+    spotBarsMissing += missing;
+    sessionsWithSpotGaps += missing > 0 ? 1 : 0;
+  }
+  const dates = new Set(dataset.sessions.map((session) => session.date));
+  const first = dataset.sessions[0]?.date;
+  const last = dataset.sessions[dataset.sessions.length - 1]?.date;
+  let weekdaysWithoutSession = 0;
+  for (let date = first; date !== undefined && last !== undefined && date <= last; date = shiftDateKey(date, 1)) {
+    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+    weekdaysWithoutSession += weekday !== 0 && weekday !== 6 && !dates.has(date) ? 1 : 0;
+  }
+  return { spotBarsMissing, sessionsWithSpotGaps, weekdaysWithoutSession };
+}
+
 export interface TimeMachineReport {
   readonly underlying: string;
+  readonly dataQuality: DataQuality;
   readonly fromDate: string | undefined;
   readonly toDate: string | undefined;
   readonly sessions: number;
@@ -133,6 +163,7 @@ export function runTimeMachine(
 
   return {
     underlying: dataset.underlying,
+    dataQuality: dataQuality(dataset),
     fromDate: replay.dates[0],
     toDate: replay.dates[replay.dates.length - 1],
     sessions: replay.dates.length,
@@ -176,6 +207,7 @@ export function formatReport(report: TimeMachineReport): string {
     `Cost model: half-spread ${report.costModel.halfSpreadPct}%, stop slippage ${report.costModel.stopSlippagePct}%, charges per roundTripChargesInr`,
     `Signals ${report.signals}, drops ${Object.entries(report.drops).map(([code, n]) => `${code} ${n}`).join(', ') || 'none'}`,
     `Data-gap trades excluded ${report.dataGapTrades}; ambiguous bars ${report.ambiguousBarTrades}; gap-through stops ${report.gapThroughStopTrades}`,
+    `Data quality: ${report.dataQuality.spotBarsMissing} spot bars missing across ${report.dataQuality.sessionsWithSpotGaps} sessions; ${report.dataQuality.weekdaysWithoutSession} weekdays without a session (holidays included)`,
     '',
     'Historical replay (one path: what these rules did on these days)',
     ...summaryLines('All days', report.overall),

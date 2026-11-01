@@ -19,6 +19,7 @@
  * Split a fetch at every lot-size change: one dataset carries one lot size per range.
  */
 import 'dotenv/config';
+import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
@@ -232,7 +233,8 @@ async function runReplay(): Promise<void> {
   const dataPath = required('--data');
   const configPath = argument('--config');
   const config = offlineConfig(configPath);
-  const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
+  const dataText = await readFile(dataPath, 'utf8');
+  const dataset = parseDataset(JSON.parse(dataText));
   const { replay, divergences } = replayConfigFrom(config);
   const costs = costsArgument(config);
   const report = runTimeMachine(dataset, replay, costs, divergences, {
@@ -254,6 +256,9 @@ async function runReplay(): Promise<void> {
   const run = {
     ts: new Date().toISOString(),
     data: dataPath,
+    // The path alone does not identify the data: a re-fetch overwrites the file.
+    dataSha256: createHash('sha256').update(dataText).digest('hex'),
+    dataQuality: report.dataQuality,
     config: configPath ?? null,
     configFingerprint: configFingerprint(config),
     costs,
