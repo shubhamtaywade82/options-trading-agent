@@ -50,6 +50,7 @@ export interface OrchestratorServices {
 export type StopKind = 'graceful' | 'immediate';
 
 const DEFAULT_CLOCK_INTERVAL_MS = 1_000;
+const BROKER_KILL_RETRY_MS = 30_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 60_000;
 const IMMEDIATE_DRAIN_MS = 2_000;
 
@@ -77,6 +78,9 @@ export class Orchestrator {
   /** Why the broker kill switch is wanted. Kept for the day: a late fill can reopen a position after an attempt. */
   private brokerKillReason: string | undefined;
   private brokerKillSent = false;
+  /** A failed activation is retried no sooner than this, so a broker that keeps refusing is not hammered. */
+  private brokerKillRetryAt = 0;
+  private brokerKillFailing = false;
   private started = false;
   private stopRequested = false;
   private starting: Promise<void> | undefined;
@@ -596,7 +600,7 @@ export class Orchestrator {
       this.brokerKillSent = false;
       return;
     }
-    if (this.brokerKillSent) {
+    if (this.brokerKillSent || this.now() < this.brokerKillRetryAt) {
       return;
     }
     this.brokerKillSent = true;
@@ -608,9 +612,20 @@ export class Orchestrator {
     if (!this.config.ops.brokerKillSwitchOnBreach || engage === undefined) {
       return;
     }
-    void engage.call(this.services.execution, reason).catch((error: unknown) => {
-      this.services.logger.error('broker kill switch call failed', { reason, error: String(error) });
-    });
+    engage.call(this.services.execution, reason).then(
+      () => {
+        this.brokerKillFailing = false;
+      },
+      (error: unknown) => {
+        this.services.logger.error('broker kill switch not confirmed; will retry', { reason, error: String(error) });
+        this.brokerKillSent = false;
+        this.brokerKillRetryAt = this.now() + BROKER_KILL_RETRY_MS;
+        if (!this.brokerKillFailing) {
+          this.brokerKillFailing = true;
+          this.durableEvent('broker_kill_switch_failed', { reason, error: String(error) });
+        }
+      },
+    );
   }
 
   /**

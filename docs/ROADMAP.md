@@ -22,7 +22,7 @@ search. An AI research layer on top of a strategy set with no edge only searches
 | --- | --- | --- |
 | Bracket-leg cancel treated as confirmed on request accept | Fixed in code (OTA-101) | `awaitLegsTerminal` polls the super order book for a terminal leg status; `legDetails` shape still unverified against sandbox |
 | Unconfirmed entry dropped after 10 min | Fixed in code (OTA-102) | Dropped only when the super order book shows it settled or absent; restart already refuses to start with a live broker order or unadoptable position |
-| Broker kill switch: no retry or confirmation | **Partly open** | Orchestrator waits until the book is flat (`maybeEngageBrokerKillSwitch`), but a failed `setKillSwitch` is logged once, `brokerKillSent` stays true, nothing re-reads the switch, no alert |
+| Broker kill switch: no retry or confirmation | Fixed in code (OTA-103) | Activation reads the switch back; a failure retries every 30 s and journals `broker_kill_switch_failed` (an alert) once per failure streak |
 | Feed freshness from receipt time only | **Open** | `src/dhan/feed.ts` stamps `receivedAt`; `ltt` is only checked for being in the future |
 | 25/60-min bars accepted with a 15-min ORB | **Open** | `src/config.ts` validates `BAR_MINUTES` and `ORB_MINUTES` separately |
 | Late fill while HALTED left unmanaged | Fixed | `canExit` allows `HALTED && !exitSent` (`underlyingAgent.ts:1131`) |

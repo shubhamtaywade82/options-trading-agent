@@ -4,6 +4,7 @@ import type { Logger } from './logger.js';
 export const ALERT_EVENT_TYPES: ReadonlySet<string> = new Set([
   'daily_loss_breach',
   'book_kill_switch',
+  'broker_kill_switch_failed',
   'halted',
   'entry_rejected',
   'exit_rejected',

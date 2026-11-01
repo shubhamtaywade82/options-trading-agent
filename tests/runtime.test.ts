@@ -681,6 +681,53 @@ describe('runtime: halts', () => {
     assert.ok(harness.orchestrator.dayBook.snapshot().killSwitchReason);
   });
 
+  it('should retry a failed broker kill switch after a backoff and alert once', async () => {
+    const attempts: string[] = [];
+    let listener: ((event: ExecutionEvent) => void) | undefined;
+    const execution: ExecutionPort = {
+      mode: 'live',
+      submitEntry: async (order) => {
+        listener?.({ kind: 'ENTRY_UNCONFIRMED', correlationId: order.correlationId, underlying: 'NIFTY', reason: 'timeout' });
+      },
+      submitExit: async () => undefined,
+      onOptionTick: () => undefined,
+      onEvent: (fn) => {
+        listener = fn;
+        return () => undefined;
+      },
+      engageBrokerKillSwitch: async (reason) => {
+        attempts.push(reason);
+        if (attempts.length < 3) {
+          throw new Error('kill switch status read back DEACTIVATE');
+        }
+      },
+      close: async () => undefined,
+    };
+    const harness = build({ BROKER_KILL_SWITCH_ON_BREACH: 'true' }, { execution });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    await settle(harness.orchestrator);
+    assert.equal(attempts.length, 1);
+
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    assert.equal(attempts.length, 1, 'no retry inside the backoff');
+
+    harness.setClock('09:46:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    harness.setClock('09:47:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    assert.equal(attempts.length, 3);
+
+    harness.setClock('09:48:00');
+    clockTick(harness.orchestrator);
+    await settle(harness.orchestrator);
+    assert.equal(attempts.length, 3, 'stops once the switch is confirmed');
+    assert.equal(types(harness).filter((type) => type === 'broker_kill_switch_failed').length, 1, 'alerted once per failure streak');
+  });
+
   it('should still flatten a position filled late while halted, and engage the broker kill switch only after', async () => {
     const venue = scriptedVenue({ exit: 'FILL' });
     const harness = build({ BROKER_KILL_SWITCH_ON_BREACH: 'true' }, { execution: venue.port });

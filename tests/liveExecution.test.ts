@@ -17,6 +17,7 @@ interface FakeOptions {
   positionsError?: unknown;
   /** Replaces the default super order book, in which a leg reads CANCELLED once its cancel was accepted. */
   superOrderBook?: () => unknown[];
+  killSwitchReadBack?: string;
 }
 
 function fakeBroker(options: FakeOptions = {}) {
@@ -92,6 +93,7 @@ function fakeBroker(options: FakeOptions = {}) {
         calls.kill.push(status);
         return {};
       },
+      getKillSwitchStatus: async () => ({ killSwitchStatus: options.killSwitchReadBack ?? calls.kill.at(-1) }),
     },
   };
   const emitOrder = (state: Record<string, unknown>) => {
@@ -424,6 +426,23 @@ describe('LiveExecutionPort exits', () => {
     assert.equal(events.at(-1)?.kind, 'ENTRY_FILLED');
     await live.close();
     await second.live.close();
+  });
+});
+
+describe('LiveExecutionPort broker kill switch', () => {
+  it('should resolve once the broker reads the switch back as activated', async () => {
+    const broker = fakeBroker();
+    const { live } = port(broker);
+    await live.engageBrokerKillSwitch('test');
+    assert.deepEqual(broker.calls.kill, ['ACTIVATE']);
+    await live.close();
+  });
+
+  it('should reject when the broker reads the switch back as not activated', async () => {
+    const broker = fakeBroker({ killSwitchReadBack: 'DEACTIVATE' });
+    const { live } = port(broker);
+    await assert.rejects(live.engageBrokerKillSwitch('test'), /DEACTIVATE/);
+    await live.close();
   });
 });
 

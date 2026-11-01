@@ -391,17 +391,17 @@ export class LiveExecutionPort implements ExecutionPort {
     }
   }
 
-  /** Disengages all trading for the day at the broker. Used on a hard daily-loss breach or an unconfirmed write. */
+  /**
+   * Disengages all trading for the day at the broker, and reads the switch back. Rejects unless the broker
+   * reports it active, so the caller can retry: a request Dhan accepted is not proof the switch is on.
+   */
   async engageBrokerKillSwitch(reason: string): Promise<void> {
-    try {
-      await this.client.traderControls.setKillSwitch('ACTIVATE');
-      this.options.logger.warn('broker kill switch activated', { reason });
-    } catch (error) {
-      this.options.logger.error('broker kill switch activation failed; act manually', {
-        reason,
-        error: describeError(error),
-      });
+    await this.client.traderControls.setKillSwitch('ACTIVATE');
+    const status = (await this.client.traderControls.getKillSwitchStatus()).killSwitchStatus;
+    if (status !== 'ACTIVATE') {
+      throw new Error(`kill switch status read back ${status ?? 'missing'} after ACTIVATE`);
     }
+    this.options.logger.warn('broker kill switch activated', { reason });
   }
 
   async close(): Promise<void> {
