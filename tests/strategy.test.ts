@@ -2,7 +2,9 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Candle } from '../src/domain/types.js';
 import { evaluateOrbSupertrend, type OrbSupertrendParams } from '../src/strategy/orbSupertrend.js';
+import { superTrend } from '../src/market/indicators.js';
 import { StrategySession } from '../src/strategy/session.js';
+import { previousDayBreak } from '../src/strategy/levelBreak.js';
 import { bar, istEpoch, SESSION_DAY } from './support/fixtures.js';
 
 const PREVIOUS_DAY = '2026-10-09';
@@ -160,6 +162,7 @@ describe('StrategySession', () => {
       { id: 'ema_cross', on: false },
       { id: 'momentum', on: false },
       { id: 'continuation', on: false },
+      { id: 'prev_day', on: false },
     ]);
 
     const fallingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 120 - (i * 20) / 59));
@@ -227,3 +230,45 @@ describe('StrategySession', () => {
 });
 
 
+
+describe('previous-day break', () => {
+  // Previous day ranges 90 to 100.5 (closes 90→100, ±0.5). Today opens inside it.
+  const rising = risingWarmup();
+
+  it('fires BULLISH on the bar that closes through the previous day high', () => {
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.2, 101]);
+    const signal = previousDayBreak([...rising, ...today], PARAMS, true);
+    assert.equal(signal?.direction, 'BULLISH');
+    assert.match(signal?.reasons[0] ?? '', /high 100.5/);
+  });
+
+  it('does not re-fire on a bar already beyond the level', () => {
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 101, 101.2]);
+    assert.equal(previousDayBreak([...rising, ...today], PARAMS, true), undefined);
+  });
+
+  it('fires BEARISH through the previous day low and needs a prior session', () => {
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [91, 91, 91, 90.2, 89]);
+    assert.equal(previousDayBreak([...rising, ...today], PARAMS, true)?.direction, 'BEARISH');
+    assert.equal(previousDayBreak(today, PARAMS, true), undefined);
+  });
+
+  it('outside scout, refuses a break against the SuperTrend', () => {
+    // Day 1 establishes a downtrend 110 → 95
+    const day1 = dayBars('2026-10-08', 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 110 - (i * 15) / 59));
+    // Day 2 (previous day) consolidates at 96 (high 96.5, SuperTrend upper line ~99)
+    const day2 = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, () => 96));
+    // Today breaks Day 2's high (96.5) at 97.2, while SuperTrend is still DOWN (~99)
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [96, 96, 96, 96.4, 97.2]);
+    const bars = [...day1, ...day2, ...today];
+
+    assert.equal(previousDayBreak(bars, PARAMS, true)?.direction, 'BULLISH', 'fires in scout');
+    assert.equal(previousDayBreak(bars, PARAMS, false), undefined, 'refuses outside scout while SuperTrend is DOWN');
+  });
+
+  it('is off by default, and fires when named', () => {
+    assert.equal(new StrategySession('scout').view().strategies.find((row) => row.id === 'prev_day')?.on, false);
+    const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.2, 101]);
+    assert.equal(new StrategySession('scout', ['prev_day']).evaluate([...rising, ...today], PARAMS)?.strategy, 'prev_day');
+  });
+});

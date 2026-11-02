@@ -1,6 +1,7 @@
 import type { Candle, Direction, Signal } from '../domain/types.js';
 import { ema, superTrend, adaptiveSuperTrend } from '../market/indicators.js';
 import { istParts } from '../time/ist.js';
+import { previousDayBreak } from './levelBreak.js';
 import { evaluateOrbSupertrend, openingRangeCross, openingRangeWindow, sessionRange, type OrbSupertrendParams } from './orbSupertrend.js';
 
 export const POSTURES = ['scout', 'aligned', 'confirmed'] as const;
@@ -18,6 +19,8 @@ export const STRATEGY_CATALOG = [
   { id: 'ema_cross', label: 'EMA cross' },
   { id: 'momentum', label: 'Momentum break' },
   { id: 'continuation', label: 'Trend continuation' },
+  // Research: off unless named, so an untested family never trades because a config listed no strategies.
+  { id: 'prev_day', label: 'Previous-day break', research: true },
 ] as const;
 
 export type StrategyId = (typeof STRATEGY_CATALOG)[number]['id'];
@@ -46,7 +49,7 @@ export class StrategySession {
     this.enabled = new Set<StrategyId>(
       initialStrategies !== undefined && initialStrategies.length > 0
         ? initialStrategies
-        : STRATEGY_CATALOG.map((row) => row.id),
+        : STRATEGY_CATALOG.filter((row) => !('research' in row)).map((row) => row.id),
     );
   }
 
@@ -98,6 +101,7 @@ export class StrategySession {
       case 'ema_cross': return emaCrossSignal(bars, params, this.posture);
       case 'momentum': return momentumSignal(bars, params, this.posture);
       case 'continuation': return continuationSignal(bars, params, this.posture);
+      case 'prev_day': return previousDayBreak(bars, params, this.posture === 'scout');
     }
   }
 
