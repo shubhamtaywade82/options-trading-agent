@@ -137,6 +137,33 @@ export function groupByDay(dates: readonly string[], trades: readonly TradeSampl
 }
 
 /** Politis–White style default: block length grows as n^(1/3). */
+/**
+ * Blocks for the holdout bootstrap are at least this many sessions, so dependence within a trading week survives the
+ * resample. The cube-root rule alone gives 3 sessions on a 30-session holdout, which is too short.
+ */
+export const MIN_HOLDOUT_BLOCK_DAYS = 5;
+
+export function holdoutBlockLength(days: number): number {
+  return Math.max(MIN_HOLDOUT_BLOCK_DAYS, defaultBlockLength(days));
+}
+
+/**
+ * Mean net R of the holdout with its single most profitable session removed. A result that needs one session to stay
+ * positive is not robust. Undefined when nothing is left to average.
+ */
+export function meanWithoutBestSession(days: readonly DayOutcome[]): number | undefined {
+  if (days.length === 0) {
+    return undefined;
+  }
+  const totals = days.map((day) => ({ day, total: day.trades.reduce((sum, trade) => sum + trade.r, 0) }));
+  const best = totals.reduce((top, next) => (next.total > top.total ? next : top));
+  const rest = days.filter((day) => day !== best.day).flatMap((day) => day.trades);
+  if (rest.length === 0) {
+    return undefined;
+  }
+  return rest.reduce((sum, trade) => sum + trade.r, 0) / rest.length;
+}
+
 export function defaultBlockLength(days: number): number {
   return Math.max(1, Math.round(Math.cbrt(days)));
 }

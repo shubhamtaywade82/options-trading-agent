@@ -38,7 +38,7 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
   maxDataGapRate: 0.05,
   minTrades: MIN_TRADES_TO_JUDGE,
   minOutOfSampleTrades: 30,
-  minHoldoutDays: 20,
+  minHoldoutDays: 30,
 };
 
 /**
@@ -49,6 +49,8 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
  * because a whole-sample interval lets the discovery days carry the verdict (docs/research/PREREG.md).
  * None of these authorises live trading; the live risk gate is unchanged by any result.
  */
+import { holdoutBlockLength, meanWithoutBestSession } from './stats.js';
+
 export type TimeMachineVerdict = 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE' | 'EDGE_SUPPORTED';
 
 export interface DataQuality {
@@ -151,7 +153,7 @@ export function runTimeMachine(
   const outOfSample = summarize(flatten(split.outOfSample), split.outOfSample.length);
   // The interval is judged on the holdout only. Judging it on the whole sample let the discovery days carry the verdict.
   const holdoutDays = split.outOfSample;
-  const bootstrap = holdoutDays.length > 0 && outOfSample.trades > 0 ? bootstrapMeanR(holdoutDays, { iterations: options.iterations, seed: options.seed }) : undefined;
+  const bootstrap = holdoutDays.length > 0 && outOfSample.trades > 0 ? bootstrapMeanR(holdoutDays, { iterations: options.iterations, seed: options.seed, blockLength: holdoutBlockLength(holdoutDays.length) }) : undefined;
   const paths =
     days.length > 0 && samples.length > 0
       ? simulatePaths(days, { paths: options.iterations, seed: options.seed, horizonDays: options.horizonDays, drawdownAlarmInr: options.drawdownAlarmInr })
@@ -189,6 +191,11 @@ export function runTimeMachine(
     }
     if (outOfSample.meanR <= 0) {
       reasons.push(`out-of-sample mean net R is ${outOfSample.meanR}: the later days do not hold up`);
+    }
+    // One session must not carry the result: without its single best day, the holdout mean must still be positive.
+    const withoutBest = meanWithoutBestSession(holdoutDays);
+    if (withoutBest === undefined || withoutBest <= 0) {
+      reasons.push(`removing the single best holdout session leaves mean net R ${withoutBest ?? 'n/a'}: one session carries the result`);
     }
     verdict = reasons.length > 0 ? 'NO_TRADE' : 'EDGE_SUPPORTED';
     if (verdict === 'EDGE_SUPPORTED') {

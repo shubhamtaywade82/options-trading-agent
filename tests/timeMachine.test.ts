@@ -21,6 +21,7 @@ import {
   wilsonInterval,
   type TradeSample,
 } from '../src/research/stats.js';
+import { holdoutBlockLength, meanWithoutBestSession } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
 import { weeklyExpiryDates } from '../src/time/calendar.js';
@@ -356,6 +357,18 @@ describe('statistics', () => {
     assert.equal(summary.meanR, 0);
   });
 
+  it('measures the holdout mean without its best session, so one lucky day cannot carry the result (OTA-308)', () => {
+    const dates = ['2026-12-01', '2026-12-02', '2026-12-03'];
+    const days = groupByDay(dates, [sample(dates[0] as string, 5), sample(dates[1] as string, -1), sample(dates[2] as string, -1)]);
+    assert.equal(meanWithoutBestSession(days), -1, 'removing the +5 day leaves two losing days');
+    assert.equal(meanWithoutBestSession([]), undefined);
+  });
+
+  it('blocks the holdout bootstrap in at least five sessions, so dependence within a trading week survives', () => {
+    assert.equal(holdoutBlockLength(30), 5, 'the cube-root rule alone would give 3');
+    assert.equal(holdoutBlockLength(1000), 10);
+  });
+
   it('bootstraps whole days, deterministically, including days with no trade', () => {
     const dates = Array.from({ length: 40 }, (_, i) => shiftDateKey(DAY, i));
     const winners = groupByDay(dates, dates.map((date) => sample(date, 1)));
@@ -410,7 +423,7 @@ describe('weekly expiry calendar', () => {
 });
 
 describe('context cells', () => {
-  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0, minHoldoutDays: 20 };
+  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0, minHoldoutDays: 30 };
 
   it('tags each replayed trade with the context at its signal', () => {
     const result = replayDataset(dataset([session(DAY, { '10:00': [10, 16.5, 10, 16] })]), CONFIG, NO_COSTS);

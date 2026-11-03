@@ -1,7 +1,7 @@
 import type { Candle } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
 import type { ReplayResult, ReplayTrade } from './replay.js';
-import { bootstrapMeanR, chronologicalSplit, groupByDay, summarize, type Interval, type TradeSample } from './stats.js';
+import { bootstrapMeanR, chronologicalSplit, groupByDay, holdoutBlockLength, meanWithoutBestSession, summarize, type Interval, type TradeSample } from './stats.js';
 
 /** Extra per-day tags joined by date, such as the VIX tercile. */
 export type DayTags = ReadonlyMap<string, Readonly<Record<string, string>>>;
@@ -93,12 +93,15 @@ function judgeCell(key: string, trades: readonly ReplayTrade[], dates: readonly 
   const holdoutTrades = holdout.flatMap((day) => day.trades);
   const outOfSampleMeanR = summarize(holdoutTrades, 0).meanR;
   const bootstrap =
-    holdout.length > 0 && holdoutTrades.length > 0 ? bootstrapMeanR(holdout, { iterations: options.iterations, seed: options.seed }) : undefined;
+    holdout.length > 0 && holdoutTrades.length > 0
+      ? bootstrapMeanR(holdout, { iterations: options.iterations, seed: options.seed, blockLength: holdoutBlockLength(holdout.length) })
+      : undefined;
   let verdict: Cell['verdict'] = 'NO_TRADE';
   if (holdoutTrades.length < options.minTrades || holdout.length < options.minHoldoutDays || bootstrap === undefined) {
     verdict = 'INSUFFICIENT_EVIDENCE';
   } else if (bootstrap.probMeanRNonPositive < threshold && outOfSampleMeanR > 0) {
-    verdict = 'EDGE_SUPPORTED';
+    // Robust only if the holdout mean stays positive without its single best session (OTA-308 eligibility).
+    verdict = (meanWithoutBestSession(holdout) ?? 0) > 0 ? 'EDGE_SUPPORTED' : 'NO_TRADE';
   }
   return {
     key,
