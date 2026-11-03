@@ -47,7 +47,7 @@ The three modes are `live`, `sandbox` and `paper` (`src/domain/mode.ts`). Market
 | paper, `PAPER_BACKEND=postgres` | PostgreSQL paper venue | `paper:<clientId>` | PostgreSQL (Redis optional) |
 | paper, `PAPER_BACKEND=exchange` | paper_exchange server (`PAPER_EXCHANGE_*`) | `paper:<clientId>` | PostgreSQL (Redis optional) |
 
-Sandbox uses one SDK client in `hybrid` mode (`@nemesis-oss/dhanhq-sdk` v1.3.0). Market data, option chain, charts and the market feed go to production on the production credentials. Orders, positions, funds and controls go to `sandbox.dhan.co` on the sandbox credentials. The SDK refuses a trading call the sandbox does not serve, and never falls back to production.
+Sandbox uses one SDK client in `hybrid` mode (`@nemesis-oss/dhanhq-sdk` v2.0.1). Market data, option chain, charts and the market feed go to production on the production credentials. Orders, positions, funds and controls go to `sandbox.dhan.co` on the sandbox credentials. The SDK refuses a trading call the sandbox does not serve, and never falls back to production.
 
 Each mode has its own lease and its own review queue, so a paper run never blocks a live run for the same client. Journal and ledger rows are tagged with the mode, so restore never replays one mode's events into another.
 

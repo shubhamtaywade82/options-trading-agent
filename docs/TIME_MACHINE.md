@@ -69,7 +69,7 @@ decimal places.
 
 ## Fidelity to the live agent
 
-Live code that the replay calls unchanged: `StrategySession.evaluate` (all five strategies and postures),
+Live code that the replay calls unchanged: `StrategySession.evaluate` (the five active strategies and postures; `prev_day` is research-only and off unless named),
 `contextVerdict`/`marketContext`, `structureTurnedAgainst`, `nearestAtmStrike`/`targetEntryStrike`,
 `bracketLevels`, `calculateTrailingStop`, `sizePosition`, `evaluatePreTrade` and `roundTripChargesInr`.
 
@@ -125,7 +125,8 @@ above) can be counted.
 
 ## Data source: Dhan `/charts/rollingoption`
 
-`client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 1.3.0 posts to `/charts/rollingoption`.
+`client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 2.0.1 posts to `/charts/rollingoption`. The response
+layout below was written against the 1.3.0-era SDK. It is re-verified on 2.0.1 by OTA-314, and no recording exists yet.
 Facts verified from the SDK source:
 
 - Strikes are **relative to ATM at each bar** (`ATM`, `ATM+1`, `ATM-2`, …). The request takes the underlying's

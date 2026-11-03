@@ -170,7 +170,7 @@ export function superTrend(
 }
 
 /**
- * Adaptive ML-based SuperTrend: scales the multiplier dynamically using the Kaufman Efficiency Ratio.
+ * Adaptive SuperTrend: scales the multiplier with the Kaufman Efficiency Ratio. Deterministic, with no learned model.
  * Tightens bands (down to 0.75x) in clean trending moves for earlier flip entries;
  * widens bands (up to 1.5x) in choppy consolidation to filter out whipsaws.
  */
