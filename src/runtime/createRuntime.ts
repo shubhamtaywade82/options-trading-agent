@@ -9,7 +9,7 @@ import { PaperExchangeGateway } from '../paper/exchangeGateway.js';
 import { DhanFeed } from '../dhan/feed.js';
 import { InstrumentMaster } from '../dhan/instrumentMaster.js';
 import { DhanMarketData } from '../dhan/marketData.js';
-import { LiveExecutionPort, type LiveClient } from '../dhan/liveExecution.js';
+import { LiveExecutionPort, TERMINAL_ORDER_STATUSES, type LiveClient } from '../dhan/liveExecution.js';
 import type { AgentConfig } from '../config.js';
 import type { ExecutionPort } from '../execution/ports.js';
 import { PostgresPaperExecutionPort } from '../execution/postgresPaper.js';
@@ -416,9 +416,6 @@ async function readJournal(directory: string, dayKey: string, scope: { readonly 
   }
   return scopeJournalLines(text, scope, dayKey);
 }
-
-/** Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live. */
-const TERMINAL_ORDER_STATUSES: ReadonlySet<string> = new Set(['TRADED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'CLOSED']);
 
 async function countLiveOrders(client: Pick<LiveClient, 'orders' | 'superOrders'>): Promise<number> {
   const [orders, superOrders] = await Promise.all([client.orders.list(), client.superOrders.list()]);

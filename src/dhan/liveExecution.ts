@@ -106,7 +106,11 @@ const LEG_CANCEL_BACKOFF_MS = 250;
 /** An accepted cancel is not a cancelled leg. The super order book is polled this many times for a terminal status. */
 const LEG_STATUS_POLLS = 8;
 const LEG_STATUS_POLL_MS = 250;
-const TERMINAL_ORDER_STATUSES = new Set(['CANCELLED', 'TRADED', 'REJECTED', 'EXPIRED', 'CLOSED']);
+/**
+ * Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live.
+ * Shared with the restart guard in createRuntime, so the adapter and the guard cannot disagree about what is live.
+ */
+export const TERMINAL_ORDER_STATUSES: ReadonlySet<string> = new Set(['CANCELLED', 'TRADED', 'REJECTED', 'EXPIRED', 'CLOSED']);
 
 type SuperOrderRow = Awaited<ReturnType<DhanClient['superOrders']['list']>>[number];
 
