@@ -21,10 +21,10 @@ import {
   wilsonInterval,
   type TradeSample,
 } from '../src/research/stats.js';
-import { holdoutBlockLength, meanWithoutBestSession } from '../src/research/stats.js';
+import { bestSessionShare, holdoutBlockLength, meanWithoutBestSession } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
-import { weeklyExpiryDates } from '../src/time/calendar.js';
+import { nominalWeeklyExpiry } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
 
@@ -374,6 +374,16 @@ describe('statistics', () => {
     assert.equal(meanWithoutBestSession([]), undefined);
   });
 
+  it('caps the share of profit any one holdout session can supply (OTA-308 eligibility)', () => {
+    const dates = ['2026-12-01', '2026-12-02', '2026-12-03', '2026-12-04'];
+    const lumpy = groupByDay(dates, [sample(dates[0] as string, 6), sample(dates[1] as string, 1), sample(dates[2] as string, 1), sample(dates[3] as string, -2)]);
+    assert.ok((bestSessionShare(lumpy) ?? 0) > 0.6, 'one session supplies 6 of 8 units of profit');
+    const even = groupByDay(dates, [sample(dates[0] as string, 1), sample(dates[1] as string, 1), sample(dates[2] as string, 1), sample(dates[3] as string, 1)]);
+    assert.equal(bestSessionShare(even), 0.25);
+    const losing = groupByDay(dates, [sample(dates[0] as string, -1), sample(dates[1] as string, -2), sample(dates[2] as string, -1), sample(dates[3] as string, -1)]);
+    assert.equal(bestSessionShare(losing), undefined, 'no profit, no share');
+  });
+
   it('blocks the holdout bootstrap in at least five sessions, so dependence within a trading week survives', () => {
     assert.equal(holdoutBlockLength(30), 5, 'the cube-root rule alone would give 3');
     assert.equal(holdoutBlockLength(1000), 10);
@@ -415,20 +425,21 @@ describe('statistics', () => {
   });
 });
 
-describe('weekly expiry calendar', () => {
-  it('marks the expiry weekday, and the last session before it when that day is a holiday', () => {
-    // Mon 12 Oct to Fri 23 Oct 2026; Tue 20 Oct is missing (a holiday), so Mon 19 Oct is that week's expiry.
-    const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-19', '2026-10-21', '2026-10-22'];
-    assert.deepEqual([...(weeklyExpiryDates('NIFTY', dates) ?? [])], ['2026-10-13', '2026-10-19']);
-    assert.deepEqual([...(weeklyExpiryDates('SENSEX', dates) ?? [])], ['2026-10-22']);
+describe('weekly expiry calendar (look-ahead free)', () => {
+  it('gives each session the next expiry weekday on or after its date, from its own date alone', () => {
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-12'), '2026-10-13', 'a Monday trades against that Tuesday');
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-13'), '2026-10-13', 'the expiry day is its own expiry');
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-14'), '2026-10-20', 'a Wednesday trades against the next Tuesday');
+    assert.equal(nominalWeeklyExpiry('SENSEX', '2026-10-23'), '2026-10-29', 'SENSEX expires on Thursday, so a Friday waits a week');
   });
 
-  it('does not guess a holiday shift in a trailing week that ends before the expiry weekday', () => {
-    assert.deepEqual([...(weeklyExpiryDates('NIFTY', ['2026-10-12']) ?? [])], []);
+  it('does not look ahead: a holiday on the expiry weekday does not move an earlier session', () => {
+    // Tue 20 Oct is a holiday. Monday 19 Oct cannot know that from its own date, so its expiry is the nominal Tuesday.
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-19'), '2026-10-20');
   });
 
   it('has no rule for an index whose expiry convention is unverified', () => {
-    assert.equal(weeklyExpiryDates('BANKNIFTY', ['2026-10-13']), undefined);
+    assert.equal(nominalWeeklyExpiry('BANKNIFTY', '2026-10-13'), undefined);
   });
 });
 

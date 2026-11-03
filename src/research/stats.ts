@@ -148,6 +148,22 @@ export function holdoutBlockLength(days: number): number {
 }
 
 /**
+ * The largest share of all positive net R that one session supplies. A holdout whose profits sit in one session is not
+ * robust, even when its mean survives removing that session. Undefined when no session made money.
+ */
+export const MAX_BEST_SESSION_SHARE = 0.25;
+
+export function bestSessionShare(days: readonly DayOutcome[]): number | undefined {
+  const totals = days.map((day) => day.trades.reduce((sum, trade) => sum + trade.r, 0));
+  const positive = totals.filter((total) => total > 0);
+  const positiveSum = positive.reduce((sum, total) => sum + total, 0);
+  if (positiveSum <= 0) {
+    return undefined;
+  }
+  return Math.max(...positive) / positiveSum;
+}
+
+/**
  * Mean net R of the holdout with its single most profitable session removed. A result that needs one session to stay
  * positive is not robust. Undefined when nothing is left to average.
  */

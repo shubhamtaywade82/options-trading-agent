@@ -1,7 +1,7 @@
 import { MIN_TRADES_TO_JUDGE } from '../ops/performanceReport.js';
 import { NSE_SESSION_CLOSE_MINUTE, NSE_SESSION_OPEN_MINUTE, shiftDateKey } from '../time/ist.js';
 import type { ResearchDataset } from './dataset.js';
-import { derivedExpiryDates, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from './replay.js';
+import { rollingWeeklyExpiry, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from './replay.js';
 import {
   bootstrapMeanR,
   chronologicalSplit,
@@ -49,7 +49,7 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
  * because a whole-sample interval lets the discovery days carry the verdict (docs/research/PREREG.md).
  * None of these authorises live trading; the live risk gate is unchanged by any result.
  */
-import { holdoutBlockLength, meanWithoutBestSession } from './stats.js';
+import { bestSessionShare, holdoutBlockLength, MAX_BEST_SESSION_SHARE, meanWithoutBestSession } from './stats.js';
 
 export type TimeMachineVerdict = 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE' | 'EDGE_SUPPORTED';
 
@@ -178,7 +178,7 @@ export function runTimeMachine(
   if (priced.length > 0 && ambiguousBarTrades / priced.length > 0.2) {
     warnings.push(`${ambiguousBarTrades} of ${priced.length} trades had a bar touching both stop and target, all counted as stops: 5-minute bars are too coarse for this bracket`);
   }
-  if (dataset.sessions.some((session) => session.expiry === undefined) && derivedExpiryDates(dataset) === undefined) {
+  if (dataset.sessions.some((session) => session.expiry === undefined) && rollingWeeklyExpiry(dataset) === undefined) {
     warnings.push('sessions without an expiry date skip the expiry-day entry cutoff');
   }
 
@@ -196,6 +196,11 @@ export function runTimeMachine(
     const withoutBest = meanWithoutBestSession(holdoutDays);
     if (withoutBest === undefined || withoutBest <= 0) {
       reasons.push(`removing the single best holdout session leaves mean net R ${withoutBest ?? 'n/a'}: one session carries the result`);
+    }
+    // And no one session may supply more than a quarter of the holdout's profit.
+    const share = bestSessionShare(holdoutDays);
+    if (share === undefined || share > MAX_BEST_SESSION_SHARE) {
+      reasons.push(`the best holdout session supplies ${share === undefined ? 'no profit' : `${(share * 100).toFixed(1)}%`} of positive net R, above the ${MAX_BEST_SESSION_SHARE * 100}% limit`);
     }
     verdict = reasons.length > 0 ? 'NO_TRADE' : 'EDGE_SUPPORTED';
     if (verdict === 'EDGE_SUPPORTED') {

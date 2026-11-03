@@ -8,7 +8,7 @@ import { evaluatePreTrade } from '../risk/riskEngine.js';
 import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
-import { weeklyExpiryDates } from '../time/calendar.js';
+import { nominalWeeklyExpiry } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
 import {
@@ -239,12 +239,16 @@ interface DayState {
  * Expiry days for a rolling-option dataset, which records no expiry. Only the nearest weekly contract
  * (expiry code 1) expires on the calendar's expiry day; other codes and monthly series get none.
  */
-export function derivedExpiryDates(dataset: ResearchDataset): Set<string> | undefined {
+/**
+ * The expiry each session trades against, for a rolling dataset of the current weekly contract. Look-ahead free: it depends
+ * on the session's own date only. Undefined where no rule is verified, or for a monthly or next-week contract.
+ */
+export function rollingWeeklyExpiry(dataset: ResearchDataset): ((date: string) => string | undefined) | undefined {
   const { kind, expiryFlag, expiryCode } = dataset.source;
   if (kind !== 'dhan_rollingoption' || expiryFlag === 'MONTH' || (expiryCode ?? 1) !== 1) {
     return undefined;
   }
-  return weeklyExpiryDates(dataset.underlying, dataset.sessions.map((session) => session.date));
+  return (date) => nominalWeeklyExpiry(dataset.underlying, date);
 }
 
 /**
@@ -277,10 +281,11 @@ export function replayDataset(
     drops[code] = (drops[code] ?? 0) + 1;
   };
 
-  const expiryDates = derivedExpiryDates(dataset);
+  const expiryOf = rollingWeeklyExpiry(dataset);
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
-    const dated = session.expiry === undefined && expiryDates?.has(session.date) ? { ...session, expiry: session.date } : session;
+    const expiry = session.expiry ?? expiryOf?.(session.date);
+    const dated = expiry === undefined ? session : { ...session, expiry };
     const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, observer);
     signals += outcome.signals;
     trades.push(...outcome.trades);
