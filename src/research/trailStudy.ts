@@ -3,7 +3,8 @@ import { OPEN_TRAIL, onBarClosed, onTouch, type TrailPosition, type TrailSpec, t
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr } from '../options/pricing.js';
 import { marketStructure, structureTurnedAgainst } from '../strategy/marketContext.js';
 import { istParts } from '../time/ist.js';
-import { legBars, type ResearchDataset, type ResearchSession } from './dataset.js';
+import { legBars, type ResearchSession } from './dataset.js';
+import type { FineBars } from './studyEntries.js';
 import type { CostModel, ReplayConfig, ReplayExitReason, ReplayTrade } from './replay.js';
 
 /**
@@ -96,21 +97,70 @@ export function opportunityInr(entry: StudyEntry, config: ReplayConfig, costs: C
   return Number(((best - trade.entryPrice) * trade.quantity).toFixed(2));
 }
 
-/** Replays one frozen entry under one exit policy. */
-export function exitPath(entry: StudyEntry, policy: ExitPolicy, options: StudyOptions, config: ReplayConfig, costs: CostModel): StudyTrade {
+interface Exit {
+  readonly time: number;
+  readonly price: number;
+  readonly reason: StudyExitReason;
+}
+
+interface PathContext {
+  readonly entry: StudyEntry;
+  readonly policy: ExitPolicy;
+  readonly config: ReplayConfig;
+  readonly target: number;
+  readonly position: TrailPosition;
+  readonly bid: (price: number) => number;
+  readonly stopFill: (price: number) => number;
+}
+
+function stopReason(ctx: PathContext, open: Open): StudyExitReason {
+  return open.stop > ctx.entry.trade.initialStopPrice && ctx.policy.kind === 'TRAIL' ? 'TRAILING_STOP' : 'STOP_LOSS';
+}
+
+/** The exits decided at a bar boundary: a flagged exit, EOD flatten or the time stop, at the bar's open. */
+function forcedAtOpen(ctx: PathContext, open: Open, bar: Candle): Exit | undefined {
+  const { config, entry } = ctx;
+  const minute = istParts(bar.time).minuteOfDay;
+  const reason: StudyExitReason | undefined =
+    open.flagged ??
+    (minute >= config.exits.flattenByMinute ? 'EOD_FLATTEN' : bar.time - entry.trade.entryTime >= config.exits.maxHoldMinutes * 60_000 ? 'TIME_STOP' : undefined);
+  return reason === undefined ? undefined : { time: bar.time, price: open.flaggedIsStop ? ctx.stopFill(bar.open) : ctx.bid(bar.open), reason };
+}
+
+/**
+ * The exit checks for one bar, walked over its sub-bars (the bar itself without fine data). The open is unusable on
+ * the entry bar, where it priced the fill. A touch of the underlying level on a sub-bar exits at the next sub-bar's open.
+ */
+function barExit(ctx: PathContext, open: Open, subBars: readonly Candle[], spotSubBars: readonly Candle[] | undefined, entryBar: boolean): Exit | undefined {
+  let underlyingHit = false;
+  for (const [k, sub] of subBars.entries()) {
+    if (!(entryBar && k === 0)) {
+      if (sub.open <= open.stop) return { time: sub.time, price: ctx.stopFill(sub.open), reason: stopReason(ctx, open) };
+      if (ctx.bid(sub.open) >= ctx.target) return { time: sub.time, price: ctx.target, reason: 'TARGET' };
+      const forced = k === 0 ? forcedAtOpen(ctx, open, sub) : underlyingHit ? { time: sub.time, price: ctx.stopFill(sub.open), reason: 'TRAILING_STOP' as const } : undefined;
+      if (forced !== undefined) return forced;
+    }
+    if (sub.low <= open.stop) return { time: sub.time, price: ctx.stopFill(open.stop), reason: stopReason(ctx, open) };
+    if (ctx.bid(sub.high) >= ctx.target) return { time: sub.time, price: ctx.target, reason: 'TARGET' };
+    const spot = spotSubBars?.[k];
+    if (spot !== undefined && !underlyingHit) {
+      open.trail = onTouch(open.trail, 'UNDERLYING', ctx.position.side === 1 ? spot.low : spot.high, ctx.position.side);
+      underlyingHit = open.trail.phase === 'TRIGGERED';
+    }
+  }
+  return undefined;
+}
+
+/** Replays one frozen entry under one exit policy, on its 5-minute bars or, with `fine`, on their 1-minute bars. */
+export function exitPath(entry: StudyEntry, policy: ExitPolicy, options: StudyOptions, config: ReplayConfig, costs: CostModel, fine?: FineBars): StudyTrade {
   const { trade, session } = entry;
-  const { bid, stopFill } = pricing(entry, costs);
   const premiumAll = legBars(session, trade.optionType, trade.strike) ?? [];
   const premiumByTime = new Map(premiumAll.map((bar) => [bar.time, bar]));
-  const position = trailPosition(entry, config, costs);
-  const target = options.target === 'KEEP' ? trade.targetPrice : Infinity;
+  const ctx: PathContext = { entry, policy, config, target: options.target === 'KEEP' ? trade.targetPrice : Infinity, position: trailPosition(entry, config, costs), ...pricing(entry, costs) };
   const jump = policy.kind === 'B1' ? bracketJump(trade, config, session.tickSize) : undefined;
   const history: Candle[] = [...entry.warmup];
   const open: Open = { stop: trade.initialStopPrice, highWaterMark: trade.entryPrice, lastMark: trade.entryPrice, trail: OPEN_TRAIL, flagged: undefined, flaggedIsStop: false };
-  const finish = (exitTime: number, exitPrice: number, exitReason: StudyExitReason): StudyTrade =>
-    studyTrade(entry, config, costs, exitTime, exitPrice, exitReason, open.trail.fallback);
-  const stopReason = (): StudyExitReason => (open.stop > trade.initialStopPrice && policy.kind === 'TRAIL' ? 'TRAILING_STOP' : 'STOP_LOSS');
-
+  const finish = (exit: Exit): StudyTrade => studyTrade(entry, config, costs, exit.time, exit.price, exit.reason, open.trail.fallback);
   for (const spotBar of session.spot) {
     const time = spotBar.time;
     if (time < trade.entryTime) {
@@ -118,41 +168,23 @@ export function exitPath(entry: StudyEntry, policy: ExitPolicy, options: StudyOp
       continue;
     }
     const bar = premiumByTime.get(time);
-    if (bar === undefined) {
-      return finish(time, bid(open.lastMark), 'DATA_GAP');
+    const subBars = fine === undefined ? (bar === undefined ? undefined : [bar]) : fine.premium.get(time);
+    if (bar === undefined || subBars === undefined || subBars.length === 0) {
+      return finish({ time, price: ctx.bid(open.lastMark), reason: 'DATA_GAP' });
     }
-    const entryBar = time === trade.entryTime;
-    if (!entryBar) {
-      if (bar.open <= open.stop) {
-        return finish(time, stopFill(bar.open), stopReason());
-      }
-      if (bid(bar.open) >= target) {
-        return finish(time, target, 'TARGET');
-      }
-      const minute = istParts(time).minuteOfDay;
-      const forced: StudyExitReason | undefined =
-        open.flagged ??
-        (minute >= config.exits.flattenByMinute ? 'EOD_FLATTEN' : time - trade.entryTime >= config.exits.maxHoldMinutes * 60_000 ? 'TIME_STOP' : undefined);
-      if (forced !== undefined) {
-        return finish(time, open.flaggedIsStop ? stopFill(bar.open) : bid(bar.open), forced);
-      }
-    }
-    if (bar.low <= open.stop) {
-      return finish(time, stopFill(open.stop), stopReason());
-    }
-    if (bid(bar.high) >= target) {
-      return finish(time, target, 'TARGET');
+    const exit = barExit(ctx, open, subBars, fine?.spot.get(time), time === trade.entryTime);
+    if (exit !== undefined) {
+      return finish(exit);
     }
     open.lastMark = bar.close;
     history.push(spotBar);
-    advance(open, policy, jump, { trade, position, history, premiumAll, time, spotBar, tick: session.tickSize, breakevenAtRr: config.exits.breakevenAtRr });
+    advance(open, policy, jump, { trade, position: ctx.position, history, premiumAll, time, spotBar, tick: session.tickSize, breakevenAtRr: config.exits.breakevenAtRr });
     if (open.flagged === undefined && options.structureExit) {
-      const held = trade.optionType === 'CE' ? 'BULLISH' : 'BEARISH';
-      open.flagged = structureTurnedAgainst(marketStructure(history), held) ? 'STRUCTURE_BREAK' : undefined;
+      open.flagged = structureTurnedAgainst(marketStructure(history), trade.optionType === 'CE' ? 'BULLISH' : 'BEARISH') ? 'STRUCTURE_BREAK' : undefined;
     }
   }
   const last = session.spot.at(-1);
-  return finish(last === undefined ? trade.entryTime : last.time + config.barMinutes * 60_000, bid(open.lastMark), 'EOD_FLATTEN');
+  return finish({ time: last === undefined ? trade.entryTime : last.time + config.barMinutes * 60_000, price: ctx.bid(open.lastMark), reason: 'EOD_FLATTEN' });
 }
 
 interface AdvanceInput {
@@ -164,6 +196,28 @@ interface AdvanceInput {
   readonly spotBar: Candle;
   readonly tick: number;
   readonly breakevenAtRr: number;
+}
+
+export interface TrailStep {
+  readonly trail: TrailState;
+  /** The premium stop after this bar: the old stop, tightened to the trail's premium level. */
+  readonly stop: number;
+  /** The trail fired: exit at the next bar's open, as a stop-market fill. */
+  readonly exitNextOpen: boolean;
+}
+
+/**
+ * One bar close for a trail, shared by the fixed-entry study and the coupled replay. The underlying touch is checked
+ * against the level set before this bar, so the bar cannot move its own stop. Takes effect from the next bar.
+ */
+export function trailBarClose(spec: TrailSpec, position: TrailPosition, state: TrailState, input: { spot: readonly Candle[]; premium: readonly Candle[]; spotBar: Candle; stop: number; tick: number }): TrailStep {
+  let trail = onTouch(state, 'UNDERLYING', position.side === 1 ? input.spotBar.low : input.spotBar.high, position.side);
+  if (trail.phase !== 'TRIGGERED') {
+    trail = onBarClosed(spec, position, trail, { spot: input.spot.slice(-TRAIL_SPOT_BARS), premium: input.premium });
+  }
+  const level = trail.levels.PREMIUM;
+  const stop = level === undefined ? input.stop : Math.max(input.stop, roundDownToTick(level, input.tick));
+  return { trail, stop, exitNextOpen: trail.intent !== undefined };
 }
 
 /** Moves the stop after a bar closes. Takes effect from the next bar, never inside the bar that set it. */
@@ -185,23 +239,16 @@ function advance(open: Open, policy: ExitPolicy, jump: number | undefined, input
   if (policy.kind !== 'TRAIL') {
     return;
   }
-  const side = input.position.side;
-  // The underlying touch is checked against the level set before this bar, so the bar cannot move its own stop.
-  open.trail = onTouch(open.trail, 'UNDERLYING', side === 1 ? input.spotBar.low : input.spotBar.high, side);
-  if (open.trail.phase !== 'TRIGGERED') {
-    const premium = input.premiumAll.filter((candle) => candle.time <= input.time);
-    open.trail = onBarClosed(policy.spec, input.position, open.trail, { spot: input.history.slice(-TRAIL_SPOT_BARS), premium });
-  }
-  const intent = open.trail.intent;
-  if (intent !== undefined) {
+  const premium = input.premiumAll.filter((candle) => candle.time <= input.time);
+  const step = trailBarClose(policy.spec, input.position, open.trail, { spot: input.history, premium, spotBar: input.spotBar, stop: open.stop, tick: input.tick });
+  open.trail = step.trail;
+  open.stop = step.stop;
+  if (step.exitNextOpen) {
     open.flagged = 'TRAILING_STOP';
     // Every trail exit is a market SELL into an adverse move, so it pays stop slippage like the stop leg does.
     // Filling a close-confirmed exit at the plain bid would hand those methods a cost edge over B1's stops.
     open.flaggedIsStop = true;
-    return;
   }
-  const premiumLevel = open.trail.levels.PREMIUM;
-  open.stop = premiumLevel === undefined ? open.stop : Math.max(open.stop, roundDownToTick(premiumLevel, input.tick));
 }
 
 function bracketJump(trade: ReplayTrade, config: ReplayConfig, tick: number): number | undefined {
@@ -239,20 +286,4 @@ function studyTrade(
     opportunityInr: opportunityInr(entry, config, costs),
     trailFallback,
   };
-}
-
-/** Freezes the baseline replay's priced trades as study entries, each with the bars its exit path needs. */
-export function freezeEntries(dataset: ResearchDataset, baseline: readonly ReplayTrade[], warmupSessions: number): StudyEntry[] {
-  const indexByDate = new Map(dataset.sessions.map((session, index) => [session.date, index]));
-  return baseline
-    .filter((trade) => trade.exitReason !== 'DATA_GAP')
-    .map((trade) => {
-      const index = indexByDate.get(trade.date);
-      const session = index === undefined ? undefined : dataset.sessions[index];
-      if (index === undefined || session === undefined) {
-        throw new Error(`trade on ${trade.date} has no session in the dataset`);
-      }
-      const warmup = dataset.sessions.slice(Math.max(0, index - warmupSessions), index).flatMap((day) => day.spot);
-      return { trade, session, warmup, optionSegment: dataset.optionSegment, underlying: dataset.underlying };
-    });
 }

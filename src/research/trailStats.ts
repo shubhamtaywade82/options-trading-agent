@@ -200,3 +200,16 @@ export function walkForward(input: WalkForwardInput): WalkForwardResult {
     dates: input.dates.filter((date) => testMonths.has(monthOf(date))),
   };
 }
+
+/**
+ * Day-paired difference for two replays whose trades differ (the coupled mode): per day, the net difference over the
+ * larger of the two days' planned risk. Days with no risk on either side give 0.
+ */
+export function dayNetDeltas(dates: readonly string[], baseline: readonly { date: string; netPnlInr: number; riskInr: number }[], candidate: readonly { date: string; netPnlInr: number; riskInr: number }[]): number[] {
+  const sum = (trades: typeof baseline, date: string, key: 'netPnlInr' | 'riskInr'): number =>
+    trades.filter((trade) => trade.date === date).reduce((total, trade) => total + trade[key], 0);
+  return dates.map((date) => {
+    const risk = Math.max(sum(baseline, date, 'riskInr'), sum(candidate, date, 'riskInr'));
+    return risk === 0 ? 0 : (sum(candidate, date, 'netPnlInr') - sum(baseline, date, 'netPnlInr')) / risk;
+  });
+}

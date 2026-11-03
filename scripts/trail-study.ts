@@ -16,11 +16,13 @@ import { loadConfig, type AgentConfig } from '../src/config.js';
 import type { Candle } from '../src/domain/types.js';
 import { specId } from '../src/exits/trail.js';
 import { vixTerciles } from '../src/research/contextCells.js';
-import { parseDataset } from '../src/research/dataset.js';
-import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
+import { parseDataset, type ResearchDataset } from '../src/research/dataset.js';
+import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from '../src/research/replay.js';
 import { STUDY_GRID } from '../src/research/trailGrid.js';
-import { capture, dailyDeltas, holm, pairedBootstrap, realityCheck, walkForward, type PolicyTrades } from '../src/research/trailStats.js';
-import { exitPath, freezeEntries, type StudyEntry, type StudyOptions, type StudyTrade } from '../src/research/trailStudy.js';
+import { capture, dailyDeltas, dayNetDeltas, holm, pairedBootstrap, realityCheck, walkForward, type PolicyTrades } from '../src/research/trailStats.js';
+import { aggregateDataset, fineBarsFor, freezeEntries } from '../src/research/studyEntries.js';
+import type { TrailSpec } from '../src/exits/trail.js';
+import { exitPath, type StudyEntry, type StudyOptions, type StudyTrade } from '../src/research/trailStudy.js';
 
 const RUN_LOG = 'data/research/runs.jsonl';
 
@@ -54,17 +56,20 @@ interface Loaded {
   readonly hashes: string[];
   /** Baseline trades the fixed-entry path did not reproduce; must be 0 for the study to be trusted. */
   readonly mismatches: number;
+  readonly datasets: ResearchDataset[];
 }
 
 async function loadEntries(paths: readonly string[], replay: ReplayConfig, costs: CostModel, keepMonth: (month: string) => boolean): Promise<Loaded> {
   const entries: StudyEntry[] = [];
   const dates = new Set<string>();
   const hashes: string[] = [];
+  const datasets: ResearchDataset[] = [];
   let mismatches = 0;
   for (const path of paths) {
     const text = await readFile(path, 'utf8');
     hashes.push(createHash('sha256').update(text).digest('hex'));
     const dataset = parseDataset(JSON.parse(text));
+    datasets.push(dataset);
     const frozen = freezeEntries(dataset, replayDataset(dataset, replay, costs).trades, replay.warmupSessions);
     for (const entry of frozen.filter((e) => e.trade.exitReason !== 'DAILY_LOSS')) {
       const again = exitPath(entry, { kind: 'B1' }, { target: 'KEEP', structureExit: replay.structureExit }, replay, costs);
@@ -73,7 +78,7 @@ async function loadEntries(paths: readonly string[], replay: ReplayConfig, costs
     entries.push(...frozen.filter((entry) => keepMonth(entry.trade.date.slice(0, 7))));
     dataset.sessions.map((session) => session.date).filter((date) => keepMonth(date.slice(0, 7))).forEach((date) => dates.add(date));
   }
-  return { entries, dates: [...dates].sort(), hashes, mismatches };
+  return { entries, dates: [...dates].sort(), hashes, mismatches, datasets };
 }
 
 async function priorRuns(hashes: readonly string[]): Promise<number> {
@@ -162,6 +167,70 @@ async function contextCellsFor(entries: readonly StudyEntry[], dates: readonly s
   return entries.map((entry) => `${entry.trade.context.regime}|${tags.get(entry.trade.date)?.['vix'] ?? 'vix?'}`);
 }
 
+interface CheckInput {
+  readonly loaded: Loaded;
+  readonly baseline: readonly StudyTrade[];
+  readonly top: readonly { readonly spec: TrailSpec; readonly policy: PolicyTrades }[];
+  readonly options: StudyOptions;
+  readonly replay: ReplayConfig;
+  readonly costs: CostModel;
+  readonly stats: { iterations: number; seed: number };
+}
+
+/**
+ * §5.4: entries replayed from the 1-minute dataset rebuilt as 5-minute bars, then exited on those 5-minute bars and on
+ * the 1-minute bars inside them. One source, so the only difference is bar size. Δ vs B1 must keep its sign and stay
+ * inside the 5-minute CI.
+ */
+async function fineCheck(input: CheckInput, path: string, keepMonth: (month: string) => boolean): Promise<string> {
+  const fineData = parseDataset(JSON.parse(await readFile(path, 'utf8')));
+  const coarseData = aggregateDataset(fineData, input.replay.barMinutes);
+  const barMs = input.replay.barMinutes * 60_000;
+  const sessions = new Map(fineData.sessions.map((session) => [session.date, session]));
+  const picked = freezeEntries(coarseData, replayDataset(coarseData, input.replay, input.costs).trades, input.replay.warmupSessions).flatMap((entry) => {
+    const session = sessions.get(entry.trade.date);
+    const fine = session === undefined || !keepMonth(entry.trade.date.slice(0, 7)) ? undefined : fineBarsFor(entry, session, barMs);
+    return fine === undefined ? [] : [{ entry, fine }];
+  });
+  const dates = coarseData.sessions.map((session) => session.date).filter((date) => keepMonth(date.slice(0, 7)));
+  const run = (policy: Parameters<typeof exitPath>[1], fine: boolean): StudyTrade[] =>
+    picked.map((p) => exitPath(p.entry, policy, input.options, input.replay, input.costs, fine ? p.fine : undefined));
+  const [coarseB1, fineB1] = [run({ kind: 'B1' }, false), run({ kind: 'B1' }, true)];
+  const lines = input.top.map(({ spec, policy }) => {
+    const coarse = pairedBootstrap(dailyDeltas(dates, coarseB1, run({ kind: 'TRAIL', spec }, false)), input.stats);
+    const fine = pairedBootstrap(dailyDeltas(dates, fineB1, run({ kind: 'TRAIL', spec }, true)), input.stats);
+    const halfWidth = (coarse.ci95.high - coarse.ci95.low) / 2;
+    const pass = Math.sign(coarse.meanDelta) === Math.sign(fine.meanDelta) && Math.abs(coarse.meanDelta - fine.meanDelta) < halfWidth;
+    return `  ${policy.id.slice(0, 60).padEnd(60)} Δ5m ${num(coarse.meanDelta)} [${num(coarse.ci95.low)},${num(coarse.ci95.high)}]  Δ1m ${num(fine.meanDelta)} [${num(fine.ci95.low)},${num(fine.ci95.high)}]  ${pass ? 'PASS' : 'GRANULARITY_SENSITIVE'}`;
+  });
+  return [`1-minute check (${fineData.underlying}, ${picked.length} entries from the 1-minute data rebuilt as ${input.replay.barMinutes}-minute bars, ${dates.length} days):`, ...lines].join('\n');
+}
+
+/** §5.2: full replays where each exit's timing changes which later signals become trades; compared day by day. */
+function coupledCheck(input: CheckInput, keepMonth: (month: string) => boolean): string {
+  const replayAll = (trail: TrailSpec | undefined): ReplayTrade[] =>
+    input.loaded.datasets.flatMap((dataset) =>
+      replayDataset(dataset, { ...input.replay, trail, noTarget: input.options.target === 'NONE' }, input.costs).trades.filter(
+        (trade) => trade.exitReason !== 'DATA_GAP' && keepMonth(trade.date.slice(0, 7)),
+      ),
+    );
+  const base = replayAll(undefined);
+  const lines = input.top.map(({ spec, policy }) => {
+    const trades = replayAll(spec);
+    const paired = pairedBootstrap(dayNetDeltas(input.loaded.dates, base, trades), input.stats);
+    const fixedSign = Math.sign(pairedBootstrap(dailyDeltas(input.loaded.dates, input.baseline, policy.trades), input.stats).meanDelta);
+    const agrees = Math.sign(paired.meanDelta) === fixedSign;
+    return `  ${policy.id.slice(0, 60).padEnd(60)} ${String(trades.length).padStart(5)} trades vs ${base.length}  ΔR/day ${num(paired.meanDelta)} [${num(paired.ci95.low)},${num(paired.ci95.high)}] p ${paired.pNonPositive.toFixed(3)}  ${agrees ? 'sign agrees' : 'SIGN REVERSES'}`;
+  });
+  return ['coupled replay (each policy replays the whole day book):', ...lines].join('\n');
+}
+
+async function runChecks(input: CheckInput, keepMonth: (month: string) => boolean): Promise<string> {
+  const finePath = argument('--fine');
+  const parts = [finePath === undefined ? undefined : await fineCheck(input, finePath, keepMonth), process.argv.includes('--coupled') ? coupledCheck(input, keepMonth) : undefined];
+  return parts.filter((part) => part !== undefined).join('\n\n');
+}
+
 async function main(): Promise<void> {
   const config = offlineConfig(argument('--config'));
   const base = replayConfigFrom(config).replay;
@@ -176,9 +245,18 @@ async function main(): Promise<void> {
   if (paths.length === 0) {
     throw new Error('--data is required');
   }
-  const loaded = await loadEntries(paths, replay, costs, (month) => (holdout ? month >= holdoutFrom : month < holdoutFrom));
+  const keepMonth = (month: string): boolean => (holdout ? month >= holdoutFrom : month < holdoutFrom);
+  const loaded = await loadEntries(paths, replay, costs, keepMonth);
   const baseline = loaded.entries.map((entry) => exitPath(entry, { kind: 'B1' }, options, replay, costs));
   const policies: PolicyTrades[] = STUDY_GRID.map((spec) => ({ id: specId(spec), trades: loaded.entries.map((entry) => exitPath(entry, { kind: 'TRAIL', spec }, options, replay, costs)) }));
+  if (argument('--fine') !== undefined || process.argv.includes('--coupled')) {
+    // Checks of already-ranked candidates: no new search, so they are logged apart and do not widen the Holm family.
+    const ranked = STUDY_GRID.map((spec, i) => ({ spec, policy: policies[i] as PolicyTrades })).sort((a, b) => (capture(b.policy.trades) ?? -Infinity) - (capture(a.policy.trades) ?? -Infinity));
+    const top = ranked.slice(0, numberArgument('--top', 5));
+    console.log(await runChecks({ loaded, baseline, top, options, replay, costs, stats }, keepMonth));
+    await appendFile(RUN_LOG, `${JSON.stringify({ kind: 'trail-check', ts: new Date().toISOString(), data: [...loaded.hashes].sort().join(','), holdout, costs, options, maxHold: replay.exits.maxHoldMinutes })}\n`);
+    return;
+  }
   const runs = (await priorRuns(loaded.hashes)) + 1;
   const rows = rowsFor(loaded, baseline, policies, { ...stats, runs });
   const deltas = policies.map((policy) => dailyDeltas(loaded.dates, baseline, policy.trades));

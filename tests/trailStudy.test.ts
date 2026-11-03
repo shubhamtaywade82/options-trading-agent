@@ -4,9 +4,11 @@ import type { Candle } from '../src/domain/types.js';
 import type { OptionBar, ResearchDataset, ResearchSession } from '../src/research/dataset.js';
 import { replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
 import { SeededRng } from '../src/research/rng.js';
+import type { TrailSpec } from '../src/exits/trail.js';
 import { STUDY_GRID } from '../src/research/trailGrid.js';
 import { capture, dailyDeltas, holm, pairedBootstrap, realityCheck, walkForward, walkForwardFolds } from '../src/research/trailStats.js';
-import { exitPath, freezeEntries, type StudyOptions } from '../src/research/trailStudy.js';
+import { aggregateDataset, fineBarsFor, freezeEntries, type FineBars } from '../src/research/studyEntries.js';
+import { exitPath, type StudyOptions } from '../src/research/trailStudy.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
 
@@ -123,6 +125,91 @@ describe('fixed-entry study', () => {
       (entry) => exitPath(entry, { kind: 'TRAIL', spec: { kind: 'GIVEBACK', activationR: 0.5, giveback: 0.3 } }, { ...KEEP, structureExit: false }, CONFIG, COSTS).netPnlInr,
     );
     assert.notDeepEqual(none, giveback);
+  });
+});
+
+describe('coupled replay', () => {
+  const NONE_TARGET: StudyOptions = { target: 'NONE', structureExit: CONFIG.structureExit };
+  const specs: TrailSpec[] = [
+    { kind: 'MA_CROSS', series: 'UNDERLYING', ma: 'HMA', period: 9 },
+    { kind: 'MA_CROSS', series: 'PREMIUM', ma: 'HMA', period: 9 },
+    { kind: 'GIVEBACK', activationR: 0.5, giveback: 0.3 },
+    { kind: 'DONCHIAN', series: 'UNDERLYING', bars: 3 },
+    { kind: 'HYBRID', premium: { kind: 'PREMIUM_ATR', period: 14, mult: 2, activationR: 0 }, underlying: { kind: 'CHOCH', strength: 2 } },
+  ];
+
+  for (const spec of specs) {
+    it(`should exit exactly as the fixed-entry path does for the same trail: ${spec.kind}`, () => {
+      const coupled = replayDataset(DATASET, { ...CONFIG, trail: spec, noTarget: true }, COSTS);
+      const entries = freezeEntries(DATASET, coupled.trades, CONFIG.warmupSessions).filter((entry) => entry.trade.exitReason !== 'DAILY_LOSS');
+      assert.ok(entries.length >= 10);
+      for (const entry of entries) {
+        const again = exitPath(entry, { kind: 'TRAIL', spec }, NONE_TARGET, CONFIG, COSTS);
+        assert.deepEqual([again.exitTime, again.exitPrice, again.exitReason], [entry.trade.exitTime, entry.trade.exitPrice, entry.trade.exitReason]);
+      }
+    });
+  }
+
+  it('should leave the replay unchanged when no trail is set', () => {
+    assert.deepEqual(replayDataset(DATASET, { ...CONFIG, trail: undefined }, COSTS), BASELINE);
+  });
+});
+
+describe('1-minute granularity', () => {
+  /** Each 5-minute bar repeated as five identical 1-minute bars: no new information inside the bar. */
+  function repeated(entry: (typeof ENTRIES)[number]): FineBars {
+    const premium = new Map<number, Candle[]>();
+    const spot = new Map<number, Candle[]>();
+    const leg = entry.trade.optionType === 'CE' ? entry.session.calls : entry.session.puts;
+    for (const candle of leg[String(entry.trade.strike)] ?? []) {
+      premium.set(candle.time, Array.from({ length: 5 }, (_, k) => ({ ...candle, time: candle.time + k * 60_000 })));
+    }
+    for (const candle of entry.session.spot) {
+      spot.set(candle.time, Array.from({ length: 5 }, (_, k) => ({ ...candle, time: candle.time + k * 60_000 })));
+    }
+    return { premium, spot };
+  }
+
+  it('should give the 5-minute result when the 1-minute bars carry no new information', () => {
+    const spec: TrailSpec = { kind: 'MA_CROSS', series: 'PREMIUM', ma: 'HMA', period: 9 };
+    for (const entry of ENTRIES) {
+      const coarse = exitPath(entry, { kind: 'TRAIL', spec }, KEEP, CONFIG, COSTS);
+      const fine = exitPath(entry, { kind: 'TRAIL', spec }, KEEP, CONFIG, COSTS, repeated(entry));
+      assert.deepEqual([fine.exitPrice, fine.exitReason, fine.netPnlInr], [coarse.exitPrice, coarse.exitReason, coarse.netPnlInr]);
+    }
+  });
+
+  it('should exit at the next 1-minute open after an underlying touch, not at the next 5-minute open', () => {
+    const spec: TrailSpec = { kind: 'DONCHIAN', series: 'UNDERLYING', bars: 3 };
+    const touched = ENTRIES.map((entry) => ({
+      coarse: exitPath(entry, { kind: 'TRAIL', spec }, KEEP, CONFIG, COSTS),
+      fine: exitPath(entry, { kind: 'TRAIL', spec }, KEEP, CONFIG, COSTS, repeated(entry)),
+    })).filter(({ coarse }) => coarse.exitReason === 'TRAILING_STOP');
+    assert.ok(touched.length > 0);
+    for (const { coarse, fine } of touched) {
+      assert.equal(fine.exitReason, 'TRAILING_STOP');
+      assert.ok(fine.exitTime < coarse.exitTime && (coarse.exitTime - fine.exitTime) % 60_000 === 0);
+    }
+  });
+
+  it('should rebuild 1-minute bars as 5-minute bars with merged OHLC and summed volume', () => {
+    const t0 = istEpoch('2026-10-12', '09:15');
+    const minute = [bar(t0, 10, 12, 9, 11), bar(t0 + 60_000, 11, 15, 10, 14), bar(t0 + 120_000, 14, 14, 8, 9), bar(t0 + 300_000, 9, 10, 9, 10)].map((candle) => ({ ...candle, volume: 5 }));
+    const session: ResearchSession = { date: '2026-10-12', lotSize: 65, tickSize: 0.05, strikeStep: 50, spot: minute, calls: { '100': minute }, puts: {} };
+    const coarse = aggregateDataset({ version: 1, underlying: 'NIFTY', optionSegment: 'NSE_FNO', barMinutes: 1, source: { kind: 'fixture' }, sessions: [session] }, 5);
+    assert.equal(coarse.barMinutes, 5);
+    assert.deepEqual(coarse.sessions[0]?.spot, [
+      { time: t0, open: 10, high: 15, low: 8, close: 9, volume: 15 },
+      { time: t0 + 300_000, open: 9, high: 10, low: 9, close: 10, volume: 5 },
+    ]);
+  });
+
+  it('should group a 1-minute session into its 5-minute bars', () => {
+    const entry = ENTRIES[0];
+    assert.ok(entry !== undefined);
+    const fine = fineBarsFor(entry, entry.session, 300_000);
+    assert.ok(fine !== undefined);
+    assert.equal(fine.premium.get(entry.trade.entryTime)?.length, 1);
   });
 });
 

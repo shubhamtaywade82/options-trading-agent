@@ -394,8 +394,10 @@ that picks a `TrailSpec` per trade in the study harness. It reaches `TrailSpec` 
 | `scripts/trail-study.ts` | **new** | CLI, `npm run trail-study` | 210 |
 | tests | **new** | `stopLines.test.ts`, `trail.test.ts` (properties over the whole grid, both sides), `trailStudy.test.ts` | — |
 
-`replay.ts` is unchanged: the coupled mode (§5.2) is not built yet. `trailGrid.ts` and `trailStats.ts` are two files
-beyond the approved list, split out to keep every file under 300 lines.
+`replay.ts` gained an optional `trail` and `noTarget` for the coupled mode (§5.2); both trail paths call one shared
+`trailBarClose`, and a test holds the coupled replay and the fixed-entry path to identical exits. `studyEntries.ts`
+(frozen entries, 1-minute grouping, `aggregateDataset`), `trailGrid.ts` and `trailStats.ts` are three files beyond the
+approved list, split out to keep every file under 300 lines.
 
 ## 5. Replay, costs and capture
 
@@ -784,9 +786,41 @@ B1 capture is −16.7% at 10 minutes and −17.9% at 15, against −16.6% at 30.
 gain is not plain "exit sooner". HMA 9 exits the trades that stall and keeps the ones that run, and it needs a hold
 of 15–30 minutes to do that. The five runs make the family 340 for any later look at these datasets.
 
-**Gate status (§7).** 1 pass, 2 pass, 3 pass (1% spread), 4 pass (3 of 3 indices). 5 open: the 1-minute granularity
-check and the coupled replay are not built, and HMA 9 sits on a narrow peak (ALMA 9 and HMA 21 reach 40–70% of its
-ΔR). 6 not run (holdout, one look). 7 not started (paper shadow).
+### 12.1 Robustness checks (2026-11-03, `--coupled`, `--fine`)
+
+Run on the top 5 by capture. They test chosen candidates and search nothing, so they are logged as `trail-check` and do
+not widen the Holm family.
+
+**Coupled replay.** Each policy replays the whole day book, so an earlier exit frees the slot and later signals become
+trades (1,700–2,130 trades against B1's 1,621). Compared day by day:
+
+| Policy | ΔR per day vs B1 [95% CI] | p |
+| --- | --- | --- |
+| HMA 9 cross, premium | +0.014 [−0.010, 0.038] | 0.121 |
+| HMA 9 cross, underlying | +0.007 [−0.015, 0.030] | 0.258 |
+| HMA 21 cross, premium | +0.015 [−0.008, 0.039] | 0.101 |
+
+The sign holds, but the gain shrinks to a third and is no longer distinguishable from zero. The extra trades that the
+freed slots let in are as bad as the entries already were.
+
+**Bar granularity.** The first version mixed two sources: 5-minute entries from the 5-minute file, exits on the
+separately fetched 1-minute file. On the same strike and bar, 21% of opens differ (5.4% of price on average), so it
+compared data, not bar size. The check now rebuilds the 1-minute file as 5-minute bars (`aggregateDataset`) and takes
+entries from that, so only the bar size differs. Close-confirmed and premium-touch exits fill at bar boundaries, or at
+the stop price, both of which coincide by construction: B1, HMA 9 and giveback give the same P&L at 1 and 5 minutes
+(their exits move in time, not in price). Underlying-touch exits do change: Donchian 3 on the underlying changes 254
+of 363 exits and loses ₹11,321 more when it exits at the next 1-minute open.
+
+**Data source.** On those same NIFTY days, HMA 9's ΔR is +0.022 to +0.026 on the 5-minute file but only +0.002 to
++0.009 on the 1-minute file rebuilt as 5-minute bars. Two fetches of the same market disagree on the result, which is
+the clearest sign that the effect is fragile.
+
+**Gate status (§7).** 1 pass, 2 pass, 3 pass (1% spread), 4 pass (3 of 3 indices). **5 fails**: the coupled replay
+loses significance, the result does not survive a second data source, and HMA 9 sits on a narrow peak (ALMA 9 and
+HMA 21 reach 40–70% of its ΔR). 6 not run, on purpose: the holdout is kept for a candidate that passes gate 5. 7 not
+started.
+
+**Verdict: keep B1.** No method is promoted. HMA 9 stays a lead for later work on entries, not an exit to wire live.
 
 ## 13. The external specification (ChatGPT, pasted 2026-11-03)
 
@@ -809,6 +843,8 @@ hybrids, costs, walk-forward, multiple-testing correction, and research before l
 ## 14. Next steps
 
 1. Done (above): a shorter time stop does not reproduce HMA 9's gain.
-2. Build the coupled replay (§5.2) and the 1-minute granularity check (§5.4) for HMA 9 (both series).
-3. Run the holdout once (`--holdout`), for HMA 9 only.
-4. Only then Phase 6: live wiring and the paper shadow.
+2. Done (§12.1): coupled replay and 1-minute check. HMA 9 fails gate 5; nothing is promoted and the holdout is unspent.
+3. The fixed-entry harness is the reusable part: when the entries change (new strategy, new filters), rerun
+   `npm run trail-study` and then `--coupled --fine` on the leaders before any live work.
+4. Data: the 5-minute and 1-minute NIFTY fetches disagree on 21% of bar opens. Before more research on these files,
+   find out which fetch is right (compare a sample against Dhan's intraday chart for the held strike).
