@@ -184,3 +184,73 @@ export function adaptiveSuperTrend(
     return baseMultiplier * (1.5 - er * 0.75);
   });
 }
+
+function assertPeriod(name: string, period: number): void {
+  if (!Number.isInteger(period) || period < 1) {
+    throw new RangeError(`${name} period must be a positive integer, got ${period}`);
+  }
+}
+
+/** Simple moving average of the last `period` values. Undefined until the window is full. */
+export function sma(values: readonly number[], period: number): number | undefined {
+  assertPeriod('SMA', period);
+  if (values.length < period) {
+    return undefined;
+  }
+  let sum = 0;
+  for (let i = values.length - period; i < values.length; i += 1) {
+    sum += values[i] ?? NaN;
+  }
+  return Number.isFinite(sum) ? sum / period : undefined;
+}
+
+/** Linearly weighted moving average of the last `period` values, newest weighted `period`. */
+export function wma(values: readonly number[], period: number): number | undefined {
+  assertPeriod('WMA', period);
+  if (values.length < period) {
+    return undefined;
+  }
+  const start = values.length - period;
+  let sum = 0;
+  for (let i = 0; i < period; i += 1) {
+    sum += (i + 1) * (values[start + i] ?? NaN);
+  }
+  const value = sum / ((period * (period + 1)) / 2);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+/** Hull moving average: WMA over sqrt(n) bars of 2·WMA(n/2) − WMA(n). Needs n + sqrt(n) − 1 values. */
+export function hma(values: readonly number[], period: number): number | undefined {
+  assertPeriod('HMA', period);
+  const half = Math.max(1, Math.floor(period / 2));
+  const root = Math.max(1, Math.floor(Math.sqrt(period)));
+  if (values.length < period + root - 1) {
+    return undefined;
+  }
+  const raw: number[] = [];
+  for (let end = values.length - root + 1; end <= values.length; end += 1) {
+    const window = values.slice(0, end);
+    raw.push(2 * (wma(window, half) ?? NaN) - (wma(window, period) ?? NaN));
+  }
+  return wma(raw, root);
+}
+
+/** Arnaud Legoux moving average: Gaussian weights centred at `offset` of the window (0 = oldest). */
+export function alma(values: readonly number[], period: number, offset = 0.85, sigma = 6): number | undefined {
+  assertPeriod('ALMA', period);
+  if (values.length < period) {
+    return undefined;
+  }
+  const centre = offset * (period - 1);
+  const width = period / sigma;
+  const start = values.length - period;
+  let weighted = 0;
+  let weights = 0;
+  for (let i = 0; i < period; i += 1) {
+    const weight = Math.exp(-((i - centre) ** 2) / (2 * width * width));
+    weighted += weight * (values[start + i] ?? NaN);
+    weights += weight;
+  }
+  const value = weighted / weights;
+  return Number.isFinite(value) ? value : undefined;
+}

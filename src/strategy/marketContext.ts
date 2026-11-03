@@ -1,5 +1,6 @@
 import type { Candle, Direction } from '../domain/types.js';
 import { efficiencyRatio, wilderAtr } from '../market/indicators.js';
+import { isPivotHigh, isPivotLow } from '../market/stopLines.js';
 import { istParts } from '../time/ist.js';
 
 /** A fractal swing needs this many bars on each side; the swing is known only that many bars after it. */
@@ -39,26 +40,6 @@ export interface ContextVerdict {
   readonly reason: string;
 }
 
-function isSwingHigh(bars: readonly Candle[], i: number): boolean {
-  const high = bars[i]?.high ?? Number.NaN;
-  for (let k = 1; k <= SWING_STRENGTH; k += 1) {
-    if (!(high > (bars[i - k]?.high ?? Infinity) && high >= (bars[i + k]?.high ?? Infinity))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function isSwingLow(bars: readonly Candle[], i: number): boolean {
-  const low = bars[i]?.low ?? Number.NaN;
-  for (let k = 1; k <= SWING_STRENGTH; k += 1) {
-    if (!(low < (bars[i - k]?.low ?? -Infinity) && low <= (bars[i + k]?.low ?? -Infinity))) {
-      return false;
-    }
-  }
-  return true;
-}
-
 /** Walks the bars once, confirming swings as they become known and recording each close that breaks one. */
 export function marketStructure(bars: readonly Candle[]): StructureState {
   let trend: Lean = 'NEUTRAL';
@@ -68,8 +49,8 @@ export function marketStructure(bars: readonly Candle[]): StructureState {
   for (let i = 0; i < bars.length; i += 1) {
     const pivot = i - SWING_STRENGTH;
     if (pivot >= SWING_STRENGTH) {
-      lastSwingHigh = isSwingHigh(bars, pivot) ? bars[pivot]?.high : lastSwingHigh;
-      lastSwingLow = isSwingLow(bars, pivot) ? bars[pivot]?.low : lastSwingLow;
+      lastSwingHigh = isPivotHigh(bars, pivot, SWING_STRENGTH, false) ? bars[pivot]?.high : lastSwingHigh;
+      lastSwingLow = isPivotLow(bars, pivot, SWING_STRENGTH, false) ? bars[pivot]?.low : lastSwingLow;
     }
     const close = bars[i]?.close ?? Number.NaN;
     const broke: Lean =
