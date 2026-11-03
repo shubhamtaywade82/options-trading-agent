@@ -59,8 +59,18 @@ export function applyCostStressToCells(base: CellReport, stresses: readonly { re
 }
 
 function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string> {
-  const { regime, trendAlignment, timeBucket, expiryDay } = trade.context;
-  return { regime, trendAlignment, timeBucket, expiryDay: String(expiryDay), ...dayTags.get(trade.date) };
+  const { regime, trendAlignment, timeBucket, expiryDay, volatility, structureAlignment, expiryBucket } = trade.context;
+  // chainBias is not a dimension: it is UNKNOWN on every trade, so a cell on it would only add to the divisor.
+  return {
+    regime,
+    trendAlignment,
+    timeBucket,
+    expiryDay: String(expiryDay),
+    volatility,
+    structureAlignment,
+    expiryBucket,
+    ...dayTags.get(trade.date),
+  };
 }
 
 function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags): Map<string, ReplayTrade[]> {

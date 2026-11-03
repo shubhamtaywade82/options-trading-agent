@@ -419,6 +419,11 @@ describe('context cells', () => {
     assert.equal(context?.expiryDay, false);
     assert.ok(['TRENDING', 'RANGING'].includes(context?.regime ?? ''));
     assert.ok(['WITH', 'AGAINST', 'NEUTRAL'].includes(context?.trendAlignment ?? ''));
+    // OTA-309: the new features are present, typed, and never a guessed chain bias.
+    assert.ok(['LOW', 'MID', 'HIGH', 'UNKNOWN'].includes(context?.volatility ?? ''));
+    assert.ok(['WITH', 'AGAINST', 'NEUTRAL', 'UNKNOWN'].includes(context?.structureAlignment ?? ''));
+    assert.ok(['EXPIRY', 'NEAR', 'FAR', 'UNKNOWN'].includes(context?.expiryBucket ?? ''));
+    assert.equal(context?.chainBias, 'UNKNOWN');
   });
 
   it('reports each strategy per context value, and corrects the bar for every cell tested', () => {
@@ -429,6 +434,8 @@ describe('context cells', () => {
     assert.equal(open?.verdict, 'EDGE_SUPPORTED');
     assert.equal(report.testsCounted, report.cells.length);
     assert.match(formatCells(report), /range \| timeBucket=OPEN/);
+    assert.ok(report.cells.some((cell) => cell.key.includes(' | volatility=')), 'volatility is a cell dimension');
+    assert.ok(!report.cells.some((cell) => cell.key.includes('chainBias')), 'chainBias is not a cell dimension');
   });
 
   it('says INSUFFICIENT_EVIDENCE for a cell below the minimum trade count', () => {

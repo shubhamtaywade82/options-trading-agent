@@ -10,6 +10,14 @@ import { StrategySession, type StrategyId, type StrategyPosture } from '../strat
 import { weeklyExpiryDates } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
+import {
+  expiryBucket,
+  structureAlignment,
+  volatilityBucket,
+  type ExpiryBucket,
+  type StructureAlignment,
+  type VolatilityBucket,
+} from './tradeFeatures.js';
 
 /** The live settings a replay honours. Built from AgentConfig so a replay runs the rules the agent would run. */
 export interface ReplayConfig {
@@ -81,18 +89,39 @@ export interface TradeContext {
   readonly trendAlignment: 'WITH' | 'AGAINST' | 'NEUTRAL';
   readonly timeBucket: 'OPEN' | 'MID' | 'LATE';
   readonly expiryDay: boolean;
+  /** ATR tercile of its own history at the signal bar. */
+  readonly volatility: VolatilityBucket;
+  /** Market-structure trend against the trade's direction. */
+  readonly structureAlignment: StructureAlignment;
+  /** Sessions to expiry, or UNKNOWN where the session has no expiry on record. */
+  readonly expiryBucket: ExpiryBucket;
+  /** Not replayed: there is no historical option chain. Always UNKNOWN, never a neutral stand-in. */
+  readonly chainBias: 'UNKNOWN';
 }
 
 const MID_SESSION_MINUTE = 10 * 60 + 30;
 const LATE_SESSION_MINUTE = 12 * 60 + 30;
 
-function tradeContext(context: MarketContext, direction: Direction, signalBarTime: number, expiryDay: boolean): TradeContext {
+/**
+ * Context at the signal bar. `history` ends at that bar, so every feature here is known when the trade is taken (OTA-309).
+ */
+function tradeContext(
+  context: MarketContext,
+  direction: Direction,
+  signalBarTime: number,
+  session: ResearchSession,
+  history: readonly Candle[],
+): TradeContext {
   const minute = istParts(signalBarTime).minuteOfDay;
   return {
     regime: context.regime,
     trendAlignment: context.dayTrend === 'NEUTRAL' ? 'NEUTRAL' : context.dayTrend === direction ? 'WITH' : 'AGAINST',
     timeBucket: minute < MID_SESSION_MINUTE ? 'OPEN' : minute < LATE_SESSION_MINUTE ? 'MID' : 'LATE',
-    expiryDay,
+    expiryDay: session.expiry === session.date,
+    volatility: volatilityBucket(history),
+    structureAlignment: structureAlignment(context.structure, direction),
+    expiryBucket: expiryBucket(session.date, session.expiry),
+    chainBias: 'UNKNOWN',
   };
 }
 
@@ -527,7 +556,7 @@ function replaySession(
       optionType,
       strike: targetEntryStrike(atm, session.strikeStep, signal.direction, config.strikeOffsetSteps),
       signalBarTime: signal.barTime,
-      context: tradeContext(context, signal.direction, signal.barTime, session.expiry === session.date),
+      context: tradeContext(context, signal.direction, signal.barTime, session, history),
     };
   }
 
