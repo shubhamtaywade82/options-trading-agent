@@ -22,6 +22,20 @@ export interface ResearchSession {
   readonly puts: Readonly<Record<string, readonly OptionBar[]>>;
 }
 
+/**
+ * Which fetcher, parser and response layout produced a dataset (OTA-311 provenance decision). The parser and layout
+ * versions are bumped whenever either changes, so a dataset cannot be silently reinterpreted by a newer parser.
+ */
+export const ROLLING_PARSER_VERSION = 'rollingoption-v1';
+export const ROLLING_RESPONSE_SCHEMA_VERSION = 'rollingoption-layout-1';
+
+export interface DatasetProvenance {
+  /** The exact installed broker SDK version that performed the fetch. */
+  readonly sdkVersion: string;
+  readonly parserVersion: string;
+  readonly responseSchemaVersion: string;
+}
+
 export interface ResearchDataset {
   readonly version: 1;
   readonly underlying: string;
@@ -36,6 +50,8 @@ export interface ResearchDataset {
     readonly fetchedAt?: string | undefined;
     /** Same (strike, bar) seen from two ATM offsets with different OHLC. */
     readonly conflictingBars?: number | undefined;
+    /** Absent on datasets fetched before provenance was recorded. Those are not comparable to new ones without a re-fetch. */
+    readonly provenance?: DatasetProvenance | undefined;
   };
   readonly sessions: readonly ResearchSession[];
 }
@@ -78,6 +94,9 @@ const datasetSchema = z.object({
     offsets: z.number().int().nonnegative().optional(),
     fetchedAt: z.string().optional(),
     conflictingBars: z.number().int().nonnegative().optional(),
+    provenance: z
+      .object({ sdkVersion: z.string().min(1), parserVersion: z.string().min(1), responseSchemaVersion: z.string().min(1) })
+      .optional(),
   }),
   sessions: z.array(sessionSchema),
 });

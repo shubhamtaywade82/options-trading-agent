@@ -21,13 +21,24 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
 import { costsFingerprint, overlapGroupFor, priorVariantCount, UNKNOWN, type ExperimentType, type HoldoutStatus, type LedgerBody } from '../src/research/experimentLedger.js';
 import { appendToLedgerFile, LEDGER_PATH, readLedgerFile } from '../src/research/ledgerStore.js';
-import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
+import {
+  buildSessions,
+  parseDataset,
+  parseRollingOptionResponse,
+  pivotByStrike,
+  ROLLING_PARSER_VERSION,
+  ROLLING_RESPONSE_SCHEMA_VERSION,
+  type ResearchDataset,
+  type RollingBar,
+} from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
 import { createShadowTally, shadowObserver } from '../src/research/shadow.js';
@@ -43,6 +54,12 @@ const WINDOW_DAYS = 30;
  * This log keeps k countable per dataset.
  */
 const RUN_LOG = 'data/research/runs.jsonl';
+
+/** The exact SDK the fetch actually loaded, read from the installed package, not from the declared range. */
+function installedSdkVersion(): string {
+  const manifest = fileURLToPath(new URL('../node_modules/@nemesis-oss/dhanhq-sdk/package.json', import.meta.url));
+  return (JSON.parse(readFileSync(manifest, 'utf8')) as { version: string }).version;
+}
 /** Which verdict rules produced a line. Lines from before the holdout rules are not comparable to these. */
 const HOLDOUT_RULES = 'holdout-v1';
 const MAX_ATTEMPTS = 3;
@@ -207,6 +224,7 @@ async function fetchDataset(): Promise<void> {
       offsets,
       fetchedAt: new Date().toISOString(),
       conflictingBars: calls.conflicts + puts.conflicts,
+      provenance: { sdkVersion: installedSdkVersion(), parserVersion: ROLLING_PARSER_VERSION, responseSchemaVersion: ROLLING_RESPONSE_SCHEMA_VERSION },
     },
     sessions: buildSessions({ spot: uniqueSpot, calls: calls.byStrike, puts: puts.byStrike, lotSize, tickSize, fromDate, toDate }),
   };
@@ -312,7 +330,7 @@ async function runReplay(): Promise<void> {
     cells: cells?.cells.length ?? 0,
     variants_evaluated: 1,
     costs_fingerprint: costsFingerprint(costs),
-    provenance: { sdk_version: UNKNOWN, parser_version: UNKNOWN, response_schema_version: UNKNOWN },
+    provenance: provenanceOf(dataset),
     result: {
       verdict: report.verdict,
       meanR: report.overall.meanR,
@@ -372,6 +390,16 @@ function stressScenarios(base: CostModel): { label: string; costs: CostModel }[]
  * Every variant evaluated before this run, read from the committed ledger. The ledger is hash-chained, so a broken or
  * edited ledger throws here and no divisor is taken from it (docs/research/experiments.jsonl).
  */
+/** A dataset's recorded provenance, or UNKNOWN for datasets fetched before it was recorded. */
+function provenanceOf(dataset: ResearchDataset): { sdk_version: string; parser_version: string; response_schema_version: string } {
+  const provenance = dataset.source.provenance;
+  return {
+    sdk_version: provenance?.sdkVersion ?? UNKNOWN,
+    parser_version: provenance?.parserVersion ?? UNKNOWN,
+    response_schema_version: provenance?.responseSchemaVersion ?? UNKNOWN,
+  };
+}
+
 async function priorVariants(): Promise<number> {
   return priorVariantCount(await readLedgerFile(LEDGER_PATH));
 }

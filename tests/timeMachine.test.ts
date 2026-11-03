@@ -183,6 +183,16 @@ describe('research dataset validation', () => {
     assert.equal(parseDataset(JSON.parse(JSON.stringify(dataset([session(DAY)])))).sessions.length, 1);
   });
 
+  it('keeps the SDK and parser versions a dataset was fetched with, through a reload', () => {
+    const fetched = JSON.parse(JSON.stringify(dataset([session(DAY)])));
+    fetched.source = { ...fetched.source, provenance: { sdkVersion: '2.0.1', parserVersion: 'rollingoption-v1', responseSchemaVersion: 'rollingoption-layout-1' } };
+    assert.deepEqual(parseDataset(fetched).source.provenance, { sdkVersion: '2.0.1', parserVersion: 'rollingoption-v1', responseSchemaVersion: 'rollingoption-layout-1' });
+  });
+
+  it('accepts a dataset fetched before provenance was recorded, and reports none', () => {
+    assert.equal(parseDataset(JSON.parse(JSON.stringify(dataset([session(DAY)])))).source.provenance, undefined);
+  });
+
   it('refuses bars outside the session, off the grid, out of order, or on another day', () => {
     const outside = session(DAY);
     const bad = (mutate: (bars: Candle[]) => Candle[]): ResearchDataset => dataset([{ ...outside, spot: mutate([...outside.spot]) }]);
