@@ -113,13 +113,13 @@ with a ₹187k day-end drawdown and 5 days losing ₹30k or more, against ₹216
 | Verdict | Condition |
 | --- | --- |
 | `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 30 holdout trades, fewer than 30 independent holdout sessions, or more than 5% data-gap trades |
-| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; the holdout mean without its single best session is not above zero; or the verdict fails a cost stress |
-| `EDGE_SUPPORTED` | Holds on the holdout, survives removing its single best session, and holds under both cost stresses: 1% half-spread, and twice the stop slippage |
+| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; the holdout mean without its single best session is not above zero, or that session supplies more than 25% of positive net R; or the verdict fails a cost stress |
+| `EDGE_SUPPORTED` | Holds on the holdout, survives removing its single best session, stays within the 25% profit-share cap, and holds under both cost stresses: 1% half-spread, and twice the stop slippage |
 
 The holdout is the chronologically later part of the sample (`splitFraction`, 0.6 by default). The whole sample never
 decides a verdict. A whole-sample interval lets the earlier days carry the result. Cost stress can only downgrade:
 a stressed run that is not `EDGE_SUPPORTED` makes the verdict `NO_TRADE`, and no stress run can upgrade a weaker one.
-Rule version `holdout-v2` is recorded on every `runs.jsonl` line and in every ledger record. `holdout-v1` used 20 holdout sessions and had no best-session test, so its verdicts are not comparable to v2.
+Rule version `holdout-v3` is recorded on every `runs.jsonl` line and in every ledger record. `holdout-v1` used 20 holdout sessions with no best-session test. `holdout-v2` had no profit-share cap and used the holiday-shift expiry. None of the three are comparable to v3.
 
 `EDGE_SUPPORTED` means only that this sample does not contradict a positive expectancy after modelled costs. It
 does not authorise live trading. Every parameter sweep is another test on the same days: if you try k
@@ -170,8 +170,7 @@ These items cannot be verified from this environment (no broker credentials):
    expiry and expiry-day theta is in the sample. BSE agrees: on SENSEX 2026-04..09 5-minute data the median
    15:20 ATM straddle was ₹60 on Thursdays (expiry) against ₹510–970 on other weekdays; the few high Thursdays
    pair with low Wednesdays, consistent with holiday-shifted expiries. BANKNIFTY (monthly) not yet checked.
-5. **Expiry dates.** The rolling source does not return them, so the expiry-day entry cutoff is skipped (the
-   report warns). An expiry calendar per underlying would close this.
+5. **Expiry dates.** The rolling source does not return them. Each session takes its nominal expiry, the next expiry weekday on or after its date, from its own date alone. An exchange holiday on the expiry weekday is not modelled, so the session before it is NEAR rather than EXPIRY. The earlier holiday-shift rule read later sessions, which is look-ahead, and was removed.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
 
 ## Context cells (`run --cells`)

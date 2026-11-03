@@ -32,6 +32,33 @@ while the README and Time Machine docs still describe 1.3.0.
 So the order is: keep the live path safe, make the research statistics honest, and only then search for an edge. An AI
 research layer on top of a strategy set with no edge only searches noise faster.
 
+## Approvals and principles (recorded 2026-11-03)
+
+Approved: the docs-only roadmap; the exact SDK pin at `2.0.1`; the holdout rules as eligibility floors, not as a statistical
+success criterion; OTA-311 paper first, with live enforcement waiting for sign-off; and the priority order below. Further
+approved the same day: both holdout proposals, the best-session test and the five-session block floor, with a 25% cap on one
+session's share of profit added alongside them; and the look-ahead-free expiry. Not approved: any live use of all-in
+enforcement, and any change to the live risk calculation outside its policy.
+
+Priority order: OTA-106 (sandbox lifecycle record), then the research ledger and pre-registration, then OTA-307 (independent
+replay), OTA-308 (holdout validation), OTA-309 (market-context attribution), OTA-310 (previous-day completeness), OTA-311
+(all-in risk, paper first), and then OTA-312 onward (SDK, documentation and remaining verification).
+
+Three systems, kept apart:
+
+```text
+RESEARCH PLANE                       TRADING PLANE
+Generate hypotheses                  Strategy evaluation
+Deterministic replay                 Context gating
+Statistical validation               Risk management
+Human approval  ───────────────►     Option selection
+                                     Order execution
+```
+
+The research plane can propose strategies and parameters. It never changes live trading configuration or risk limits by itself,
+and a promotion needs a human decision. The trading plane is deterministic and does not depend on the language model being
+available. A `Spent` window can still describe the market, but it cannot confirm anything.
+
 ## Standing rules
 
 - **Do not tune SuperTrend, EMA, or stop/target parameters** until a pre-registered hypothesis needs them.
@@ -101,7 +128,7 @@ Out of scope here: a new order-manager or recovery module. The fixes live in the
 | --- | --- | --- | --- |
 | OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line | `research/timeMachine.ts` | Fixture test |
 | OTA-202 | **Done.** SHA-256 of the dataset file in every `runs.jsonl` line (`dataSha256`) | `scripts/timemachine.ts` | Same file and config give identical lines except `ts` |
-| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu).** `weeklyExpiryDates` derives expiry days. BANKNIFTY monthly still unverified, so no rule | `time/calendar.ts`, `research/replay.ts` | No effect on current paper config |
+| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu), revised (`3cf66f4`).** Each session takes its nominal expiry, the next expiry weekday on or after its date. The earlier holiday shift read later sessions and was removed. BANKNIFTY monthly still has no rule | `time/calendar.ts` (`nominalWeeklyExpiry`), `research/replay.ts` (`rollingWeeklyExpiry`) | `tests/timeMachine.test.ts` |
 | OTA-204 | **Revised: fresh holdout data, see OTA-314.** Chain snapshots start 2026-10-27; every stored dataset ends 2026-09-30 | — | — |
 | OTA-205 | **Done.** `run --cells --vix <file>` tags days by opening-VIX tercile | `research/contextCells.ts` | In cell report |
 
@@ -121,7 +148,7 @@ the same data and costs. The live gate and selector stay as they are until a res
 | OTA-304 | **Done, first pass, burned.** Best two 2025H cells failed on 2026H. 2026H is no longer a holdout (Fact 1) | `docs/TIME_MACHINE.md` | Logged in `HOLDOUT.md` (OTA-308) |
 | OTA-305 | If a cell passes the OTA-308 gate: gate live entry on that cell (a context allow-list in config), nothing else | `runtime/tradingGate.ts` / entry plan | Paper agent only trades in passed cells |
 | OTA-307 | **Done (`f0f98b5`).** **Independent strategy evaluation.** Research replays each family alone (`--strategy <id>`), and `--shadow` reports what first-match credited and hid. Live `evaluate()` is unchanged | `scripts/timemachine.ts`, `strategy/session.ts` (`candidates()`), `research/replay.ts` (`EntryObserver`), `research/shadow.ts` | `tests/isolation.test.ts` |
-| OTA-309 | **Done (`1a157e2`), with one open item.** **Context features, research only.** Trade context now carries `volatility` (ATR tercile of its own history), `structureAlignment`, `expiryBucket`, and `chainBias`, recorded as `UNKNOWN`. **Open:** `weeklyExpiryDates` shifts a holiday using later sessions in the same week, so `expiryBucket` and `expiryDay` can change with later data. Not fixed. **Not tested end to end:** the no-lookahead property holds by construction, because the history passed to the features ends at the signal bar, and the feature functions are tested alone | `research/tradeFeatures.ts`, `research/replay.ts` (`tradeContext`), `research/contextCells.ts` | `tests/tradeFeatures.test.ts` |
+| OTA-309 | **Done (`1a157e2`), with one open item.** **Context features, research only.** Trade context now carries `volatility` (ATR tercile of its own history), `structureAlignment`, `expiryBucket`, and `chainBias`, recorded as `UNKNOWN`. **Look-ahead fixed (`3cf66f4`):** expiry is nominal and depends on the session's own date. **Residual:** an exchange holiday on the expiry weekday is not modelled, so the session before it is NEAR, not EXPIRY. **Not tested end to end:** the no-lookahead property holds by construction, because the history passed to the features ends at the signal bar, and the feature functions are tested alone | `research/tradeFeatures.ts`, `research/replay.ts` (`tradeContext`), `research/contextCells.ts` | `tests/tradeFeatures.test.ts` |
 | OTA-310 | **Done (`1e6f417`).** **Previous-day breakout completeness.** The level comes only from a complete session on the bar grid, no more than four calendar days back. The ORB range uses the same bar-count helper. Stays research-only | `strategy/levelBreak.ts`, `time/sessionCoverage.ts`, `strategy/orbSupertrend.ts` | `tests/previousDay.test.ts` |
 
 Not now: a strategy registry with lifecycle states, a weighted scoring formula, a ranking engine. Build ranking when two
@@ -135,7 +162,7 @@ OTA-308 exist, because its result would be attributed through the first-match or
 
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
-| OTA-308 | **Done (`9b3855e` a–b, `a07afd8` c–e, `512b7d4` floors).** **Holdout discipline, as eligibility floors.** The holdout needs at least 30 out-of-sample trades and at least 30 independent sessions. The result must survive removing its single most profitable session. The holdout bootstrap blocks at least five sessions, so dependence within a trading week survives. Cost stress at 1% half-spread and 2× stop slippage can only downgrade. These floors are not statistical significance: the interval and the pre-registered hypothesis decide. Runs are labelled `holdout-v2` | `research/timeMachine.ts`, `research/contextCells.ts`, `research/stats.ts`, `docs/research/` | `tests/timeMachine.test.ts` (including a mutation check that bootstrapping the whole sample fails) |
+| OTA-308 | **Done (`9b3855e` a–b, `a07afd8` c–e, `512b7d4` floors, `3cf66f4` profit-share cap).** **Holdout discipline, as eligibility floors.** The holdout needs at least 30 out-of-sample trades and at least 30 independent sessions. The result must survive removing its single most profitable session. The holdout bootstrap blocks at least five sessions, so dependence within a trading week survives. Cost stress at 1% half-spread and 2× stop slippage can only downgrade. These floors are not statistical significance: the interval and the pre-registered hypothesis decide. Both the best-session test and a 25% cap on one session's share of positive net R must pass. Runs are labelled `holdout-v3` | `research/timeMachine.ts`, `research/contextCells.ts`, `research/stats.ts`, `docs/research/` | `tests/timeMachine.test.ts` (including a mutation check that bootstrapping the whole sample fails) |
 | OTA-313 | **Done (`c0bde8f`), superseded in its counting by OTA-315.** The divisor counts every variant, not only same-hash runs. Seeded floors are preserved as ledger backfills (see OTA-315) | `research/ledger.ts` (removed), `docs/research/experiments.jsonl` | `tests/committedLedger.test.ts` |
 | OTA-315 | **Done (`059d5c9`). Immutable research ledger.** `docs/research/experiments.jsonl` is append-only and hash-chained. Each variant is one record with its hypothesis, strategy, parameter fingerprint, dataset hash, date range, overlap group, experiment type, holdout status, cost fingerprint, provenance, result and time. Editing, removing or reordering one fails verification. A new dataset hash is a new record in the same overlap group, not a reset. A confirmation needs a registration first and a Frozen window. The 2026H confirmation is kept as a Spent backfill, never relabelled. `scripts/ledger.ts` provides `verify`, `backfill-docs`, `import` and `register` | `research/experimentLedger.ts`, `research/ledgerStore.ts`, `research/documentedEvidence.ts`, `scripts/ledger.ts` | `tests/experimentLedger.test.ts`, `tests/committedLedger.test.ts` |
 | OTA-316 | **Done (`a18a18c`).** Every fetched dataset records the installed SDK version (read from the package actually loaded), the parser version, and the response layout version. The schema declares the block, so it survives a reload. Datasets fetched before this record UNKNOWN provenance, and nothing infers it | `research/dataset.ts`, `scripts/timemachine.ts` | `tests/timeMachine.test.ts` |
