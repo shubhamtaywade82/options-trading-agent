@@ -25,6 +25,7 @@ import { dirname } from 'node:path';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
 import { contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
+import { parseLedgerSeeds, priorVariantCount } from '../src/research/ledger.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
@@ -39,6 +40,8 @@ const WINDOW_DAYS = 30;
  * This log keeps k countable per dataset.
  */
 const RUN_LOG = 'data/research/runs.jsonl';
+/** Committed, so the variants the log never recorded still count against the divisor on every machine. */
+const SEED_FILE = 'docs/research/variants-seed.json';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
@@ -255,7 +258,7 @@ async function runReplay(): Promise<void> {
     await writeFile(tradesPath, [header, ...rows].join('\n') + '\n');
   }
   const dataSha256 = createHash('sha256').update(dataText).digest('hex');
-  const cells = flag('--cells') ? await cellReport(report, dataset, dataSha256) : undefined;
+  const cells = flag('--cells') ? await cellReport(report, dataset) : undefined;
   const run = {
     ts: new Date().toISOString(),
     data: dataPath,
@@ -280,14 +283,18 @@ async function runReplay(): Promise<void> {
   }
 }
 
-/** Earlier logged runs on this exact data. Lines from before the hash was logged cannot be matched and are not counted. */
-async function priorRunsOn(dataSha256: string): Promise<number> {
+/**
+ * Every variant evaluated before this run, across the research program: each logged run whatever its dataset, plus the
+ * committed seeds. Keyed by program, not by dataset hash, so a dataset change cannot reset the multiple-testing divisor.
+ */
+async function priorVariants(): Promise<number> {
   const log = await readFile(RUN_LOG, 'utf8').catch(() => '');
-  return log.split('\n').filter((line) => line.includes(`"dataSha256":"${dataSha256}"`)).length;
+  const seeds = parseLedgerSeeds(JSON.parse(await readFile(SEED_FILE, 'utf8')));
+  return priorVariantCount(log, seeds);
 }
 
 /** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
-async function cellReport(report: TimeMachineReport, dataset: ResearchDataset, dataSha256: string): Promise<CellReport> {
+async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): Promise<CellReport> {
   const dates = dataset.sessions.map((session) => session.date);
   const vixPath = argument('--vix');
   const dayTags = vixPath === undefined ? new Map() : vixTerciles(JSON.parse(await readFile(vixPath, 'utf8')) as Candle[], dates);
@@ -296,7 +303,7 @@ async function cellReport(report: TimeMachineReport, dataset: ResearchDataset, d
     seed: DEFAULT_TIME_MACHINE_OPTIONS.seed,
     minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
     splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
-    priorRuns: await priorRunsOn(dataSha256),
+    priorRuns: await priorVariants(),
   });
 }
 

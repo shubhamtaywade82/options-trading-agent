@@ -11,7 +11,10 @@ export interface CellOptions {
   readonly seed: number;
   readonly minTrades: number;
   readonly splitFraction: number;
-  /** Earlier runs on the same dataset. Each was another look at the same days, so each multiplies the test count. */
+  /**
+   * Variants evaluated before this run across the whole research program: logged runs on any dataset, plus seeded
+   * floors (`ledger.ts`). Each was another draw from the same search, so each multiplies the test count.
+   */
   readonly priorRuns: number;
 }
 

@@ -1,0 +1,12 @@
+[
+  {
+    "description": "Exit-rule sweep: stop %, R target and time stop, NIFTY 2025-10..2026-09 (docs/TIME_MACHINE.md, ROADMAP fact 1)",
+    "variantsEvaluated": 1,
+    "note": "Floor. The sweep ran more than one variant, but the count was never recorded. Replace with the real count if the research notes recover it."
+  },
+  {
+    "description": "IV-crush exit (leave when the held strike's IV is 1.5-3 vol points below entry), NIFTY 2025-10..2026-09 and SENSEX/BANKNIFTY 2026-04..09 (docs/TIME_MACHINE.md)",
+    "variantsEvaluated": 1,
+    "note": "Floor. Tested on three underlyings and removed; the variants and their counts were not logged."
+  }
+]
