@@ -36,7 +36,7 @@ export interface ReplayConfig {
   readonly exits: AgentConfig['exits'];
   readonly capital: Pick<
     AgentConfig['capital'],
-    'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder' | 'allInRiskBudget'
+    'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder' | 'allInRiskPolicy'
   >;
 }
 
@@ -185,7 +185,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
         maxDailyLossPct: capital.maxDailyLossPct,
         maxTradesPerDay: capital.maxTradesPerDay,
         maxLotsPerOrder: capital.maxLotsPerOrder,
-        allInRiskBudget: capital.allInRiskBudget,
+        allInRiskPolicy: capital.allInRiskPolicy,
       },
     },
     divergences,
@@ -387,7 +387,7 @@ function replaySession(
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       // Sized on the all-in loss when that budget is on, so the replay risks what the live gate would allow (OTA-311).
-      ...(config.capital.allInRiskBudget
+      ...(config.capital.allInRiskPolicy === 'enforce'
         ? {
             perLotRiskInr: allInAdverseLossInr({
               quantity: session.lotSize,
@@ -414,7 +414,7 @@ function replaySession(
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
-      ...(config.capital.allInRiskBudget
+      ...(config.capital.allInRiskPolicy === 'enforce'
         ? {
             allInRiskInr: allInAdverseLossInr({
               quantity: sizing.quantity,

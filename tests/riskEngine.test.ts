@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { DayBook } from '../src/risk/dayBook.js';
-import { evaluatePreTrade, type PreTradeInput, type RiskCode } from '../src/risk/riskEngine.js';
+import { evaluatePreTrade, evaluatePreTradeUnderPolicy, type PreTradeInput, type RiskCode } from '../src/risk/riskEngine.js';
 import { istEpoch } from './support/fixtures.js';
 
 function approvedInput(overrides: Partial<PreTradeInput> = {}): PreTradeInput {
@@ -50,13 +50,27 @@ describe('evaluatePreTrade', () => {
     assert.equal(verdict.riskInr, 2250);
   });
 
-  it('refuses an order that fits the planned stop distance but not its all-in loss, and still reports planned risk (OTA-311)', () => {
-    const planned = evaluatePreTrade(approvedInput());
-    assert.equal(planned.approved, true, 'planned risk 2250 fits the 3000 budget');
-    const allIn = evaluatePreTrade(approvedInput({ allInRiskInr: 3100 }));
+  it('decides on planned risk unless the all-in basis is set, so shadow comparison never changes a decision (OTA-311)', () => {
+    const planned = evaluatePreTrade(approvedInput({ allInRiskInr: 3100 }));
+    assert.equal(planned.approved, true, 'planned risk 2250 fits the 3000 budget, whatever the all-in figure');
+    assert.equal(planned.allInRiskInr, 3100, 'the all-in figure is carried for the journal');
+    const allIn = evaluatePreTrade(approvedInput({ allInRiskInr: 3100, budgetBasis: 'ALL_IN' }));
     assert.equal(allIn.approved, false);
-    assert.ok(codes(approvedInput({ allInRiskInr: 3100 })).includes('RISK_EXCEEDS_BUDGET'));
+    assert.ok(codes(approvedInput({ allInRiskInr: 3100, budgetBasis: 'ALL_IN' })).includes('RISK_EXCEEDS_BUDGET'));
     assert.equal(allIn.riskInr, 2250, 'the verdict keeps the planned figure the sizing step reports');
+  });
+
+  it('enforces daily loss on all-in risk, and only shadows it under shadow or off (OTA-311)', () => {
+    // Planned worst case: 0 − 0 − 2250 = −2250, inside a 2300 limit. All-in worst case: −2400, outside it.
+    const base = approvedInput({ allInRiskInr: 2400, dailyLossLimitInr: 2300, realizedPnlInr: 0, openRiskInr: 0, dailyPnlInr: 0 });
+    assert.equal(evaluatePreTradeUnderPolicy(base, 'off').approved, true);
+    const shadow = evaluatePreTradeUnderPolicy(base, 'shadow');
+    assert.equal(shadow.approved, true, 'shadow never changes the decision');
+    assert.equal(shadow.allInWouldReject, true, 'but records that the all-in budget would have refused it');
+    assert.deepEqual(shadow.allInViolationCodes, ['DAILY_LOSS_AT_RISK']);
+    const enforced = evaluatePreTradeUnderPolicy(base, 'enforce');
+    assert.equal(enforced.approved, false);
+    assert.ok(enforced.violations.some((violation) => violation.code === 'DAILY_LOSS_AT_RISK'));
   });
 
   it('should refuse an entry when the open stops plus this one could breach the daily limit', () => {

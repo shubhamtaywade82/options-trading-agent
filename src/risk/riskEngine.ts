@@ -31,10 +31,12 @@ export interface PreTradeInput {
   readonly maxLotsPerOrder: number;
   readonly maxRiskInr: number;
   /**
-   * All-in adverse loss of this order: charges and stop slippage on top of the planned stop distance (OTA-311). Set only
-   * when the all-in budget is on. The budget and daily-loss checks then use the larger of this and planned risk.
+   * All-in adverse loss of this order: charges and stop slippage on top of the planned stop distance (OTA-311). Always
+   * supplied, so the shadow comparison can run. It decides only when `budgetBasis` is ALL_IN.
    */
   readonly allInRiskInr?: number;
+  /** Which risk the budget and daily-loss checks use. PLANNED unless the policy is 'enforce'. */
+  readonly budgetBasis?: 'PLANNED' | 'ALL_IN';
   readonly availableFundsInr: number;
 
   readonly nowMs: number;
@@ -81,6 +83,8 @@ export interface RiskVerdict {
   readonly violations: readonly RiskViolation[];
   /** Risk recomputed from the order's own numbers, not from the sizing step. */
   readonly riskInr: number;
+  /** The all-in adverse loss the gate was given, when there was one. */
+  readonly allInRiskInr?: number;
 }
 
 type AddViolation = (code: RiskCode, detail: string) => void;
@@ -154,7 +158,7 @@ function checkOrderPricing(input: PreTradeInput, add: AddViolation): void {
 function checkOrderSizing(input: PreTradeInput, add: AddViolation): number {
   const riskInr = input.lots * input.lotSize * (input.entryReference - input.stopLossPrice);
   // The loss the account can take is never below the planned stop distance, so the budget uses the larger of the two (OTA-311).
-  const budgetRiskInr = Math.max(riskInr, input.allInRiskInr ?? riskInr);
+  const budgetRiskInr = input.budgetBasis === 'ALL_IN' ? Math.max(riskInr, input.allInRiskInr ?? riskInr) : riskInr;
   if (budgetRiskInr > input.maxRiskInr) {
     const basis = budgetRiskInr === riskInr ? '' : ` (all-in; planned ${riskInr.toFixed(2)})`;
     add('RISK_EXCEEDS_BUDGET', `risk ${budgetRiskInr.toFixed(2)}${basis} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
@@ -197,5 +201,31 @@ export function evaluatePreTrade(input: PreTradeInput): RiskVerdict {
   checkOrderPricing(input, add);
   const riskInr = checkOrderSizing(input, add);
 
-  return { approved: violations.length === 0, violations, riskInr };
+  return {
+    approved: violations.length === 0,
+    violations,
+    riskInr,
+    ...(input.allInRiskInr === undefined ? {} : { allInRiskInr: input.allInRiskInr }),
+  };
+}
+
+/** A decision under the rollout policy, with the all-in shadow alongside it (OTA-311). */
+export interface PolicyVerdict extends RiskVerdict {
+  /** Would the all-in budget have refused this order? Recorded in every mode, so enforcement can be judged before it is turned on. */
+  readonly allInWouldReject: boolean;
+  readonly allInViolationCodes: readonly RiskCode[];
+}
+
+/**
+ * The gate under a rollout policy. 'enforce' decides on all-in risk. 'off' and 'shadow' decide on planned risk, exactly as
+ * before, and the all-in verdict is computed alongside it and returned for the journal.
+ */
+export function evaluatePreTradeUnderPolicy(input: PreTradeInput, policy: 'off' | 'shadow' | 'enforce'): PolicyVerdict {
+  const decided = evaluatePreTrade({ ...input, budgetBasis: policy === 'enforce' ? 'ALL_IN' : 'PLANNED' });
+  const shadow = input.allInRiskInr === undefined ? undefined : evaluatePreTrade({ ...input, budgetBasis: 'ALL_IN' });
+  return {
+    ...decided,
+    allInWouldReject: shadow !== undefined && !shadow.approved,
+    allInViolationCodes: shadow?.violations.map((violation) => violation.code) ?? [],
+  };
 }

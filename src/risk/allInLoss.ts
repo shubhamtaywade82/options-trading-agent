@@ -1,6 +1,12 @@
 import { roundDownToTick, roundTripChargesInr } from '../options/pricing.js';
 
 /**
+ * OTA-311 rollout. 'off' keeps planned risk and records nothing extra. 'shadow' keeps planned risk for every decision and
+ * journals the all-in figure beside it. 'enforce' sizes, gates and books open risk on the all-in figure.
+ */
+export type AllInRiskPolicy = 'off' | 'shadow' | 'enforce';
+
+/**
  * What a stop can cost beyond its planned distance (OTA-311). Once triggered, a stop fills as a market order, so the
  * exit lands below the stop by the half-spread and by the stop slippage. Both are percentages of the price.
  */

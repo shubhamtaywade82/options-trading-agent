@@ -194,7 +194,9 @@ async function compose(
     session.ledger === undefined
       ? await readJournal(config.ops.eventLogDir, dayKey, scope)
       : await restoreFromLedger(session.ledger, config.ops.eventLogDir, dayKey, scope, logger, session.secrets);
-  const restored = restoreDayBook(dayBook, lines, dayKey, adverseCostsFor(config));
+  // The restart booking follows the enforced policy. Otherwise it books planned stop distance plus charges, as it did before OTA-311.
+  const restartCosts = config.capital.allInRiskPolicy === 'enforce' ? adverseCostsFor(config) : { halfSpreadPct: 0, stopSlippagePct: 0 };
+  const restored = restoreDayBook(dayBook, lines, dayKey, restartCosts);
   logger.info('day state restored', {
     source: session.ledger === undefined ? 'journal' : 'ledger',
     eventsApplied: restored.eventsApplied,
