@@ -28,7 +28,9 @@ import { applyCostStressToCells, contextCells, formatCells, vixTerciles, type Ce
 import { parseLedgerSeeds, priorVariantCount } from '../src/research/ledger.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
-import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
+import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
+import { createShadowTally, shadowObserver } from '../src/research/shadow.js';
+import { STRATEGY_CATALOG, type StrategyId } from '../src/strategy/session.js';
 import { summarize } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type CostStressRun, type TimeMachineReport } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
@@ -241,7 +243,8 @@ async function runReplay(): Promise<void> {
   const config = offlineConfig(configPath);
   const dataText = await readFile(dataPath, 'utf8');
   const dataset = parseDataset(JSON.parse(dataText));
-  const { replay, divergences } = replayConfigFrom(config);
+  const { replay: configured, divergences } = replayConfigFrom(config);
+  const replay = strategyOverride(configured, argument('--strategy'));
   const costs = costsArgument(config);
   const options = {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
@@ -283,6 +286,7 @@ async function runReplay(): Promise<void> {
     dataQuality: report.dataQuality,
     config: configPath ?? null,
     rules: HOLDOUT_RULES,
+    strategy: argument('--strategy') ?? null,
     configFingerprint: configFingerprint(config),
     costs,
     trades: report.overall.trades,
@@ -295,9 +299,30 @@ async function runReplay(): Promise<void> {
   await mkdir(dirname(RUN_LOG), { recursive: true });
   await appendFile(RUN_LOG, `${JSON.stringify(run)}\n`);
   console.log(flag('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
+  if (flag('--shadow')) {
+    const tally = createShadowTally();
+    replayDataset(dataset, replay, costs, divergences, shadowObserver(tally));
+    console.log(`\nShadow: ${tally.entryBars} entry bars, ${tally.multiSignalBars} with two or more families signalling`);
+    console.log(`  credited by first-match: ${JSON.stringify(tally.credited)}`);
+    console.log(`  hidden by first-match:   ${JSON.stringify(tally.hidden)}`);
+  }
   if (cells !== undefined) {
     console.log(`\n${formatCells(cells)}`);
   }
+}
+
+/**
+ * `--strategy <id>` replays one family alone, so the catalogue order cannot decide which family is credited (OTA-307).
+ * The live engine is unaffected: this only changes the research replay.
+ */
+function strategyOverride(replay: ReplayConfig, id: string | undefined): ReplayConfig {
+  if (id === undefined) {
+    return replay;
+  }
+  if (!STRATEGY_CATALOG.some((row) => row.id === id)) {
+    throw new Error(`unknown strategy "${id}"; known: ${STRATEGY_CATALOG.map((row) => row.id).join(', ')}`);
+  }
+  return { ...replay, enabledStrategies: [id as StrategyId] };
 }
 
 /**

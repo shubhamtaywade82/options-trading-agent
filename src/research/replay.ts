@@ -1,5 +1,5 @@
 import type { AgentConfig } from '../config.js';
-import type { Candle, Direction, OptionSegment, OptionType } from '../domain/types.js';
+import type { Candle, Direction, OptionSegment, OptionType, Signal } from '../domain/types.js';
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { directionToOptionType, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
@@ -214,7 +214,21 @@ export function derivedExpiryDates(dataset: ResearchDataset): Set<string> | unde
   return weeklyExpiryDates(dataset.underlying, dataset.sessions.map((session) => session.date));
 }
 
-export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, costs: CostModel, divergences: readonly string[] = []): ReplayResult {
+/**
+ * Sees every bar where the replay looks for an entry: every enabled family's signal, and the one first-match credited.
+ * Research only (OTA-307). It never changes which trade is taken.
+ */
+export interface EntryObserver {
+  onEntryBar(candidates: readonly Signal[], credited: Signal | undefined): void;
+}
+
+export function replayDataset(
+  dataset: ResearchDataset,
+  config: ReplayConfig,
+  costs: CostModel,
+  divergences: readonly string[] = [],
+  observer?: EntryObserver,
+): ReplayResult {
   if (dataset.barMinutes !== config.barMinutes) {
     throw new Error(`dataset bars are ${dataset.barMinutes}-minute but BAR_MINUTES is ${config.barMinutes}`);
   }
@@ -234,7 +248,7 @@ export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, co
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
     const dated = session.expiry === undefined && expiryDates?.has(session.date) ? { ...session, expiry: session.date } : session;
-    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop);
+    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, observer);
     signals += outcome.signals;
     trades.push(...outcome.trades);
   });
@@ -250,6 +264,7 @@ function replaySession(
   strategySession: StrategySession,
   params: OrbSupertrendParams,
   drop: (code: string) => void,
+  observer: EntryObserver | undefined,
 ): { trades: ReplayTrade[]; signals: number } {
   const barMs = config.barMinutes * 60_000;
   const tick = session.tickSize;
@@ -488,6 +503,9 @@ function replaySession(
       continue;
     }
     const signal = strategySession.evaluate(history, params);
+    if (observer !== undefined) {
+      observer.onEntryBar(strategySession.candidates(history, params), signal);
+    }
     if (signal === undefined) {
       continue;
     }

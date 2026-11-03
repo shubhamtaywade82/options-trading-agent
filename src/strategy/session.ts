@@ -94,6 +94,24 @@ export class StrategySession {
     return undefined;
   }
 
+  /**
+   * Every enabled family's signal on the same bars, in catalogue order, before first-match. Research only (OTA-307):
+   * the live engine keeps `evaluate`, which returns the first hit. Each entry carries the family that produced it.
+   */
+  candidates(bars: readonly Candle[], params: OrbSupertrendParams): Array<Signal & { readonly strategy: StrategyId }> {
+    const found: Array<Signal & { readonly strategy: StrategyId }> = [];
+    for (const row of STRATEGY_CATALOG) {
+      if (!this.enabled.has(row.id)) {
+        continue;
+      }
+      const signal = this.dispatchSignal(row.id, bars, params);
+      if (signal !== undefined) {
+        found.push({ ...signal, strategy: row.id });
+      }
+    }
+    return found;
+  }
+
   private dispatchSignal(id: StrategyId, bars: readonly Candle[], params: OrbSupertrendParams): Signal | undefined {
     switch (id) {
       case 'range': return rangeSignal(bars, params, this.posture);
