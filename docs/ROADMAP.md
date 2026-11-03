@@ -1,52 +1,79 @@
 # Roadmap
 
-Where this agent goes next, in order, with the gate each step must pass. Written 2026-11-02 against `main` at
-`1202372`. It extends what exists; it is not a rewrite.
+Where this agent goes next, in order, with the gate each step must pass. Revised 2026-11-03 against `main` at
+`32874ca`. The branch `ccr-e5f824c3-nhd407` carries seven further commits (listed under Phase 1, marked on branch). It
+extends what exists; it is not a rewrite.
 
 ## Where the repository actually stands
 
-Read this before any plan. Two facts set the order of everything below.
+Read this before any plan. Four facts set the order of everything below.
 
-1. **No strategy has shown a net edge.** Time Machine runs on real option premiums for NIFTY, BANKNIFTY and
-   SENSEX (2025H2–2026H1, ~550 trades each) return mean net R between −0.004 and +0.046. The one
-   `EDGE_SUPPORTED` verdict (NIFTY 2025H) used a 0.25% half-spread; at the 1% half-spread the same family is
-   `NO_TRADE`. Exit variants (stop %, R target, time stop, IV-crush exit) moved mean R by under 0.02.
-2. **Live execution has known open defects** (below). Paper results exercise the state machine, not Dhan.
+1. **No strategy has shown a net edge, and the untouched holdout is spent.** Time Machine on NIFTY, BANKNIFTY and SENSEX
+   (2025H2–2026H1, about 550 priced trades each) returns mean net R between −0.004 and +0.046. The one
+   `EDGE_SUPPORTED` verdict (NIFTY 2025H) used a 0.25% half-spread; at 1% the same family is `NO_TRADE`. The first
+   context-cell holdout (NIFTY 2026H) passed nothing. But 2026H had already been used: exit variants (stop %, R target,
+   time stop, IV-crush exit) were tested on NIFTY 2025-10..2026-09, which contains NIFTY 2026H, and on SENSEX and
+   BANKNIFTY 2026-04..09 (`TIME_MACHINE.md`). No period in the repository's data is untouched any more. The next confirmatory test needs data collected after its
+   pre-registration (OTA-314).
+2. **Strategy attribution depends on catalogue order.** `StrategySession.evaluate` returns the first enabled strategy
+   that signals on a bar. Live and replay both use it, so a bar that would fire both range and momentum is credited to
+   range only. Per-strategy results are biased by the order of `STRATEGY_CATALOG`.
+3. **The statistics are weaker than the verdict wording suggests.** Both the Time Machine verdict and the context-cell
+   verdict take the confidence interval over the whole sample. The out-of-sample check only requires a positive mean.
+   The Time Machine's default minimum out-of-sample trade count is 10, against the 30 the paper gate requires. The
+   multiple-testing divisor counts only logged runs on the same `dataSha256`, so any change to a dataset resets it to zero.
+4. **Risk and research disagree on cost.** Sizing and the pre-trade daily-loss check use planned stop-distance risk only.
+   The replay also charges half-spread stop slippage (`stopSlippagePct` = half-spread) and round-trip charges.
 
-So the order is: close the execution defects, then find an edge with deterministic research, then automate the
-search. An AI research layer on top of a strategy set with no edge only searches noise faster.
+Two further facts. Live execution has defects closed in code but no sandbox record, so broker behaviour is still assumed
+(`docs/BROKER_CONTRACT.md`). The SDK in use is `@nemesis-oss/dhanhq-sdk` 2.0.1 (the lockfile and `package.json` range),
+while the README and Time Machine docs still describe 1.3.0.
+
+So the order is: keep the live path safe, make the research statistics honest, and only then search for an edge. An AI
+research layer on top of a strategy set with no edge only searches noise faster.
+
+## Standing rules
+
+- **Do not tune SuperTrend, EMA, or stop/target parameters** until a pre-registered hypothesis needs them.
+- **Any period used to choose, tune or diagnose a result is spent for that question.** `docs/research/HOLDOUT.md`
+  (OTA-308) records every use. A spent period can still be used for description, not for confirmation.
+- **No promotion without a pre-registration** (`docs/research/PREREG.md`, OTA-308) committed before the run it tests.
+- **Live strategy selection stays first-match** until OTA-307 has produced an isolated per-strategy result and a
+  replacement is proven by the same gates.
+- **The research plane never writes live config.** Unchanged from `docs/DECISIONS.md` ADR-001.
 
 ### External review findings, checked against the code
 
 | Finding | Status | Evidence |
 | --- | --- | --- |
 | Bracket-leg cancel treated as confirmed on request accept | Fixed in code (OTA-101) | `awaitLegsTerminal` polls the super order book for a terminal leg status; `legDetails` shape still unverified against sandbox |
-| Unconfirmed entry dropped after 10 min | Fixed in code (OTA-102) | Dropped only when the super order book shows it settled or absent; restart already refuses to start with a live broker order or unadoptable position |
+| Unconfirmed entry dropped after 10 min | Fixed in code (OTA-102) | Dropped only when the super order book shows it settled or absent; restart refuses to start with a live broker order or unadoptable position |
 | Broker kill switch: no retry or confirmation | Fixed in code (OTA-103) | Activation reads the switch back; a failure retries every 30 s and journals `broker_kill_switch_failed` (an alert) once per failure streak |
 | Feed freshness from receipt time only | Fixed in code (OTA-104) | `DhanFeed.ageMs` runs from min(receipt, exchange LTT); a lagging LTT is logged once (feed delay or fast host clock) |
-| 25/60-min bars accepted with a 15-min ORB | Fixed in code (OTA-105) | Config requires `ORB_MINUTES` to be a whole number of `BAR_MINUTES`; `sessionRange` returns no range unless every opening-range bar is present (NIFTY 2026H replay: 553 trades vs 555) |
-| Late fill while HALTED left unmanaged | Fixed | `canExit` allows `HALTED && !exitSent` (`underlyingAgent.ts:1131`) |
+| 25/60-min bars accepted with a 15-min ORB | Fixed in code (OTA-105) | Config requires `ORB_MINUTES` to be a whole number of `BAR_MINUTES`; `sessionRange` returns no range unless every opening-range bar is present |
+| Late fill while HALTED left unmanaged | Fixed | `canExit` allows `HALTED && !exitSent` (`underlyingAgent.ts`) |
 | Daily P&L gross of costs | Fixed | `closedPnl` books net of `roundTripChargesInr` |
 | Sizing on reference price under a MARKET fill | Fixed | Entry is a LIMIT at ask × (1 + buffer) and sizing uses that limit (`entryPlan.ts`) |
 | Super Order without `price` | Fixed in code | `price: order.entryReference`; wire format still unverified against sandbox |
+| Restart books an unresolved entry at zero P&L | Fixed on branch (OTA-107) | Booked at planned stop loss plus charges (`ops/dayState.ts`) |
+| Ambiguous exit SELL could be resent | Fixed on branch (OTA-108) | `exitOutcomeUnknown` blocks a second SELL until a definitive outcome (`dhan/liveExecution.ts`) |
 
 ## The plan
 
-Six phases, not eight. The proposed "Architecture" and "Tools & repositories" phases are folded in: the module
-split already exists (`dhan/ execution/ risk/ strategy/ research/ runtime/ persistence/`), and a mass move into
-`domain/ market/ strategy/ options/ ai/ …` subfolders would cost weeks and fix nothing. New code goes into the
-existing folder that owns the concern.
+Six phases, unchanged. The phase 3 gate is tighter than before, because the research must now survive a holdout that
+has not been used.
 
 | # | Phase | Gate to leave it |
 | --- | --- | --- |
-| 1 | Execution safety | Every lifecycle scenario has a failing-then-passing test; sandbox run of entry → cancel → exit |
-| 2 | Data integrity | Each research dataset has a quality report and a checksum; replay is reproducible |
-| 3 | Edge discovery | One strategy × context cell is `EDGE_SUPPORTED` out of sample at 1% half-spread |
+| 1 | Execution safety | Every lifecycle scenario has a failing-then-passing test; sandbox run of entry → cancel → exit recorded in `docs/` (OTA-106) |
+| 2 | Data integrity | Each research dataset has a quality report, a checksum and an SDK version; replay is reproducible; the multiple-testing ledger counts every variant |
+| 3 | Edge discovery | A pre-registered strategy × context cell passes the holdout gate (OTA-308): holdout-only confidence interval above zero, minimum sample and days, positive at 1% half-spread and at 2× stop slippage |
 | 4 | Paper validation | ≥ 30 paper trades of that cell, live-observed slippage within the TM cost model |
-| 5 | Supervised live | Strict caps, operator present, rollback tested |
-| 6 | Research automation (AI) | Only after phase 3 passes once by hand |
+| 5 | Supervised live | All-in risk budget (OTA-311) in force; strict caps, operator present, rollback tested |
+| 6 | Research automation (AI) | Only after phase 3 has passed once by hand, on a pre-registered hypothesis |
 
-Phases 1 and 2 can run in parallel. 3 needs 2. 4 needs 1 and 3. 6 needs 3.
+Phases 1 and 2 run in parallel. Track A (research correctness, OTA-307 to OTA-313) needs no broker credentials. Track B
+(OTA-106 and OTA-314) needs them and is run by the operator. 3 needs Track A and OTA-314. 4 needs 1 and 3. 6 needs 3.
 
 ---
 
@@ -57,56 +84,68 @@ Each item: reproduce with a failing test against the fake Dhan client, fix, reru
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
 | OTA-101 | Confirm bracket-leg cancellation by reading leg status (super order book) after `cancel`, polling until `CANCELLED`/`TRADED`; if a leg shows `TRADED`, skip the manual SELL and report the protective exit; on timeout, HALT and alert | `liveExecution.ts` `cancelBracketLegs`, `cancelBracketLegsWithRetry` | Tests: cancel accepted but leg still pending; stop fills during manual exit (no SELL sent); poll timeout halts |
-| OTA-102 | Never drop an unconfirmed entry on age alone. Resolve against order book + positions until terminal; keep the unresolved record in the event log so a restart reloads it | `liveExecution.ts` reconcile loop, `ops/eventLog.ts` | Tests: fill appears at minute 15 and is adopted; restart with an unresolved entry reloads it |
-| OTA-103 | Broker kill switch: on failure clear `brokerKillSent` so the next clock tick retries; after success read the switch status back; alert (`ops/alerts.ts`) on failure | `orchestrator.ts`, `liveExecution.ts` `engageBrokerKillSwitch` | Tests: first call rejects, second succeeds; status read-back mismatch alerts |
-| OTA-104 | Freshness on exchange time: refuse entries when `receivedAt − ltt` exceeds `feed.staleMs`, not only when no packet arrived | `dhan/feed.ts`, staleness check in `underlyingAgent.ts` | Test: steady packets with an old `ltt` mark the feed stale |
-| OTA-105 | Reject `ORB_MINUTES` not a multiple of `BAR_MINUTES`; refuse a range signal when any opening-range bar is missing | `config.ts` validation, `strategy/session.ts` | Tests: `BAR_MINUTES=25, ORB_MINUTES=15` throws; gap in ORB bars yields no signal |
-| OTA-106 | Sandbox lifecycle run: entry, partial fill if reproducible, bracket armed, manual exit with leg cancel, kill switch. Capture serialized requests and responses into `docs/` | `scripts/smoke-trade-cycle.ts` | Recorded run checked into docs; any field mismatch becomes a test |
+| OTA-102 | Never drop an unconfirmed entry on age alone. Resolve against order book + positions until terminal | `liveExecution.ts` reconcile loop | Tests: fill appears at minute 15 and is adopted; restart with an unresolved entry is refused while the broker holds it |
+| OTA-103 | Broker kill switch: retry on failure; read the switch back after success; alert on failure | `orchestrator.ts`, `liveExecution.ts` `engageBrokerKillSwitch` | Tests: first call rejects, second succeeds; status read-back mismatch alerts |
+| OTA-104 | Freshness on exchange time, not only receipt time | `dhan/feed.ts`, `underlyingAgent.ts` | Test: steady packets with an old `ltt` mark the feed stale |
+| OTA-105 | Reject `ORB_MINUTES` not a multiple of `BAR_MINUTES`; refuse a range signal when any opening-range bar is missing | `config.ts`, `strategy/orbSupertrend.ts` | Tests: `BAR_MINUTES=25, ORB_MINUTES=15` throws; gap in ORB bars yields no signal |
+| OTA-106 | **Open. Blocked on Dhan sandbox credentials.** Split in two: (a) a redacted wire recorder around every SDK call the live path makes, testable with the fake client, can be merged now; (b) the operator runs `smoke:trade` against the sandbox and checks the recording into `docs/sandbox/`. Covers entry, partial fill if reproducible, bracket armed, manual exit with leg cancel, kill switch | `scripts/smoke-trade-cycle.ts`, new recorder in `src/dhan/` | Recording checked in; every "Assumed" row in `docs/BROKER_CONTRACT.md` moves to "Recorded" or becomes a failing test |
+| OTA-107 | **On branch.** Restart books an unresolved entry at planned stop loss plus charges, never zero; a superseded unresolved entry is booked too; an unusable stop refuses startup | `ops/dayState.ts`, `runtime/underlyingAgent.ts` (journals `exchangeSegment`) | `tests/dayState.test.ts` |
+| OTA-108 | **On branch.** An exit SELL whose outcome is unknown blocks any further SELL until a definitive rejection, a no-fill terminal status, or a flat broker position | `dhan/liveExecution.ts` | `tests/liveExecution.test.ts` "ambiguous exits (failure injection)" |
+| OTA-109 | **On branch (test added; the behaviour predates it).** Restart refuses while the broker holds a live order with no position yet | `runtime/createRuntime.ts`, `orchestrator.ts` | `tests/runtime.test.ts` |
 
 Out of scope here: a new order-manager or recovery module. The fixes live in the adapter that already owns them.
 
 ### Phase 2 — Data integrity
 
-The Time Machine already prices on real premiums, splits chronologically and block-bootstraps. What it lacks is
-proof that each dataset is complete and identical across runs.
-
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
-| OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line: spot bars missing, sessions with gaps, weekdays without a session. Duplicates, bad OHLC, off-grid and out-of-order bars were already refused by `parseDataset`; `DATA_GAP` share already gates the verdict | `research/timeMachine.ts` | Fixture test. Real data: 2026H sets complete; NIFTY 2025H has one short session (63 bars, Muhurat) |
+| OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line | `research/timeMachine.ts` | Fixture test |
 | OTA-202 | **Done.** SHA-256 of the dataset file in every `runs.jsonl` line (`dataSha256`) | `scripts/timemachine.ts` | Same file and config give identical lines except `ts` |
-| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu).** `weeklyExpiryDates` derives expiry days for expiry-code-1 weekly rolling datasets, shifting to the prior session only when a later session that week proves a holiday. BANKNIFTY monthly still unverified, so no rule | `time/calendar.ts`, `research/replay.ts` | No effect on current paper config: `expiry_day_cutoff` 15:15 is after `entry_end` 14:00 |
-| OTA-204 | **Deferred.** Chain snapshots start 2026-10-27; every dataset ends 2026-09-30, so no day overlaps. Fetch Oct 27+ data first | `research/replay.ts` | — |
+| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu).** `weeklyExpiryDates` derives expiry days. BANKNIFTY monthly still unverified, so no rule | `time/calendar.ts`, `research/replay.ts` | No effect on current paper config |
+| OTA-204 | **Revised: fresh holdout data, see OTA-314.** Chain snapshots start 2026-10-27; every stored dataset ends 2026-09-30 | — | — |
 | OTA-205 | **Done.** `run --cells --vix <file>` tags days by opening-VIX tercile | `research/contextCells.ts` | In cell report |
 
-Not now: a feature registry service, Greeks engine, event-calendar feed, PostgreSQL research tables. Datasets
-are JSON files with a manifest line in `runs.jsonl`; that is enough until a query needs more.
+Not now: a feature registry service, Greeks engine, event-calendar feed, PostgreSQL research tables. Datasets are JSON
+files with a manifest line in `runs.jsonl`; that is enough until a query needs more.
 
 ### Phase 3 — Edge discovery (context-conditioned)
 
-The useful idea in the proposal is that one strategy need not work everywhere. Test it directly: tag every
-replayed trade with the context the live gate already computes (`strategy/marketContext.ts`: day trend,
-regime, structure, chain bias) plus time-of-day bucket, days-to-expiry and VIX tercile, then measure each
-strategy family (range, trend, ema_cross, momentum, continuation × scout/confirmed) per cell.
+Each strategy family (range, trend, ema_cross, momentum, continuation, prev_day) is judged alone, per context cell, on
+the same data and costs. The live gate and selector stay as they are until a result earns a change.
 
 | ID | Work | Where | Acceptance |
 | --- | --- | --- | --- |
 | OTA-301 | **Done.** Each replayed trade carries `context` (regime, trend alignment, time bucket, expiry day) | `research/replay.ts` | Test |
-| OTA-302 | **Done.** `run --cells` per-cell n, mean R, bootstrap CI, P(≤0), out-of-sample R, PF, verdict | `research/contextCells.ts` (new: `stats.ts` would pass 300 lines) | Tests |
-| OTA-303 | **Done.** Bonferroni over cells × prior runs on the same `dataSha256` | `research/contextCells.ts` | Test |
-| OTA-304 | **Done, first pass.** Runbook in `TIME_MACHINE.md`; best two 2025H cells failed on 2026H | docs | Logged runs |
-| OTA-305 | If a cell passes: gate the live entry on that cell (a context allow-list in config), nothing else | `runtime/tradingGate.ts` / entry plan | Paper agent only trades in passed cells |
+| OTA-302 | **Done.** `run --cells` per-cell n, mean R, bootstrap CI, P(≤0), out-of-sample R, PF, verdict | `research/contextCells.ts` | Tests |
+| OTA-303 | **Superseded by OTA-313.** Bonferroni divisor counted only runs on the same `dataSha256`, which resets on any dataset change | `research/contextCells.ts` | — |
+| OTA-304 | **Done, first pass, burned.** Best two 2025H cells failed on 2026H. 2026H is no longer a holdout (Fact 1) | `docs/TIME_MACHINE.md` | Logged in `HOLDOUT.md` (OTA-308) |
+| OTA-305 | If a cell passes the OTA-308 gate: gate live entry on that cell (a context allow-list in config), nothing else | `runtime/tradingGate.ts` / entry plan | Paper agent only trades in passed cells |
+| OTA-307 | **Independent strategy evaluation.** Research replays each family alone (`enabledStrategies: [id]`, which `replay.ts` already accepts), on the same dataset, costs and risk rules. A shadow report counts bars where two or more enabled families signal and shows which one first-match credited. Live `evaluate()` is unchanged | `scripts/timemachine.ts` (`--strategy <id>`, `--shadow`), `strategy/session.ts` (report-only `candidates()`), `research/replay.ts` | Fixture where range and momentum both fire on one bar: the combined run credits range, the isolated momentum run credits momentum, the shadow count is exactly 1 |
+| OTA-309 | **Context features, research only.** Add to `TradeContext`, computed from bars at or before the signal bar: volatility bucket (ATR percentile, thresholds fixed in config), structure (UP/DOWN/UNKNOWN from `marketStructure`), days to expiry (UNKNOWN where no expiry calendar exists, including BANKNIFTY monthly), opening VIX (via `--vix`). Chain bias stays UNKNOWN in replay, never NEUTRAL in new dimensions | `research/replay.ts` (`tradeContext`), `research/contextCells.ts` | No-lookahead test: features from bars truncated at the signal bar equal full-history features; UNKNOWN is reported as its own cell, not dropped |
+| OTA-310 | **Previous-day breakout completeness.** `previousDayLevels` returns no level unless the prior session is complete: bar count equals session minutes ÷ `BAR_MINUTES` (375 ÷ `BAR_MINUTES`), first bar at 09:15 IST, last bar starting at 15:30 minus `BAR_MINUTES`. The prior date is the latest one with bars, and a gap of more than four calendar days refuses the level. Shares the expected-count helper with `sessionRange`. Stays research-only | `strategy/levelBreak.ts`, `strategy/orbSupertrend.ts` (shared helper) | Tests: missing opening bars; missing closing bars; short session (the 63-bar Muhurat session in NIFTY 2025H); holiday gap accepted only within four days; no prior bars; the morning-only case from the audit (25,180 must not be used as the high) |
 
-Not now: a strategy registry with lifecycle states, a weighted scoring formula, a ranking engine. With zero
-proven cells, a config allow-list is the whole selector. Build ranking when two cells compete for the same bar.
+Not now: a strategy registry with lifecycle states, a weighted scoring formula, a ranking engine. Build ranking when two
+pre-registered cells compete for the same bar.
 
-New strategy families (VWAP reversion, squeeze breakout, PDH/PDL break, failed-breakout reversal) are added one
-at a time as functions in `strategy/session.ts`, each judged by the same per-cell report.
+New strategy families (VWAP reversion, squeeze breakout, failed-breakout reversal) are added one at a time as functions in
+`strategy/session.ts`, each pre-registered and judged by the same per-cell report. Do not add a family before OTA-307 and
+OTA-308 exist, because its result would be attributed through the first-match order.
+
+### Phase 3 research hardening (OTA-308 to OTA-313)
+
+| ID | Work | Where | Acceptance |
+| --- | --- | --- | --- |
+| OTA-308 | **Holdout discipline.** (a) `docs/research/PREREG.md`: each hypothesis, cell, metric, threshold, dataset window, committed before its run. (b) `docs/research/HOLDOUT.md`: every period and what it was used for; 2025H and 2026H recorded as spent. (c) Verdicts use the interval over **holdout trades only** (block bootstrap by day), and `EDGE_SUPPORTED` needs its lower bound above zero, not the whole-sample interval; holdout mean above zero stays. (d) Minimum holdout trades 30 (matches the paper gate) and a minimum of independent sessions (proposed 20; review before merge). (e) Cost stress is part of the verdict: rerun at 1% half-spread and 2× stop slippage | `research/timeMachine.ts`, `research/contextCells.ts`, `research/stats.ts`, docs | Tests: whole-sample interval excludes zero but holdout interval includes zero → not `EDGE_SUPPORTED`; holdout under the minimum → `INSUFFICIENT_EVIDENCE`; passing at 0.25% but failing at 1% → `NO_TRADE`. Recorded verdicts are not reinterpreted; new runs are labelled with the rule version |
+| OTA-313 | **Multiple-testing ledger.** The divisor counts every variant evaluated, keyed by family, underlying and session overlap, not by `dataSha256`. Variants that were never logged, or were logged without a hash, are seeded explicitly: the exit sweeps, the IV-exit test, the SENSEX and BANKNIFTY variants, and every run before `dataSha256` was written. Lines without a hash are counted, not skipped | `scripts/timemachine.ts` (`priorRunsOn`), `research/contextCells.ts`, new `data/research/variants-seed.json` (or a committed docs file) | Test: the same cells on a dataset with a different hash still count the earlier run; a seeded variant raises the divisor; a line without a hash is counted |
+
+Trade-off to decide in review: many cells with a fixed Bonferroni bar make each cell very hard to pass. That is intended.
+The honest response is fewer, pre-registered cells, not a looser divisor.
 
 ### Phase 4 — Paper validation
 
 | ID | Work | Acceptance |
 | --- | --- | --- |
-| OTA-401 | `report:performance` split by the same context cells, and compared to the TM expectation for that cell | Paper vs replay mean R and slippage shown side by side |
+| OTA-401 | `report:performance` split by the same context cells, compared to the TM expectation for that cell | Paper vs replay mean R and slippage shown side by side |
 | OTA-402 | Slippage distribution from paper fills vs the TM cost model | If paper slippage exceeds the model, rerun phase 3 with the observed cost |
 
 Gate: ≥ 30 trades in the passed cell; result inside the TM confidence interval.
@@ -117,27 +156,65 @@ Existing safeguards stay (live caps on risk %, `ENFORCE_DAILY_LOSS=true`, explic
 
 | ID | Work | Acceptance |
 | --- | --- | --- |
+| OTA-311 | **All-in risk budget.** Keep two values. Planned risk `qty × (entry − stop)` stays for display. All-in adverse loss `qty × (entry − (stop − stopSlippage)) + round-trip charges at the stop price` is used for `RISK_EXCEEDS_BUDGET`, `DAILY_LOSS_AT_RISK`, open risk and lot sizing. `stopSlippage` comes from the existing `maxSpreadPct / 2` the replay uses, not a new constant. One function is shared by the risk gate, the replay and the restart booking | Tests: a fixture that passes on planned risk and fails on all-in; the three call sites return the same number for the same order; sizing yields fewer lots at the same budget. Behaviour change: paper first, operator sign-off before live |
 | OTA-501 | Readiness checklist run (README "Verification required before live") with phase 1 tests and the sandbox record attached | Signed-off checklist in the journal |
 | OTA-502 | Restart drills: kill the process with an open position; with Redis down; with PostgreSQL down. Each recovers via broker reconciliation | Drill notes in `docs/PERSISTENCE.md` |
 | OTA-503 | Daily contract-note reconciliation of charges vs `roundTripChargesInr` | Difference reported by `npm run reconcile` |
 | OTA-504 | Minimum size (1 lot, one underlying) for the first 20 live trades; operator present | Live vs paper slippage compared |
 
-Monitoring already exists (cockpit, ntfy alerts, journal summary). Add an alert for each new halt reason from
-phase 1; no metrics stack until something needs a graph the cockpit cannot show.
+Monitoring already exists (cockpit, ntfy alerts, journal summary). Add an alert for each new halt reason from phase 1; no
+metrics stack until something needs a graph the cockpit cannot show.
 
 ### Phase 6 — Research automation (AI), only after phase 3 passes by hand
 
-The proposal's eight-agent research plane is the end state, not the next step. The first useful version is
-small:
+The proposal's eight-agent research plane is the end state, not the next step. The first useful version is small:
 
-1. A script that reads the per-cell report and `runs.jsonl`, asks the local Ollama model for the next
-   hypotheses (a parameter range, a filter, a new family), and writes them as config files.
-2. The deterministic Time Machine runs them; the multiple-testing counter charges every one.
+1. A script that reads the per-cell report and `runs.jsonl`, asks the local Ollama model for the next hypotheses, and
+   writes them as pre-registration entries (not as live config).
+2. The deterministic Time Machine runs them; the multiple-testing ledger (OTA-313) charges every one.
 3. A candidate becomes a pull request for the operator to read. Promotion is a human merge, not code.
 
-Fixed boundaries, unchanged from today's advisor: the model never places orders, never edits live config or risk
-limits, and generated code never runs inside the trading process. Failed hypotheses stay in `runs.jsonl` so
-they count against k and are not retried.
+Fixed boundaries, unchanged from today's advisor: the model never places orders, never edits live config or risk limits,
+and generated code never runs inside the trading process. Failed hypotheses stay in `runs.jsonl` so they count against k.
+
+### Supporting tickets
+
+| ID | Work | Where | Acceptance |
+| --- | --- | --- | --- |
+| OTA-312 | **Documentation and dependency alignment.** README lines that say `npm ci` installs 1.3.0 (it installs 2.0.1 from the lockfile) and the "exact pin" wording; `docs/TIME_MACHINE.md` and `docs/PERSISTENCE.md` SDK versions; "all five strategies" in `TIME_MACHINE.md` (five active, one research-only); the "ML-based" docstring on `adaptiveSuperTrend` in `src/market/indicators.ts`, which is an Efficiency Ratio multiplier with no learned model (no behaviour change). Decision for review: pin `@nemesis-oss/dhanhq-sdk` to exactly `2.0.1` in `package.json`, since broker behaviour depends on it | `README.md`, `docs/*.md`, `package.json`, `src/market/indicators.ts` | `npm ci` leaves `package.json`, lockfile and docs in agreement; no doc names 1.3.0 as the installed version |
+| OTA-314 | **Fresh holdout data (operator, needs credentials).** Fetch premium and spot bars from 2026-10-01 to the latest session with `--dump-raw`, check the response layout against SDK 2.0.1 (the 1.3.0-era layout is what `parseRollingOptionResponse` was written for), record `sdkVersion` in each dataset manifest, and log the period as untouched in `HOLDOUT.md`. The 2026-10-26 raw response was used for a layout check only, not for any P&L decision | `scripts/timemachine.ts`, `research/dataset.ts`, `docs/research/HOLDOUT.md` | Layout check recorded against 2.0.1; manifests carry `sdkVersion`; holdout window frozen before any pre-registered test runs on it |
+
+**Expectation to state plainly.** The repository's historical data cannot give a clean holdout any more. A fresh window of
+about a month holds roughly 46 priced trades per underlying (550 trades over the 12-month 2025H2–2026H1 window, which is
+arithmetic from those counts, not a measured rate). Split across 60 cells, most cells would hold one or two trades. A
+30-trade confirmation per cell therefore needs months of data, or far fewer pre-registered cells, pooled across
+underlyings where the rule is the same. Plan for months. Do not shorten the gate to make the calendar fit.
+
+---
+
+## PR plan
+
+Each row is one pull request, reviewed on its own. Order respects dependencies. Track B rows need credentials, so the
+operator runs them.
+
+| PR | Ticket | Scope | Depends on | Gate to merge |
+| --- | --- | --- | --- | --- |
+| 1 | OTA-312 | Docs and SDK version alignment; exact-pin decision | — | `npm run check`; no doc names 1.3.0 as installed |
+| 2 | OTA-313 | Ledger keyed by family, underlying and session overlap; seeded variants | — | Tests in OTA-313; divisor for the NIFTY 2025H first pass recomputed and shown in `HOLDOUT.md` |
+| 3 | OTA-308 a–b | `PREREG.md` and `HOLDOUT.md`, no code | — | Docs merged before any new run |
+| 4 | OTA-308 c–e | Holdout-only interval, minimum sample and days, cost stress in the verdict | 2, 3 | Tests in OTA-308; behaviour change recorded in the review |
+| 5 | OTA-307 | `--strategy` isolated replay and shadow report; report-only `candidates()` | — | Fixture test; live `evaluate()` unchanged (existing tests pass untouched) |
+| 6 | OTA-310 | Previous-session completeness, shared expected-count helper | — | Missing-data tests; `prev_day` still disabled by default |
+| 7 | OTA-309 | Context features with UNKNOWN; no-lookahead test | 2, 4 | Cell report shows UNKNOWN as its own bucket |
+| 8 | OTA-311 | All-in risk value shared by gate, replay and restart booking | — | Paper run first; operator sign-off before live config |
+| 9 | OTA-106 (a) | Redacted wire recorder around SDK calls | — | Fake-client tests; tokens never written |
+| 10 | OTA-106 (b) | Sandbox recording checked into `docs/sandbox/`; `BROKER_CONTRACT.md` updated | 9, credentials | Every "Assumed" row recorded or a failing test added |
+| 11 | OTA-314 | Fresh window fetched, layout checked on SDK 2.0.1, `sdkVersion` in manifests | 1, credentials | Holdout window frozen in `HOLDOUT.md` before any test on it |
+| 12 | Pre-registered cell run | Run the pre-registered hypothesis on the frozen window, once | 4, 7, 11 | Verdict under the OTA-308 rules, at 1% half-spread and 2× stop slippage |
+
+PRs 1 to 9 need no credentials and can start now. PR 8 changes live sizing and must not merge without operator sign-off.
+PR 12 is the first run that can produce a confirmatory result. If it fails, the hypothesis is recorded as failed in
+`runs.jsonl` and the next pre-registration starts from a new hypothesis, not from a parameter change.
 
 ---
 
@@ -145,8 +222,10 @@ they count against k and are not retried.
 
 - Option selling, spreads, futures, other brokers.
 - A `src/` restructure into new bounded-module folders.
-- New PostgreSQL research schema (11 tables), Zod schemas for every domain object, OpenTelemetry, a strategy
-  registry service. Each waits for a concrete need.
+- New PostgreSQL research schema (11 tables), Zod schemas for every domain object, OpenTelemetry, a strategy registry
+  service. Each waits for a concrete need.
+- Eight independent AI research agents, a strategy-ranking microservice, a Greeks engine before historical option data
+  justifies it, and an autonomous promotion engine.
 - Automatic promotion, automatic size scaling after profitable runs, LLM edits to live configuration.
 
 ## Decision and contract records
@@ -156,6 +235,7 @@ they count against k and are not retried.
   OTA-106 is still the gate for the live path.
 - `tests/architecture.test.ts`: enforces that research and strategy code never reach the broker, execution or runtime
   layers, and that only the two venue adapters write to the broker.
+- `docs/research/PREREG.md` and `docs/research/HOLDOUT.md`: created by PR 3 (OTA-308).
 
 ## Success measures
 
@@ -163,8 +243,10 @@ they count against k and are not retried.
 | --- | --- |
 | Silently untracked broker orders or positions | Zero, by test |
 | Kill-switch activation failures without an alert | Zero |
-| Research runs without dataset hash + config fingerprint | Zero |
+| Research runs without dataset hash, config fingerprint and SDK version | Zero |
+| Research variants not counted in the multiple-testing divisor | Zero |
+| Confirmatory runs on a period already marked spent in `HOLDOUT.md` | Zero |
 | Live trading enabled without a passed phase 3 cell | Never |
 
-Engineering correctness and trading edge are separate gates. Phase 1 can be complete and the agent still have
-no strategy worth running; on current evidence it does not yet.
+Engineering correctness and trading edge are separate gates. Phase 1 can be complete and the agent still have no strategy
+worth running; on current evidence it does not yet.
