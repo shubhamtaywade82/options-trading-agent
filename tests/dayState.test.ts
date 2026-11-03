@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { roundTripChargesInr } from '../src/options/pricing.js';
 import { restoreDayBook } from '../src/ops/dayState.js';
 import { DayBook } from '../src/risk/dayBook.js';
 import { SESSION_DAY } from './support/fixtures.js';
@@ -8,6 +9,11 @@ const line = (ts: string, type: string, extra: Record<string, unknown> = {}): st
   JSON.stringify({ ts, type, ...extra });
 
 const T = (hhmm: string, date = SESSION_DAY): string => `${date}T${hhmm}:00+05:30`;
+
+/** The fields the runtime journals with every entry_submitted line. An unresolved intent is booked at its stop. */
+const INTENT = { quantity: 75, entryReference: 100, stopLossPrice: 70 };
+/** Planned loss for INTENT: 75 × (100 − 70) at the stop, plus the estimated round-trip charges on that exit. */
+const INTENT_LOSS_INR = Number((-(75 * (100 - 70) + roundTripChargesInr({ quantity: 75, buyPrice: 100, sellPrice: 70, exchangeSegment: 'NSE_FNO' }))).toFixed(2));
 
 describe('restoreDayBook', () => {
   it('rebuilds today\'s P&L, trade count and cooldown after a restart', () => {
@@ -46,7 +52,7 @@ describe('restoreDayBook', () => {
 
   it('releases an entry that was journalled but never resolved, so it does not block the underlying', () => {
     const book = new DayBook(Date.parse(T('10:30')), 0);
-    const result = restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'BANKNIFTY' })], SESSION_DAY);
+    const result = restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'BANKNIFTY', ...INTENT })], SESSION_DAY);
     assert.deepEqual(result.releasedUnresolved, ['BANKNIFTY']);
     assert.deepEqual(book.snapshot().openUnderlyings, []);
     assert.equal(book.snapshot().tradesToday, 1, 'the attempt still counts toward the trade limit');
@@ -129,9 +135,73 @@ describe('DayBook breach latch', () => {
 describe('restoreDayBook unresolved intents', () => {
   it('starts a cooldown for an intent with no outcome, so a restart cannot re-enter at once', () => {
     const book = new DayBook(Date.parse(T('10:00')), 300_000);
-    restoreDayBook(book, [line(T('10:20'), 'entry_submitted', { underlying: 'NIFTY' })], SESSION_DAY);
+    restoreDayBook(book, [line(T('10:20'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT })], SESSION_DAY);
     assert.deepEqual(book.snapshot().openUnderlyings, [], 'it is released, so it does not block the day forever');
     assert.equal(book.cooldownUntilFor('NIFTY'), Date.parse(T('10:20')) + 300_000);
     assert.equal(book.snapshot().tradesToday, 1, 'the attempt counts toward the trade limit');
+  });
+
+  it('books an unresolved intent at its planned stop loss net of charges, never at zero, so a fill closed during the outage still counts', () => {
+    // The journal cannot tell a rejected entry from one the bracket closed while the process was down. The
+    // worst case is booked: a rejected one over-counts by one trade's planned risk, a closed one is not hidden.
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT })], SESSION_DAY);
+    assert.equal(book.snapshot().realizedPnlInr, INTENT_LOSS_INR);
+    assert.ok(INTENT_LOSS_INR < -2250, 'the booked loss includes the charges, so it is more than the gross stop loss');
+  });
+
+  it('books a superseded unresolved intent when the same underlying is entered again, so neither trade is dropped', () => {
+    const book = new DayBook(Date.parse(T('11:30')), 0);
+    restoreDayBook(
+      book,
+      [
+        line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT }),
+        line(T('10:30'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT }),
+        line(T('11:00'), 'trade_closed', { underlying: 'NIFTY', pnlInr: 300 }),
+      ],
+      SESSION_DAY,
+    );
+    assert.equal(book.snapshot().realizedPnlInr, INTENT_LOSS_INR + 300);
+    assert.deepEqual(book.snapshot().openUnderlyings, []);
+    assert.equal(book.snapshot().tradesToday, 2);
+  });
+
+  it('adds a planned loss to the daily-loss counter exactly as a realised loss would be', () => {
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    restoreDayBook(
+      book,
+      [
+        line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT }),
+        line(T('10:05'), 'trade_closed', { underlying: 'BANKNIFTY', pnlInr: 500 }),
+      ],
+      SESSION_DAY,
+    );
+    assert.equal(book.snapshot().realizedPnlInr, INTENT_LOSS_INR + 500);
+  });
+
+  it('fails closed on an unresolved intent without a usable stop, rather than booking it at zero', () => {
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    assert.throws(
+      () => restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', entryReference: 100 })], SESSION_DAY),
+      /without a usable stop/,
+    );
+  });
+
+  it('refuses an unresolved intent whose stop is at or above its entry, which has no loss to book', () => {
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    assert.throws(
+      () => restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT, stopLossPrice: 100 })], SESSION_DAY),
+      /without a usable stop/,
+    );
+  });
+
+  it('a resolved intent is not booked twice: an entry_rejected line releases it without a loss', () => {
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    restoreDayBook(
+      book,
+      [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT }), line(T('10:01'), 'entry_rejected', { underlying: 'NIFTY' })],
+      SESSION_DAY,
+    );
+    assert.equal(book.snapshot().realizedPnlInr, 0);
   });
 });

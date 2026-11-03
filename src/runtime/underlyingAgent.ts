@@ -635,6 +635,8 @@ export class UnderlyingAgent {
         this.durableRecord('entry_submitted', {
           correlationId: order.correlationId,
           contract: order.contract.symbol,
+          // Read back on restart to price an unresolved entry's charges at its own segment's rate.
+          exchangeSegment: order.contract.exchangeSegment,
           quantity: order.quantity,
           entryReference: order.entryReference,
           stopLossPrice: order.stopLossPrice,
