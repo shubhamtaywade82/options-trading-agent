@@ -1,8 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { roundTripChargesInr } from '../src/options/pricing.js';
-import { restoreDayBook } from '../src/ops/dayState.js';
+import { allInAdverseLossInr } from '../src/risk/allInLoss.js';
+import { restoreDayBook as restoreWithCosts } from '../src/ops/dayState.js';
 import { DayBook } from '../src/risk/dayBook.js';
+import type { RestoreResult } from '../src/ops/dayState.js';
 import { SESSION_DAY } from './support/fixtures.js';
 
 const line = (ts: string, type: string, extra: Record<string, unknown> = {}): string =>
@@ -10,8 +12,13 @@ const line = (ts: string, type: string, extra: Record<string, unknown> = {}): st
 
 const T = (hhmm: string, date = SESSION_DAY): string => `${date}T${hhmm}:00+05:30`;
 
+/** Charges only, with the stop filling at its level. Tests that need adverse costs pass them explicitly. */
+const ZERO_COSTS = { halfSpreadPct: 0, stopSlippagePct: 0 };
+const restoreDayBook = (book: DayBook, journal: readonly string[], dayKey: string, costs = ZERO_COSTS): RestoreResult =>
+  restoreWithCosts(book, journal, dayKey, costs);
+
 /** The fields the runtime journals with every entry_submitted line. An unresolved intent is booked at its stop. */
-const INTENT = { quantity: 75, entryReference: 100, stopLossPrice: 70 };
+const INTENT = { quantity: 75, entryReference: 100, stopLossPrice: 70, tickSize: 0.05 };
 /** Planned loss for INTENT: 75 × (100 − 70) at the stop, plus the estimated round-trip charges on that exit. */
 const INTENT_LOSS_INR = Number((-(75 * (100 - 70) + roundTripChargesInr({ quantity: 75, buyPrice: 100, sellPrice: 70, exchangeSegment: 'NSE_FNO' }))).toFixed(2));
 
@@ -203,5 +210,24 @@ describe('restoreDayBook unresolved intents', () => {
       SESSION_DAY,
     );
     assert.equal(book.snapshot().realizedPnlInr, 0);
+  });
+});
+
+describe('restoreDayBook all-in loss (OTA-311)', () => {
+  it('books an unresolved intent at its all-in loss, so adverse costs at the stop are not hidden', () => {
+    const costs = { halfSpreadPct: 1, stopSlippagePct: 1 };
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT })], SESSION_DAY, costs);
+    const expected = -allInAdverseLossInr({ quantity: 75, entryPrice: 100, stopPrice: 70, costs, tickSize: 0.05, exchangeSegment: 'NSE_FNO' });
+    assert.equal(book.snapshot().realizedPnlInr, expected);
+    assert.ok(expected < INTENT_LOSS_INR, 'a stop that fills below its level costs more than the planned distance');
+  });
+
+  it('fails closed on an unresolved intent without a tick, since the exit price cannot be rounded to the grid', () => {
+    const book = new DayBook(Date.parse(T('10:30')), 0);
+    assert.throws(
+      () => restoreDayBook(book, [line(T('10:00'), 'entry_submitted', { underlying: 'NIFTY', ...INTENT, tickSize: undefined })], SESSION_DAY),
+      /without a usable stop or tick/,
+    );
   });
 });

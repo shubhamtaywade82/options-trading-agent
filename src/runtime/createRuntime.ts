@@ -22,6 +22,7 @@ import { EventLog, journalFileName } from '../ops/eventLog.js';
 import { createAlertSink } from '../ops/alerts.js';
 import { ChainRecorder } from '../ops/chainRecorder.js';
 import { restoreDayBook } from '../ops/dayState.js';
+import { adverseCostsFor } from '../risk/allInLoss.js';
 import { DayBook } from '../risk/dayBook.js';
 import { createConsoleLogger, RingLogger, type Logger } from '../ops/logger.js';
 import { backfillDay } from '../persistence/backfill.js';
@@ -193,7 +194,7 @@ async function compose(
     session.ledger === undefined
       ? await readJournal(config.ops.eventLogDir, dayKey, scope)
       : await restoreFromLedger(session.ledger, config.ops.eventLogDir, dayKey, scope, logger, session.secrets);
-  const restored = restoreDayBook(dayBook, lines, dayKey);
+  const restored = restoreDayBook(dayBook, lines, dayKey, adverseCostsFor(config));
   logger.info('day state restored', {
     source: session.ledger === undefined ? 'journal' : 'ledger',
     eventsApplied: restored.eventsApplied,

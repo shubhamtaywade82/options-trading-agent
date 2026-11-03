@@ -61,7 +61,7 @@ const CONFIG: ReplayConfig = {
     breakevenAtRr: 1,
     runnerMode: false,
   },
-  capital: { inr: 100_000, maxRiskPerTradePct: 2, maxDailyLossPct: 5, maxTradesPerDay: 3, maxLotsPerOrder: 15 },
+  capital: { inr: 100_000, maxRiskPerTradePct: 2, maxDailyLossPct: 5, maxTradesPerDay: 3, maxLotsPerOrder: 15, allInRiskBudget: false },
 };
 
 function hhmm(minute: number): string {

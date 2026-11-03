@@ -8,6 +8,11 @@ export interface SizingInput {
   readonly stopLossPrice: number;
   readonly lotSize: number;
   readonly maxLotsPerOrder: number;
+  /**
+   * All-in adverse loss of one lot (OTA-311). When given, lots are sized on it instead of the planned stop distance, so
+   * the budget bounds what the account can lose. Charges are taken per lot, which is the conservative reading.
+   */
+  readonly perLotRiskInr?: number;
 }
 
 export interface SizingResult {
@@ -26,7 +31,7 @@ export interface SizingResult {
  */
 export function sizePosition(input: SizingInput): SizingResult {
   const riskBudgetInr = (input.capitalInr * input.maxRiskPerTradePct) / 100;
-  const riskPerLotInr = (input.entryReference - input.stopLossPrice) * input.lotSize;
+  const riskPerLotInr = input.perLotRiskInr ?? (input.entryReference - input.stopLossPrice) * input.lotSize;
   const premiumPerLotInr = input.entryReference * input.lotSize;
 
   if (!(riskPerLotInr > 0) || !(premiumPerLotInr > 0) || !Number.isFinite(riskPerLotInr)) {

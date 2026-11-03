@@ -30,6 +30,11 @@ export interface PreTradeInput {
   readonly lotSize: number;
   readonly maxLotsPerOrder: number;
   readonly maxRiskInr: number;
+  /**
+   * All-in adverse loss of this order: charges and stop slippage on top of the planned stop distance (OTA-311). Set only
+   * when the all-in budget is on. The budget and daily-loss checks then use the larger of this and planned risk.
+   */
+  readonly allInRiskInr?: number;
   readonly availableFundsInr: number;
 
   readonly nowMs: number;
@@ -148,12 +153,15 @@ function checkOrderPricing(input: PreTradeInput, add: AddViolation): void {
 
 function checkOrderSizing(input: PreTradeInput, add: AddViolation): number {
   const riskInr = input.lots * input.lotSize * (input.entryReference - input.stopLossPrice);
-  if (riskInr > input.maxRiskInr) {
-    add('RISK_EXCEEDS_BUDGET', `risk ${riskInr.toFixed(2)} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
+  // The loss the account can take is never below the planned stop distance, so the budget uses the larger of the two (OTA-311).
+  const budgetRiskInr = Math.max(riskInr, input.allInRiskInr ?? riskInr);
+  if (budgetRiskInr > input.maxRiskInr) {
+    const basis = budgetRiskInr === riskInr ? '' : ` (all-in; planned ${riskInr.toFixed(2)})`;
+    add('RISK_EXCEEDS_BUDGET', `risk ${budgetRiskInr.toFixed(2)}${basis} exceeds budget ${input.maxRiskInr.toFixed(2)}`);
   }
   // Several open positions could together breach the daily loss limit if all hit stops.
   if (input.enforceDailyLoss !== false && input.dailyLossLimitInr > 0) {
-    const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - riskInr;
+    const worstCaseDayPnl = input.realizedPnlInr - input.openRiskInr - budgetRiskInr;
     if (worstCaseDayPnl < -input.dailyLossLimitInr) {
       add(
         'DAILY_LOSS_AT_RISK',

@@ -3,6 +3,7 @@ import type { Candle, Direction, OptionSegment, OptionType, Signal } from '../do
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { directionToOptionType, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
+import { adverseCostsFor, allInAdverseLossInr, stopExitPrice } from '../risk/allInLoss.js';
 import { evaluatePreTrade } from '../risk/riskEngine.js';
 import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
@@ -33,7 +34,10 @@ export interface ReplayConfig {
   readonly entryLimitBufferPct: number;
   readonly expiryDayEntryCutoffMinute: number;
   readonly exits: AgentConfig['exits'];
-  readonly capital: Pick<AgentConfig['capital'], 'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder'>;
+  readonly capital: Pick<
+    AgentConfig['capital'],
+    'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder' | 'allInRiskBudget'
+  >;
 }
 
 /**
@@ -181,6 +185,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
         maxDailyLossPct: capital.maxDailyLossPct,
         maxTradesPerDay: capital.maxTradesPerDay,
         maxLotsPerOrder: capital.maxLotsPerOrder,
+        allInRiskBudget: capital.allInRiskBudget,
       },
     },
     divergences,
@@ -189,8 +194,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
 
 /** The widest spread the live gate accepts is MAX_SPREAD_PCT, so half of it is the worst accepted half-spread. */
 export function defaultCostModel(config: AgentConfig): CostModel {
-  const halfSpreadPct = config.contract.maxSpreadPct / 2;
-  return { halfSpreadPct, stopSlippagePct: halfSpreadPct };
+  return adverseCostsFor(config);
 }
 
 interface PendingEntry {
@@ -307,8 +311,7 @@ function replaySession(
 
   const ask = (price: number): number => roundUpToTick(price * (1 + costs.halfSpreadPct / 100), tick);
   const bid = (price: number): number => Math.max(tick, roundDownToTick(price * (1 - costs.halfSpreadPct / 100), tick));
-  const stopFill = (price: number): number =>
-    Math.max(tick, roundDownToTick(price * (1 - (costs.halfSpreadPct + costs.stopSlippagePct) / 100), tick));
+  const stopFill = (price: number): number => stopExitPrice(price, costs, tick);
 
   const close = (held: HeldPosition, exitTime: number, exitPrice: number, exitReason: ReplayExitReason, flags: { ambiguousBar?: boolean; gapThroughStop?: boolean } = {}): void => {
     const grossPnlInr = Number(((exitPrice - held.entryPrice) * held.quantity).toFixed(2));
@@ -383,6 +386,19 @@ function replaySession(
       stopLossPrice: bracket.stopLossPrice,
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
+      // Sized on the all-in loss when that budget is on, so the replay risks what the live gate would allow (OTA-311).
+      ...(config.capital.allInRiskBudget
+        ? {
+            perLotRiskInr: allInAdverseLossInr({
+              quantity: session.lotSize,
+              entryPrice: bracket.entryReference,
+              stopPrice: bracket.stopLossPrice,
+              costs,
+              tickSize: tick,
+              exchangeSegment: optionSegment,
+            }),
+          }
+        : {}),
     });
     if (sizing.lots < 1) {
       drop('RISK_BUDGET_TOO_SMALL');
@@ -398,6 +414,18 @@ function replaySession(
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
+      ...(config.capital.allInRiskBudget
+        ? {
+            allInRiskInr: allInAdverseLossInr({
+              quantity: sizing.quantity,
+              entryPrice: bracket.entryReference,
+              stopPrice: bracket.stopLossPrice,
+              costs,
+              tickSize: tick,
+              exchangeSegment: optionSegment,
+            }),
+          }
+        : {}),
       availableFundsInr: capital,
       nowMs: time,
       minuteOfDay: istParts(time).minuteOfDay,

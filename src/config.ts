@@ -77,6 +77,8 @@ export interface AgentConfig {
     readonly maxTradesPerDay: number;
     readonly maxLotsPerOrder: number;
     readonly enforceDailyLoss: boolean;
+    /** Size and gate on the all-in adverse loss (OTA-311), not the planned stop distance. Off unless enabled. */
+    readonly allInRiskBudget: boolean;
   };
   readonly contract: {
     readonly minDaysToExpiry: number;
@@ -324,6 +326,7 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
   'limits.enforce_daily_loss': 'ENFORCE_DAILY_LOSS',
+  'limits.all_in_risk_budget': 'ALL_IN_RISK_BUDGET',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
   'contract.min_days_to_expiry': 'MIN_DAYS_TO_EXPIRY',
   'contract.max_days_to_expiry': 'MAX_DAYS_TO_EXPIRY',
@@ -453,6 +456,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
       enforceDailyLoss: flag(env, 'ENFORCE_DAILY_LOSS', true),
+      allInRiskBudget: flag(env, 'ALL_IN_RISK_BUDGET', false),
     },
     contract: {
       minDaysToExpiry: number(env, 'MIN_DAYS_TO_EXPIRY', 0, { min: 0, max: 60, integer: true }),

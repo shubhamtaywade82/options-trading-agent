@@ -50,6 +50,15 @@ describe('evaluatePreTrade', () => {
     assert.equal(verdict.riskInr, 2250);
   });
 
+  it('refuses an order that fits the planned stop distance but not its all-in loss, and still reports planned risk (OTA-311)', () => {
+    const planned = evaluatePreTrade(approvedInput());
+    assert.equal(planned.approved, true, 'planned risk 2250 fits the 3000 budget');
+    const allIn = evaluatePreTrade(approvedInput({ allInRiskInr: 3100 }));
+    assert.equal(allIn.approved, false);
+    assert.ok(codes(approvedInput({ allInRiskInr: 3100 })).includes('RISK_EXCEEDS_BUDGET'));
+    assert.equal(allIn.riskInr, 2250, 'the verdict keeps the planned figure the sizing step reports');
+  });
+
   it('should refuse an entry when the open stops plus this one could breach the daily limit', () => {
     // This trade risks 2250. With 1000 already at risk the worst case is -3250 against a 3000 limit.
     assert.deepEqual(codes(approvedInput({ openRiskInr: 1000 })), ['DAILY_LOSS_AT_RISK']);
