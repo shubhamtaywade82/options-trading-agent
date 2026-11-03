@@ -76,7 +76,7 @@ not be silently forgotten.
 
 **Enforced by.** test: `tests/dayState.test.ts`; `tests/runtime.test.ts` for the broker-state refusals.
 
-## ADR-007 Research data is files with a manifest, not a schema
+## ADR-007 Research data is files with a manifest; experiment accounting is the ledger (see ADR-010)
 
 **Context.** Eleven PostgreSQL research tables would cost weeks before any query needs them.
 
@@ -118,6 +118,33 @@ not added to these types. Research reproducibility is carried by the manifest (`
 | PositionSnapshot | `OpenPosition`, `DaySnapshot` | `src/domain/types.ts`, `src/risk/dayBook.ts` |
 | Experiment | one `runs.jsonl` line | `scripts/timemachine.ts` |
 | ValidationReport | `TimeMachineVerdict` and report | `src/research/timeMachine.ts` |
+
+## ADR-010 Experiment accounting is an immutable, hash-chained ledger
+
+**Context.** A divisor that comes from a log, a seed file, or a dataset hash can be reset by changing the dataset. A new hash
+is not a new independent experiment, and the count must keep every variant ever tested.
+
+**Decision.** Every research variant is one record in `docs/research/experiments.jsonl`, committed to git. Each record carries
+its hypothesis, strategy, parameter fingerprint, dataset hash, date range, overlap group, experiment type, holdout status,
+cost fingerprint, provenance, result and creation time. Records are sealed into a hash chain, so editing, removing or
+reordering one fails verification, and no count is taken from a broken ledger. The divisor is the ledger's program-wide sum.
+A confirmation needs a registration made before it, on a Frozen window. A Spent window can only be a backfill.
+
+**Enforced by.** test: `tests/experimentLedger.test.ts`, and `tests/committedLedger.test.ts` for the committed file.
+
+## ADR-011 All-in risk is a rollout policy, not a silent change
+
+**Context.** The planned stop distance understates what a stop can cost. Replacing the live calculation without evidence would
+change real capital exposure without a test of the replacement.
+
+**Decision.** `ALL_IN_RISK_POLICY` selects `off`, `shadow` or `enforce`. Every entry journals its planned risk and its all-in
+adverse loss. `off` and `shadow` decide on planned risk, unchanged. `shadow` also records whether the all-in budget would have
+refused the entry, and paper runs in this mode. `enforce` decides on all-in risk, and in live mode it also needs
+`ALL_IN_RISK_LIVE_ACK`, an operator sign-off. Realised net losses are compared with the all-in figure by
+`scripts/risk-shadow.ts`, which counts losses that exceed it, including gaps through the stop.
+
+**Enforced by.** tests: `tests/riskEngine.test.ts` (basis and policy), `tests/riskShadow.test.ts`, `tests/config.test.ts` (the
+policy names, the paper setting and the live guard).
 
 ## Deliberately not decided yet
 

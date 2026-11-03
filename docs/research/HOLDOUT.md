@@ -28,10 +28,25 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | 2026-11-02 | NIFTY 2025H | Discovery pass, 60 cells | research |
 | 2026-11-02 | NIFTY 2026H | Single confirmation of the two best cells | research |
 | 2026-11-03 | all windows above | Recorded in this file. Exit-sweep and IV-crush windows marked as overlapping NIFTY 2026H | research |
+| 2026-11-03 | ledger | The documented evidence written to `docs/research/experiments.jsonl` as backfills, once each, with citations | research |
 
 ## What must happen before the next confirmatory run
 
 1. OTA-314: fetch the window from 2026-10-01 to the latest session, check its layout against SDK 2.0.1, record its
    `sha256` and `sdkVersion` in its manifest, and change its status to `Frozen` here, with the date.
-2. Register the hypothesis in `PREREG.md` and commit it, before the run.
-3. Run once. Record the result in `PREREG.md` and in `runs.jsonl`.
+2. Register the hypothesis in `PREREG.md`, commit it, and register it in the ledger with `npm run ledger -- register`, before the run.
+3. Run once. The run appends its record to the ledger. Record the result in `PREREG.md` with its ledger sequence number.
+
+## Preserved evidence
+
+The 2026H results are kept permanently as historical research evidence. They are not deleted, and they are not relabelled
+as an untouched holdout.
+
+- **NIFTY 2026H, confirmation of the two best 2025H cells (2026-11-02).** Mean net R −0.020 and −0.040, both NO_TRADE.
+  This window was already spent when it was checked: the exit-rule sweeps and the IV-crush test had run on NIFTY
+  2025-10..2026-09, which contains it. The result stands as the record of what happened, and stays `Spent`.
+- The ledger holds it as `doc:TIME_MACHINE.md:confirmation-2026H-spent`, a backfill with `holdout_status: Spent`, linked to
+  the overlap group of the exit sweep that covered it (`docs/research/experiments.jsonl`). `scripts/ledger.ts verify` and the
+  committed-ledger tests fail if it is removed, edited, or relabelled `Frozen`.
+- A new confirmation on NIFTY 2026H is not possible. A confirmation needs a Frozen window, and no such window exists in the
+  repository's data. The next confirmation runs on a window frozen after the fresh data is fetched (OTA-314).

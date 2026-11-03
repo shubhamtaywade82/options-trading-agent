@@ -60,8 +60,11 @@ function installedSdkVersion(): string {
   const manifest = fileURLToPath(new URL('../node_modules/@nemesis-oss/dhanhq-sdk/package.json', import.meta.url));
   return (JSON.parse(readFileSync(manifest, 'utf8')) as { version: string }).version;
 }
-/** Which verdict rules produced a line. Lines from before the holdout rules are not comparable to these. */
-const HOLDOUT_RULES = 'holdout-v1';
+/**
+ * Which verdict rules produced a line. v1 used 20 holdout sessions and no best-session test. v2 uses 30 sessions, removes
+ * the single best session, and blocks the holdout bootstrap in at least five sessions. v1 results are not comparable to v2.
+ */
+const HOLDOUT_RULES = 'holdout-v2';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
@@ -341,6 +344,7 @@ async function runReplay(): Promise<void> {
       cellsEdge: cells === undefined ? null : cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').length,
       testsCounted: cells?.testsCounted ?? null,
       evidence_id: `run:${run.ts}:${dataSha256}`,
+      rules: HOLDOUT_RULES,
     },
     source: 'scripts/timemachine.ts run',
     created_at: run.ts,
