@@ -1,7 +1,7 @@
 import type { Candle } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
 import type { ReplayResult, ReplayTrade } from './replay.js';
-import { bestSessionShare, bootstrapMeanR, chronologicalSplit, groupByDay, holdoutBlockLength, MAX_BEST_SESSION_SHARE, meanWithoutBestSession, summarize, type Interval, type TradeSample } from './stats.js';
+import { bootstrapMeanR, chronologicalSplit, dominanceTest, groupByDay, holdoutBlockLength, meanWithoutBestSession, summarize, type Interval, type TradeSample } from './stats.js';
 
 /** Extra per-day tags joined by date, such as the VIX tercile. */
 export type DayTags = ReadonlyMap<string, Readonly<Record<string, string>>>;
@@ -101,8 +101,7 @@ function judgeCell(key: string, trades: readonly ReplayTrade[], dates: readonly 
     verdict = 'INSUFFICIENT_EVIDENCE';
   } else if (bootstrap.probMeanRNonPositive < threshold && outOfSampleMeanR > 0) {
     // Robust only if the holdout mean stays positive without its single best session (OTA-308 eligibility).
-    const share = bestSessionShare(holdout);
-    const robust = (meanWithoutBestSession(holdout) ?? 0) > 0 && share !== undefined && share <= MAX_BEST_SESSION_SHARE;
+    const robust = (meanWithoutBestSession(holdout) ?? 0) > 0 && dominanceTest(holdout, options.seed).passes;
     verdict = robust ? 'EDGE_SUPPORTED' : 'NO_TRADE';
   }
   return {

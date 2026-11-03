@@ -49,7 +49,7 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
  * because a whole-sample interval lets the discovery days carry the verdict (docs/research/PREREG.md).
  * None of these authorises live trading; the live risk gate is unchanged by any result.
  */
-import { bestSessionShare, holdoutBlockLength, MAX_BEST_SESSION_SHARE, meanWithoutBestSession } from './stats.js';
+import { dominanceTest, holdoutBlockLength, meanWithoutBestSession } from './stats.js';
 
 export type TimeMachineVerdict = 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE' | 'EDGE_SUPPORTED';
 
@@ -198,9 +198,9 @@ export function runTimeMachine(
       reasons.push(`removing the single best holdout session leaves mean net R ${withoutBest ?? 'n/a'}: one session carries the result`);
     }
     // And no one session may supply more than a quarter of the holdout's profit.
-    const share = bestSessionShare(holdoutDays);
-    if (share === undefined || share > MAX_BEST_SESSION_SHARE) {
-      reasons.push(`the best holdout session supplies ${share === undefined ? 'no profit' : `${(share * 100).toFixed(1)}%`} of positive net R, above the ${MAX_BEST_SESSION_SHARE * 100}% limit`);
+    const concentration = dominanceTest(holdoutDays, options.seed);
+    if (!concentration.passes) {
+      reasons.push(`the best holdout session supplies ${concentration.share === undefined ? 'no profit' : `${(concentration.share * 100).toFixed(1)}%`} of positive net R, above the ${concentration.cap === undefined ? 'undefined' : `${(concentration.cap * 100).toFixed(1)}%`} cap derived from ${concentration.winningSessions} winning sessions`);
     }
     verdict = reasons.length > 0 ? 'NO_TRADE' : 'EDGE_SUPPORTED';
     if (verdict === 'EDGE_SUPPORTED') {

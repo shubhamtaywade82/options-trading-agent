@@ -21,7 +21,7 @@ import {
   wilsonInterval,
   type TradeSample,
 } from '../src/research/stats.js';
-import { bestSessionShare, holdoutBlockLength, meanWithoutBestSession } from '../src/research/stats.js';
+import { bestSessionShare, dominanceCap, dominanceTest, holdoutBlockLength, meanWithoutBestSession, simulatedDominanceCap } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
 import { nominalWeeklyExpiry } from '../src/time/calendar.js';
@@ -382,6 +382,35 @@ describe('statistics', () => {
     assert.equal(bestSessionShare(even), 0.25);
     const losing = groupByDay(dates, [sample(dates[0] as string, -1), sample(dates[1] as string, -2), sample(dates[2] as string, -1), sample(dates[3] as string, -1)]);
     assert.equal(bestSessionShare(losing), undefined, 'no profit, no share');
+  });
+
+  it('derives the profit-share cap from the holdout\'s own winners, so a tight holdout gets a tight cap (OTA-308)', () => {
+    // Equal winners have no spread, so the only fair share is 1/W, and any excess is dominance.
+    assert.equal(simulatedDominanceCap(10, 1, 0, 19), 1 / 10);
+    // Spread raises the cap: a dispersed set of winners can legitimately have a larger largest session.
+    const tight = simulatedDominanceCap(15, 1, 0.1, 19) ?? 0;
+    const loose = simulatedDominanceCap(15, 1, 0.6, 19) ?? 0;
+    assert.ok(tight > 1 / 15 && loose > tight, 'the cap widens with the spread');
+    // More winners lower the fair share, so the cap falls with the number of winners at a given relative spread.
+    assert.ok((simulatedDominanceCap(30, 1, 0.5, 19) ?? 1) < (simulatedDominanceCap(10, 1, 0.5, 19) ?? 0));
+    // Deterministic for a seed.
+    assert.equal(simulatedDominanceCap(15, 1, 0.5, 19), simulatedDominanceCap(15, 1, 0.5, 19));
+  });
+
+  it('passes a mildly dispersed holdout and refuses one session that carries it', () => {
+    const dates = Array.from({ length: 10 }, (_, i) => `2026-12-${String(i + 1).padStart(2, '0')}`);
+    const winners = [1.2, 1.5, 1.1, 1.4, 1.3, 1.6, 1.2, 1.5, 1.3, 1.4];
+    const mild = groupByDay(dates, winners.map((r, i) => sample(dates[i] as string, r)));
+    const mildTest = dominanceTest(mild, 19);
+    assert.equal(mildTest.passes, true, `share ${mildTest.share} within cap ${mildTest.cap}`);
+    const carried = groupByDay(dates, [...winners.slice(0, 9), 8.0].map((r, i) => sample(dates[i] as string, r)));
+    assert.equal(dominanceTest(carried, 19).passes, false, 'one 8R session is far beyond what these winners allow');
+  });
+
+  it('refuses a cap when there are fewer than two winning sessions to compare', () => {
+    assert.equal(dominanceCap([2.0], 19), undefined);
+    const dates = ['2026-12-01', '2026-12-02'];
+    assert.equal(dominanceTest(groupByDay(dates, [sample(dates[0] as string, 1), sample(dates[1] as string, -1)]), 19).passes, false);
   });
 
   it('blocks the holdout bootstrap in at least five sessions, so dependence within a trading week survives', () => {

@@ -113,8 +113,8 @@ with a ₹187k day-end drawdown and 5 days losing ₹30k or more, against ₹216
 | Verdict | Condition |
 | --- | --- |
 | `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 30 holdout trades, fewer than 30 independent holdout sessions, or more than 5% data-gap trades |
-| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; the holdout mean without its single best session is not above zero, or that session supplies more than 25% of positive net R; or the verdict fails a cost stress |
-| `EDGE_SUPPORTED` | Holds on the holdout, survives removing its single best session, stays within the 25% profit-share cap, and holds under both cost stresses: 1% half-spread, and twice the stop slippage |
+| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; the holdout mean without its single best session is not above zero, or that session supplies more than the derived cap of positive net R; or the verdict fails a cost stress |
+| `EDGE_SUPPORTED` | Holds on the holdout, survives removing its single best session, stays within the profit-share cap derived from its winning sessions (`docs/research/DOMINANCE.md`), and holds under both cost stresses: 1% half-spread, and twice the stop slippage |
 
 The holdout is the chronologically later part of the sample (`splitFraction`, 0.6 by default). The whole sample never
 decides a verdict. A whole-sample interval lets the earlier days carry the result. Cost stress can only downgrade:

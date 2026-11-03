@@ -65,7 +65,7 @@ function installedSdkVersion(): string {
  * the single best session, and blocks the holdout bootstrap in at least five sessions. v3 also caps one session's share of profit,
  * and uses the look-ahead-free expiry. v1 and v2 results are not comparable to v3.
  */
-const HOLDOUT_RULES = 'holdout-v3';
+const HOLDOUT_RULES = 'holdout-v4';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
