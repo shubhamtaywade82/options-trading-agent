@@ -25,7 +25,8 @@ import { dirname } from 'node:path';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
-import { parseLedgerSeeds, priorVariantCount } from '../src/research/ledger.js';
+import { costsFingerprint, overlapGroupFor, priorVariantCount, UNKNOWN, type ExperimentType, type HoldoutStatus, type LedgerBody } from '../src/research/experimentLedger.js';
+import { appendToLedgerFile, LEDGER_PATH, readLedgerFile } from '../src/research/ledgerStore.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
@@ -42,8 +43,6 @@ const WINDOW_DAYS = 30;
  * This log keeps k countable per dataset.
  */
 const RUN_LOG = 'data/research/runs.jsonl';
-/** Committed, so the variants the log never recorded still count against the divisor on every machine. */
-const SEED_FILE = 'docs/research/variants-seed.json';
 /** Which verdict rules produced a line. Lines from before the holdout rules are not comparable to these. */
 const HOLDOUT_RULES = 'holdout-v1';
 const MAX_ATTEMPTS = 3;
@@ -296,6 +295,39 @@ async function runReplay(): Promise<void> {
       ? {}
       : { cells: { tests: cells.testsCounted, edge: cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').map((cell) => cell.key) } }),
   };
+  // The ledger record is written before the local log line. A refused run (for example, a confirmation without a registration) writes neither.
+  const range = { from: report.fromDate ?? null, to: report.toDate ?? null, label: argument('--label') ?? null };
+  const existing = await readLedgerFile(LEDGER_PATH);
+  const ledgerBody: LedgerBody = {
+    record_kind: 'experiment',
+    hypothesis_id: argument('--hypothesis') ?? null,
+    strategy_id: argument('--strategy') ?? 'configured-set',
+    parameter_fingerprint: configFingerprint(config),
+    dataset_hash: dataSha256,
+    underlying: dataset.underlying,
+    date_range: range,
+    overlap_group: overlapGroupFor(existing, dataset.underlying, range),
+    experiment_type: (argument('--type') ?? 'discovery') as ExperimentType,
+    holdout_status: (argument('--holdout') ?? 'NotHoldout') as HoldoutStatus,
+    cells: cells?.cells.length ?? 0,
+    variants_evaluated: 1,
+    costs_fingerprint: costsFingerprint(costs),
+    provenance: { sdk_version: UNKNOWN, parser_version: UNKNOWN, response_schema_version: UNKNOWN },
+    result: {
+      verdict: report.verdict,
+      meanR: report.overall.meanR,
+      trades: report.overall.trades,
+      holdoutTrades: report.outOfSample.trades,
+      holdoutInterval95: report.bootstrap?.meanRCi95 ?? null,
+      costStress: stresses.map((stress) => ({ label: stress.label, verdict: stress.report.verdict })),
+      cellsEdge: cells === undefined ? null : cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').length,
+      testsCounted: cells?.testsCounted ?? null,
+      evidence_id: `run:${run.ts}:${dataSha256}`,
+    },
+    source: 'scripts/timemachine.ts run',
+    created_at: run.ts,
+  };
+  await appendToLedgerFile(LEDGER_PATH, ledgerBody);
   await mkdir(dirname(RUN_LOG), { recursive: true });
   await appendFile(RUN_LOG, `${JSON.stringify(run)}\n`);
   console.log(flag('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
@@ -337,13 +369,11 @@ function stressScenarios(base: CostModel): { label: string; costs: CostModel }[]
 }
 
 /**
- * Every variant evaluated before this run, across the research program: each logged run whatever its dataset, plus the
- * committed seeds. Keyed by program, not by dataset hash, so a dataset change cannot reset the multiple-testing divisor.
+ * Every variant evaluated before this run, read from the committed ledger. The ledger is hash-chained, so a broken or
+ * edited ledger throws here and no divisor is taken from it (docs/research/experiments.jsonl).
  */
 async function priorVariants(): Promise<number> {
-  const log = await readFile(RUN_LOG, 'utf8').catch(() => '');
-  const seeds = parseLedgerSeeds(JSON.parse(await readFile(SEED_FILE, 'utf8')));
-  return priorVariantCount(log, seeds);
+  return priorVariantCount(await readLedgerFile(LEDGER_PATH));
 }
 
 /** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
