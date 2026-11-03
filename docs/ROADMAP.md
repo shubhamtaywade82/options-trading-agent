@@ -149,6 +149,14 @@ they count against k and are not retried.
   registry service. Each waits for a concrete need.
 - Automatic promotion, automatic size scaling after profitable runs, LLM edits to live configuration.
 
+## Decision and contract records
+
+- `docs/DECISIONS.md`: architecture decisions, each with the test or review step that enforces it.
+- `docs/BROKER_CONTRACT.md`: every broker touchpoint with its evidence level. Nothing is recorded from a sandbox yet, so
+  OTA-106 is still the gate for the live path.
+- `tests/architecture.test.ts`: enforces that research and strategy code never reach the broker, execution or runtime
+  layers, and that only the two venue adapters write to the broker.
+
 ## Success measures
 
 | Measure | Target |
