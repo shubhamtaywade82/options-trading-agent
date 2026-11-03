@@ -7,7 +7,7 @@ import { SeededRng } from '../src/research/rng.js';
 import type { TrailSpec } from '../src/exits/trail.js';
 import { STUDY_GRID } from '../src/research/trailGrid.js';
 import { capture, dailyDeltas, holm, pairedBootstrap, realityCheck, walkForward, walkForwardFolds } from '../src/research/trailStats.js';
-import { aggregateDataset, fineBarsFor, freezeEntries, type FineBars } from '../src/research/studyEntries.js';
+import { aggregateDataset, atBarMinutes, fineBarsFor, freezeEntries, type FineBars } from '../src/research/studyEntries.js';
 import { exitPath, type StudyOptions } from '../src/research/trailStudy.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
@@ -202,6 +202,11 @@ describe('1-minute granularity', () => {
       { time: t0, open: 10, high: 15, low: 8, close: 9, volume: 15 },
       { time: t0 + 300_000, open: 9, high: 10, low: 9, close: 10, volume: 5 },
     ]);
+  });
+
+  it('should pass a dataset through at its own bar size and refuse a size it cannot rebuild', () => {
+    assert.equal(atBarMinutes(DATASET, 5), DATASET);
+    assert.throws(() => atBarMinutes(DATASET, 7), /cannot be rebuilt/);
   });
 
   it('should group a 1-minute session into its 5-minute bars', () => {

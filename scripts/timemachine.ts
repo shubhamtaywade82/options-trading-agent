@@ -27,6 +27,7 @@ import type { Candle, OptionType } from '../src/domain/types.js';
 import { contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
+import { atBarMinutes } from '../src/research/studyEntries.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
 import { summarize } from '../src/research/stats.js';
 import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type TimeMachineReport } from '../src/research/timeMachine.js';
@@ -235,8 +236,8 @@ async function runReplay(): Promise<void> {
   const configPath = argument('--config');
   const config = offlineConfig(configPath);
   const dataText = await readFile(dataPath, 'utf8');
-  const dataset = parseDataset(JSON.parse(dataText));
   const { replay, divergences } = replayConfigFrom(config);
+  const dataset = atBarMinutes(parseDataset(JSON.parse(dataText)), replay.barMinutes);
   const costs = costsArgument(config);
   const report = runTimeMachine(dataset, replay, costs, divergences, {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
@@ -313,7 +314,7 @@ async function runPortfolio(): Promise<void> {
   const trades: PortfolioTrade[] = [];
   const dates = new Set<string>();
   for (const dataPath of dataPaths) {
-    const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
+    const dataset = atBarMinutes(parseDataset(JSON.parse(await readFile(dataPath, 'utf8'))), replay.barMinutes);
     const result = replayDataset(dataset, unlimited, costs);
     result.dates.forEach((date) => dates.add(date));
     trades.push(...result.trades.filter((trade) => trade.exitReason !== 'DATA_GAP').map((trade) => ({ ...trade, underlying: dataset.underlying })));

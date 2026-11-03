@@ -75,3 +75,18 @@ export function aggregateDataset(dataset: ResearchDataset, minutes: number): Res
   const sessions = dataset.sessions.map((session) => ({ ...session, spot: aggregate(session.spot, barMs), calls: byStrike(session.calls), puts: byStrike(session.puts) }));
   return { ...dataset, barMinutes: minutes, sessions };
 }
+
+/**
+ * A dataset at `minutes`-minute bars: as is when it already is, rebuilt when it is a finer whole divisor. 5-minute
+ * rolling-option bars mix two strikes whenever spot crosses a strike inside the bar (docs/TRAILING_STOPS.md §12.2), so
+ * 5-minute research should be rebuilt from 1-minute fetches.
+ */
+export function atBarMinutes(dataset: ResearchDataset, minutes: number): ResearchDataset {
+  if (dataset.barMinutes === minutes) {
+    return dataset;
+  }
+  if (minutes % dataset.barMinutes !== 0) {
+    throw new Error(`dataset bars are ${dataset.barMinutes}-minute and cannot be rebuilt as ${minutes}-minute bars`);
+  }
+  return aggregateDataset(dataset, minutes);
+}

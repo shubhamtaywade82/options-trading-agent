@@ -20,7 +20,7 @@ import { parseDataset, type ResearchDataset } from '../src/research/dataset.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from '../src/research/replay.js';
 import { STUDY_GRID } from '../src/research/trailGrid.js';
 import { capture, dailyDeltas, dayNetDeltas, holm, pairedBootstrap, realityCheck, walkForward, type PolicyTrades } from '../src/research/trailStats.js';
-import { aggregateDataset, fineBarsFor, freezeEntries } from '../src/research/studyEntries.js';
+import { aggregateDataset, atBarMinutes, fineBarsFor, freezeEntries } from '../src/research/studyEntries.js';
 import type { TrailSpec } from '../src/exits/trail.js';
 import { exitPath, type StudyEntry, type StudyOptions, type StudyTrade } from '../src/research/trailStudy.js';
 
@@ -68,7 +68,7 @@ async function loadEntries(paths: readonly string[], replay: ReplayConfig, costs
   for (const path of paths) {
     const text = await readFile(path, 'utf8');
     hashes.push(createHash('sha256').update(text).digest('hex'));
-    const dataset = parseDataset(JSON.parse(text));
+    const dataset = atBarMinutes(parseDataset(JSON.parse(text)), replay.barMinutes);
     datasets.push(dataset);
     const frozen = freezeEntries(dataset, replayDataset(dataset, replay, costs).trades, replay.warmupSessions);
     for (const entry of frozen.filter((e) => e.trade.exitReason !== 'DAILY_LOSS')) {

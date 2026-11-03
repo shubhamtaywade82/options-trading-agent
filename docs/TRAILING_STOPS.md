@@ -822,6 +822,15 @@ started.
 
 **Verdict: keep B1.** No method is promoted. HMA 9 stays a lead for later work on entries, not an exit to wire live.
 
+### 12.2 Clean data (2026-11-03)
+
+The disagreement found in §12.1 is a defect in the 5-minute fetches: their bars mix two strikes whenever spot crosses
+a strike inside the bar (docs/TIME_MACHINE.md, "Defect"). On the clean 1-minute NIFTY 2026H1 data rebuilt as 5-minute
+bars (run 1 on that data, months before 2026-08), B1 capture is −27.3% and no configuration comes close to passing:
+the best Holm p is 0.46, and HMA 9 is not among the leaders. HMA 9's lead in §12 came largely from the fake highs and
+lows. The §12 verdict stands, now for a firmer reason. The full study must be rerun on 1-minute fetches of every index
+before any exit result is quoted.
+
 ## 13. The external specification (ChatGPT, pasted 2026-11-03)
 
 A second, longer specification for the same 18 methods was pasted in. It agrees with this one on the important
@@ -846,5 +855,6 @@ hybrids, costs, walk-forward, multiple-testing correction, and research before l
 2. Done (§12.1): coupled replay and 1-minute check. HMA 9 fails gate 5; nothing is promoted and the holdout is unspent.
 3. The fixed-entry harness is the reusable part: when the entries change (new strategy, new filters), rerun
    `npm run trail-study` and then `--coupled --fine` on the leaders before any live work.
-4. Data: the 5-minute and 1-minute NIFTY fetches disagree on 21% of bar opens. Before more research on these files,
-   find out which fetch is right (compare a sample against Dhan's intraday chart for the held strike).
+4. Data: settled (§12.2). Re-fetch NIFTY 2025-10..2026-03, BANKNIFTY and SENSEX 2026-04..09 at `--interval 1`
+   (about 230 MB per index-half-year), outside market hours, with the token shared from algo_scalper_api so no new
+   login invalidates it. Then rerun the Time Machine and this study on them.
