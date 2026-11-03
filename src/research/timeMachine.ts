@@ -26,6 +26,8 @@ export interface TimeMachineOptions {
   readonly maxDataGapRate: number;
   readonly minTrades: number;
   readonly minOutOfSampleTrades: number;
+  /** Independent sessions the holdout must span before the interval can decide anything. */
+  readonly minHoldoutDays: number;
 }
 
 export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAlarmInr'> = {
@@ -35,13 +37,16 @@ export const DEFAULT_TIME_MACHINE_OPTIONS: Omit<TimeMachineOptions, 'drawdownAla
   splitFraction: 0.6,
   maxDataGapRate: 0.05,
   minTrades: MIN_TRADES_TO_JUDGE,
-  minOutOfSampleTrades: 10,
+  minOutOfSampleTrades: 30,
+  minHoldoutDays: 20,
 };
 
 /**
  * INSUFFICIENT_EVIDENCE: too few trades or too much missing data to say anything.
  * NO_TRADE: enough data, and it does not support a positive expectancy after costs.
- * EDGE_SUPPORTED: the bootstrap interval of mean net R excludes zero and the out-of-sample days are positive.
+ * EDGE_SUPPORTED: on the holdout (the chronologically later days), the block-bootstrap interval of mean net R excludes
+ * zero and the holdout mean is positive, with enough holdout trades and sessions. The whole sample never decides it,
+ * because a whole-sample interval lets the discovery days carry the verdict (docs/research/PREREG.md).
  * None of these authorises live trading; the live risk gate is unchanged by any result.
  */
 export type TimeMachineVerdict = 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE' | 'EDGE_SUPPORTED';
@@ -98,6 +103,31 @@ export interface TimeMachineReport {
   readonly trades: readonly ReplayTrade[];
 }
 
+export interface CostStressRun {
+  readonly label: string;
+  readonly report: TimeMachineReport;
+}
+
+/**
+ * Cost stress is part of the verdict, and it can only downgrade. An EDGE_SUPPORTED result stands only if the same
+ * rules also return EDGE_SUPPORTED under every stressed cost model. Otherwise the verdict is NO_TRADE, with the failing
+ * scenarios named. A stress run that is not EDGE_SUPPORTED never upgrades a weaker result.
+ */
+export function applyCostStress(base: TimeMachineReport, stresses: readonly CostStressRun[]): TimeMachineReport {
+  if (base.verdict !== 'EDGE_SUPPORTED') {
+    return base;
+  }
+  const failed = stresses.filter((stress) => stress.report.verdict !== 'EDGE_SUPPORTED');
+  if (failed.length === 0) {
+    return { ...base, reasons: [...base.reasons, ...stresses.map((stress) => `holds under cost stress "${stress.label}"`)] };
+  }
+  return {
+    ...base,
+    verdict: 'NO_TRADE',
+    reasons: [...base.reasons, ...failed.map((stress) => `fails cost stress "${stress.label}": ${stress.report.verdict}`)],
+  };
+}
+
 function toSample(trade: ReplayTrade): TradeSample {
   return { date: trade.date, netPnlInr: trade.netPnlInr, r: trade.r, exitReason: trade.exitReason };
 }
@@ -119,7 +149,9 @@ export function runTimeMachine(
   const overall = summarize(samples, days.length);
   const inSample = summarize(flatten(split.inSample), split.inSample.length);
   const outOfSample = summarize(flatten(split.outOfSample), split.outOfSample.length);
-  const bootstrap = days.length > 0 && samples.length > 0 ? bootstrapMeanR(days, { iterations: options.iterations, seed: options.seed }) : undefined;
+  // The interval is judged on the holdout only. Judging it on the whole sample let the discovery days carry the verdict.
+  const holdoutDays = split.outOfSample;
+  const bootstrap = holdoutDays.length > 0 && outOfSample.trades > 0 ? bootstrapMeanR(holdoutDays, { iterations: options.iterations, seed: options.seed }) : undefined;
   const paths =
     days.length > 0 && samples.length > 0
       ? simulatePaths(days, { paths: options.iterations, seed: options.seed, horizonDays: options.horizonDays, drawdownAlarmInr: options.drawdownAlarmInr })
@@ -138,6 +170,9 @@ export function runTimeMachine(
   if (outOfSample.trades < options.minOutOfSampleTrades) {
     reasons.push(`${outOfSample.trades} out-of-sample trades, below the ${options.minOutOfSampleTrades} needed`);
   }
+  if (holdoutDays.length < options.minHoldoutDays) {
+    reasons.push(`${holdoutDays.length} independent holdout sessions, below the ${options.minHoldoutDays} needed`);
+  }
   if (priced.length > 0 && ambiguousBarTrades / priced.length > 0.2) {
     warnings.push(`${ambiguousBarTrades} of ${priced.length} trades had a bar touching both stop and target, all counted as stops: 5-minute bars are too coarse for this bracket`);
   }
@@ -150,14 +185,14 @@ export function runTimeMachine(
     verdict = 'INSUFFICIENT_EVIDENCE';
   } else {
     if (bootstrap === undefined || bootstrap.meanRCi95.low <= 0) {
-      reasons.push(`95% interval of mean net R is ${bootstrap?.meanRCi95.low ?? 'n/a'} to ${bootstrap?.meanRCi95.high ?? 'n/a'}: its lower bound is not above zero`);
+      reasons.push(`holdout 95% interval of mean net R is ${bootstrap?.meanRCi95.low ?? 'n/a'} to ${bootstrap?.meanRCi95.high ?? 'n/a'}: its lower bound is not above zero`);
     }
     if (outOfSample.meanR <= 0) {
       reasons.push(`out-of-sample mean net R is ${outOfSample.meanR}: the later days do not hold up`);
     }
     verdict = reasons.length > 0 ? 'NO_TRADE' : 'EDGE_SUPPORTED';
     if (verdict === 'EDGE_SUPPORTED') {
-      reasons.push(`95% interval of mean net R ${bootstrap?.meanRCi95.low} to ${bootstrap?.meanRCi95.high}, out-of-sample mean net R ${outOfSample.meanR}`);
+      reasons.push(`holdout 95% interval of mean net R ${bootstrap?.meanRCi95.low} to ${bootstrap?.meanRCi95.high}, holdout mean net R ${outOfSample.meanR}`);
     }
   }
 
@@ -218,7 +253,7 @@ export function formatReport(report: TimeMachineReport): string {
   if (report.bootstrap !== undefined) {
     const b = report.bootstrap;
     lines.push(
-      `Block bootstrap (${b.iterations} resamples of days, block ${b.blockLength}, seed ${b.seed}): how sure is the mean?`,
+      `Block bootstrap on the holdout (${b.iterations} resamples of days, block ${b.blockLength}, seed ${b.seed}): how sure is the mean?`,
       `  mean net R 95% interval ${b.meanRCi95.low} to ${b.meanRCi95.high}; P(mean ≤ 0) ${pct(b.probMeanRNonPositive)}`,
     );
   }

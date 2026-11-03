@@ -24,13 +24,13 @@ import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
-import { contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
+import { applyCostStressToCells, contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
 import { parseLedgerSeeds, priorVariantCount } from '../src/research/ledger.js';
 import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
 import { summarize } from '../src/research/stats.js';
-import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type TimeMachineReport } from '../src/research/timeMachine.js';
+import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type CostStressRun, type TimeMachineReport } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
 
 /** Dhan's intraday chart window is 90 days and the rolling-option one 180; 30-day windows stay well inside both. */
@@ -42,6 +42,8 @@ const WINDOW_DAYS = 30;
 const RUN_LOG = 'data/research/runs.jsonl';
 /** Committed, so the variants the log never recorded still count against the divisor on every machine. */
 const SEED_FILE = 'docs/research/variants-seed.json';
+/** Which verdict rules produced a line. Lines from before the holdout rules are not comparable to these. */
+const HOLDOUT_RULES = 'holdout-v1';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
@@ -241,14 +243,21 @@ async function runReplay(): Promise<void> {
   const dataset = parseDataset(JSON.parse(dataText));
   const { replay, divergences } = replayConfigFrom(config);
   const costs = costsArgument(config);
-  const report = runTimeMachine(dataset, replay, costs, divergences, {
+  const options = {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
     seed: numberArgument('--seed', DEFAULT_TIME_MACHINE_OPTIONS.seed, (value) => Number.isInteger(value) && value >= 0 && value < 2 ** 32),
     iterations: numberArgument('--iterations', DEFAULT_TIME_MACHINE_OPTIONS.iterations, (value) => Number.isInteger(value) && value >= 100 && value <= 1_000_000),
     horizonDays: numberArgument('--horizon', DEFAULT_TIME_MACHINE_OPTIONS.horizonDays, (value) => Number.isInteger(value) && value >= 1),
     splitFraction: numberArgument('--split', DEFAULT_TIME_MACHINE_OPTIONS.splitFraction, (value) => value > 0 && value < 1),
     drawdownAlarmInr: numberArgument('--drawdown-alarm', (config.capital.inr * config.capital.maxDailyLossPct) / 100, (value) => value > 0),
-  });
+  };
+  const baseReport = runTimeMachine(dataset, replay, costs, divergences, options);
+  // The verdict must survive every stressed cost model before it can stand (OTA-308).
+  const stresses: CostStressRun[] = stressScenarios(costs).map(({ label, costs: stressed }) => ({
+    label,
+    report: runTimeMachine(dataset, replay, stressed, divergences, options),
+  }));
+  const report = applyCostStress(baseReport, stresses);
   const tradesPath = argument('--trades');
   if (tradesPath !== undefined) {
     const header = 'date,strategy,direction,optionType,strike,entryTime,exitTime,entryPrice,exitPrice,lots,quantity,riskInr,grossPnlInr,chargesInr,netPnlInr,r,exitReason,ambiguousBar,gapThroughStop';
@@ -258,7 +267,14 @@ async function runReplay(): Promise<void> {
     await writeFile(tradesPath, [header, ...rows].join('\n') + '\n');
   }
   const dataSha256 = createHash('sha256').update(dataText).digest('hex');
-  const cells = flag('--cells') ? await cellReport(report, dataset) : undefined;
+  const cellsBase = flag('--cells') ? await cellReport(baseReport, dataset) : undefined;
+  const cells =
+    cellsBase === undefined
+      ? undefined
+      : applyCostStressToCells(
+          cellsBase,
+          await Promise.all(stresses.map(async (stress) => ({ label: stress.label, report: await cellReport(stress.report, dataset) }))),
+        );
   const run = {
     ts: new Date().toISOString(),
     data: dataPath,
@@ -266,6 +282,7 @@ async function runReplay(): Promise<void> {
     dataSha256,
     dataQuality: report.dataQuality,
     config: configPath ?? null,
+    rules: HOLDOUT_RULES,
     configFingerprint: configFingerprint(config),
     costs,
     trades: report.overall.trades,
@@ -281,6 +298,17 @@ async function runReplay(): Promise<void> {
   if (cells !== undefined) {
     console.log(`\n${formatCells(cells)}`);
   }
+}
+
+/**
+ * The cost stresses a verdict must survive (OTA-308): a 1% half-spread, and twice the stop slippage. Each is at least
+ * the base cost, so a stress can only make the test harder.
+ */
+function stressScenarios(base: CostModel): { label: string; costs: CostModel }[] {
+  return [
+    { label: 'half-spread 1%', costs: { ...base, halfSpreadPct: Math.max(1, base.halfSpreadPct), stopSlippagePct: Math.max(1, base.stopSlippagePct) } },
+    { label: 'stop slippage 2x', costs: { ...base, stopSlippagePct: 2 * base.stopSlippagePct } },
+  ];
 }
 
 /**
@@ -303,6 +331,7 @@ async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): 
     seed: DEFAULT_TIME_MACHINE_OPTIONS.seed,
     minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
     splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
+    minHoldoutDays: DEFAULT_TIME_MACHINE_OPTIONS.minHoldoutDays,
     priorRuns: await priorVariants(),
   });
 }

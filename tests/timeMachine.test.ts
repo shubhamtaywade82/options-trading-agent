@@ -21,8 +21,8 @@ import {
   wilsonInterval,
   type TradeSample,
 } from '../src/research/stats.js';
-import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
-import { contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
+import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
+import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
 import { weeklyExpiryDates } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
@@ -410,7 +410,7 @@ describe('weekly expiry calendar', () => {
 });
 
 describe('context cells', () => {
-  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0 };
+  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0, minHoldoutDays: 20 };
 
   it('tags each replayed trade with the context at its signal', () => {
     const result = replayDataset(dataset([session(DAY, { '10:00': [10, 16.5, 10, 16] })]), CONFIG, NO_COSTS);
@@ -422,10 +422,10 @@ describe('context cells', () => {
   });
 
   it('reports each strategy per context value, and corrects the bar for every cell tested', () => {
-    const result = replayDataset(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const result = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
     const report = contextCells(result, new Map(), options);
     const open = report.cells.find((cell) => cell.key === 'range | timeBucket=OPEN');
-    assert.equal(open?.trades, 50);
+    assert.equal(open?.trades, 80);
     assert.equal(open?.verdict, 'EDGE_SUPPORTED');
     assert.equal(report.testsCounted, report.cells.length);
     assert.match(formatCells(report), /range \| timeBucket=OPEN/);
@@ -435,6 +435,24 @@ describe('context cells', () => {
     const result = replayDataset(dataset(days(10, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
     const report = contextCells(result, new Map(), options);
     assert.ok(report.cells.every((cell) => cell.verdict === 'INSUFFICIENT_EVIDENCE'));
+  });
+
+  it('says INSUFFICIENT_EVIDENCE for a cell whose holdout spans too few sessions, even with enough trades', () => {
+    const result = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const report = contextCells(result, new Map(), { ...options, minHoldoutDays: 50 });
+    assert.ok(report.cells.every((cell) => cell.verdict === 'INSUFFICIENT_EVIDENCE'));
+  });
+
+  it('downgrades an EDGE_SUPPORTED cell that fails a cost stress, and never upgrades one', () => {
+    const winners = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const losers = replayDataset(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS);
+    const base = contextCells(winners, new Map(), options);
+    const open = applyCostStressToCells(base, [{ label: 'stop slippage 2x', report: contextCells(losers, new Map(), options) }]).cells.find(
+      (cell) => cell.key === 'range | timeBucket=OPEN',
+    );
+    assert.equal(open?.verdict, 'NO_TRADE');
+    const kept = applyCostStressToCells(base, [{ label: 'half-spread 1%', report: contextCells(winners, new Map(), options) }]);
+    assert.ok(kept.cells.some((cell) => cell.verdict === 'EDGE_SUPPORTED'));
   });
 
   it('charges earlier runs on the same data against the significance bar', () => {
@@ -471,24 +489,54 @@ describe('time machine verdict', () => {
   });
 
   it('says EDGE_SUPPORTED only when the interval excludes zero and the later days hold up', () => {
-    const report = runTimeMachine(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'EDGE_SUPPORTED');
     assert.ok((report.bootstrap?.meanRCi95.low ?? 0) > 0);
     assert.match(formatReport(report), /does not authorise live trading/);
   });
 
   it('says NO_TRADE when every trade stops out', () => {
-    const report = runTimeMachine(dataset(days(50, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'NO_TRADE');
     assert.equal(report.overall.stopFirst.rate, 1);
   });
 
   it('says NO_TRADE when the newer days lose even though the whole sample wins', () => {
     const winners = days(40, { '10:00': [10, 16.5, 10, 16] });
-    const losers = Array.from({ length: 25 }, (_, i) => session(shiftDateKey('2026-12-01', i), { '10:00': [10, 10, 6.5, 7] }));
+    const losers = Array.from({ length: 60 }, (_, i) => session(shiftDateKey('2026-12-01', i), { '10:00': [10, 10, 6.5, 7] }));
     const report = runTimeMachine(dataset([...winners, ...losers]), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'NO_TRADE');
     assert.match(report.reasons.join(' '), /out-of-sample mean net R/);
+  });
+
+  it('says INSUFFICIENT_EVIDENCE when the holdout spans fewer independent sessions than the minimum', () => {
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], { ...options, minHoldoutDays: 50 });
+    assert.equal(report.verdict, 'INSUFFICIENT_EVIDENCE');
+    assert.match(report.reasons.join(' '), /independent holdout sessions, below the 50 needed/);
+  });
+
+  it('judges the holdout interval alone: a winning discovery period cannot carry a holdout whose interval includes zero', () => {
+    // 48 winning sessions, then a 32-session holdout with 17 wins and 15 losses. The whole sample is almost all wins,
+    // but the holdout mean is only slightly positive, and its interval reaches zero.
+    const discovery = days(48, { '10:00': [10, 16.5, 10, 16] });
+    const holdout = Array.from({ length: 32 }, (_, i) =>
+      session(shiftDateKey('2026-11-29', i), { '10:00': i < 17 ? [10, 16.5, 10, 16] : [10, 10, 6.5, 7] }),
+    );
+    const report = runTimeMachine(dataset([...discovery, ...holdout]), CONFIG, NO_COSTS, [], options);
+    assert.notEqual(report.verdict, 'EDGE_SUPPORTED');
+    assert.ok((report.bootstrap?.meanRCi95.low ?? 1) <= 0, 'the holdout interval includes zero');
+    assert.match(report.reasons.join(' '), /holdout 95% interval/);
+  });
+
+  it('keeps EDGE_SUPPORTED only while every cost stress also holds, and never upgrades a weaker result', () => {
+    const base = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
+    const losing = runTimeMachine(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
+    assert.equal(base.verdict, 'EDGE_SUPPORTED');
+    assert.equal(applyCostStress(base, [{ label: 'half-spread 1%', report: base }]).verdict, 'EDGE_SUPPORTED');
+    const broke = applyCostStress(base, [{ label: 'stop slippage 2x', report: losing }]);
+    assert.equal(broke.verdict, 'NO_TRADE');
+    assert.match(broke.reasons.join(' '), /fails cost stress "stop slippage 2x": NO_TRADE/);
+    assert.equal(applyCostStress(losing, [{ label: 'half-spread 1%', report: base }]).verdict, 'NO_TRADE', 'a stress never upgrades a result');
   });
 
   it('refuses to judge when too many trades lose their premium series', () => {

@@ -112,9 +112,15 @@ with a ₹187k day-end drawdown and 5 days losing ₹30k or more, against ₹216
 
 | Verdict | Condition |
 | --- | --- |
-| `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 10 out-of-sample trades, or more than 5% data-gap trades |
-| `NO_TRADE` | The bootstrap 95% interval of mean net R does not lie above zero, or the out-of-sample mean net R ≤ 0 |
-| `EDGE_SUPPORTED` | Otherwise |
+| `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 30 holdout trades, fewer than 20 independent holdout sessions, or more than 5% data-gap trades |
+| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; or the verdict fails a cost stress |
+| `EDGE_SUPPORTED` | Holds on the holdout, and under both cost stresses: 1% half-spread, and twice the stop slippage |
+
+The holdout is the chronologically later part of the sample (`splitFraction`, 0.6 by default). The whole sample never
+decides a verdict. A whole-sample interval lets the earlier days carry the result. Cost stress can only downgrade:
+a stressed run that is not `EDGE_SUPPORTED` makes the verdict `NO_TRADE`, and no stress run can upgrade a weaker one.
+Rule version `holdout-v1` is recorded on every `runs.jsonl` line. Lines without it were judged on the older rules, and
+their verdicts are not comparable.
 
 `EDGE_SUPPORTED` means only that this sample does not contradict a positive expectancy after modelled costs. It
 does not authorise live trading. Every parameter sweep is another test on the same days: if you try k
@@ -173,8 +179,10 @@ These items cannot be verified from this environment (no broker credentials):
 
 `run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
 at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
-A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0) is below 0.025 ÷ (cells × runs already logged on the same
-`dataSha256`), and its out-of-sample days are positive. Under 30 trades is `INSUFFICIENT_EVIDENCE`.
+A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0), on its holdout days, is below 0.025 ÷ (cells × variants evaluated
+across the research program), its holdout mean is positive, and it holds under both cost stresses. Fewer than 30 holdout
+trades or fewer than 20 holdout sessions is `INSUFFICIENT_EVIDENCE`. The variant count includes every logged run on any
+dataset and the seeds in `docs/research/variants-seed.json` (OTA-313).
 
 Hold-out discipline: choose candidate cells on one period, then confirm them once on a later period that played no
 part in the choice. First pass (2026-11-02): NIFTY 2025H, 60 cells, none passed. The two best,
