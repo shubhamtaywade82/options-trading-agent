@@ -68,10 +68,11 @@ not be silently forgotten.
 **Decision.**
 - Startup refuses while the broker shows an open option position or a live order (`orchestrator.ts` `startInternal`).
 - The day book is rebuilt from today's journal only. A malformed line refuses startup.
-- An entry journalled as submitted with no outcome is booked at its planned loss at the stop, net of estimated charges.
-  It is not booked at zero, because the bracket may have closed it during the outage. A superseded unresolved entry is
+- An entry journalled as submitted with no outcome is booked at its all-in adverse loss, not at zero.
+  It is not booked at zero, because the bracket may have closed it during the outage. Since OTA-311 the booking is the all-in
+  adverse loss (planned stop distance, stop slippage and charges, `risk/allInLoss.ts`), and it always applies. A superseded unresolved entry is
   booked the same way when a new entry for that underlying appears. Added 2026-11-03 (`07d0778`).
-- An unresolved entry without a usable stop refuses startup, because there is no loss to book.
+- An unresolved entry without a usable stop or tick refuses startup, because there is no loss to book.
 
 **Enforced by.** test: `tests/dayState.test.ts`; `tests/runtime.test.ts` for the broker-state refusals.
 
@@ -90,7 +91,7 @@ cannot be answered from the manifest.
 **Context.** An LLM that can flip a verdict can promote noise.
 
 **Decision.** The Time Machine verdict is `TimeMachineVerdict` (`INSUFFICIENT_EVIDENCE`, `NO_TRADE`, `EDGE_SUPPORTED`),
-computed from the bootstrap interval, the out-of-sample days and the trade count. The advisor is a veto with two
+computed on the holdout only: its bootstrap interval, its mean, its trade count and its session count, then the same rules under two cost stresses (`docs/ROADMAP.md`, OTA-308). The advisor is a veto with two
 outputs; any failure is SKIP.
 
 **Enforced by.** test: `tests/timeMachine.test.ts` (verdict cases); review for the advisor.

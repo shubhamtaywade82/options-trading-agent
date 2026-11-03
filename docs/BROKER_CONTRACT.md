@@ -57,7 +57,7 @@ here, and this change does not reach Dhan.
 
 | Open question | Verified by |
 | --- | --- |
-| 2.2: the `legDetails` shape and the leg `orderStatus` values | `npm run smoke:trade` against the sandbox, with the request and response recorded into `docs/` (the roadmap's OTA-106) |
+| 2.2: the `legDetails` shape and the leg `orderStatus` values | `npm run smoke:trade` against the sandbox, with the wire recorder writing to `docs/sandbox/` (the roadmap's OTA-106) |
 | 1.4: an accepted leg cancel reads CANCELLED in the book | Same recording |
 | Section 3: a 4xx write is never live at the venue | Sandbox: a deliberately invalid order, then a book read |
 | 2.3: the settled-status set is complete | Sandbox: an order cancelled, rejected and expired, each recorded |
