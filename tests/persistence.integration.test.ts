@@ -245,7 +245,7 @@ describe('journal to ledger, end to end', { skip: PG_URL === undefined }, () => 
 
   function restoredFrom(lines: readonly string[]): ReturnType<DayBook['snapshot']> {
     const book = new DayBook(istEpoch(DAY, '09:20'), 300_000);
-    restoreDayBook(book, lines, DAY);
+    restoreDayBook(book, lines, DAY, { halfSpreadPct: 0, stopSlippagePct: 0 });
     return book.snapshot();
   }
 

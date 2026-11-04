@@ -32,10 +32,12 @@
     "db:acknowledge": "tsx scripts/db.ts acknowledge",
     "db:reset-wallet": "tsx scripts/db.ts reset-wallet",
     "reset:paper": "tsx scripts/reset-paper.ts",
-    "test:integration": "tsx --test tests/persistence.integration.test.ts"
+    "test:integration": "tsx --test tests/persistence.integration.test.ts",
+    "ledger": "tsx scripts/ledger.ts",
+    "risk:shadow": "tsx scripts/risk-shadow.ts"
   },
   "dependencies": {
-    "@nemesis-oss/dhanhq-sdk": "^2.0.1",
+    "@nemesis-oss/dhanhq-sdk": "2.0.1",
     "@nemesis-oss/ollama-sdk": "^1.13.0",
     "chalk": "^5.6.2",
     "cli-truncate": "^4.0.0",

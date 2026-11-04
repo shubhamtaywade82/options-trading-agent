@@ -137,6 +137,123 @@ export function groupByDay(dates: readonly string[], trades: readonly TradeSampl
 }
 
 /** Politis–White style default: block length grows as n^(1/3). */
+/**
+ * Blocks for the holdout bootstrap are at least this many sessions, so dependence within a trading week survives the
+ * resample. The cube-root rule alone gives 3 sessions on a 30-session holdout, which is too short.
+ */
+export const MIN_HOLDOUT_BLOCK_DAYS = 5;
+
+export function holdoutBlockLength(days: number): number {
+  return Math.max(MIN_HOLDOUT_BLOCK_DAYS, defaultBlockLength(days));
+}
+
+/** The largest share of all positive net R that one session supplies. Undefined when no session made money. */
+export function bestSessionShare(days: readonly DayOutcome[]): number | undefined {
+  const totals = days.map((day) => day.trades.reduce((sum, trade) => sum + trade.r, 0));
+  const positive = totals.filter((total) => total > 0);
+  const positiveSum = positive.reduce((sum, total) => sum + total, 0);
+  if (positiveSum <= 0) {
+    return undefined;
+  }
+  return Math.max(...positive) / positiveSum;
+}
+
+/** Significance level of the derived profit-share cap: a holdout with no special session exceeds it this often. */
+export const DOMINANCE_ALPHA = 0.05;
+export const DOMINANCE_SIMULATIONS = 10_000;
+
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? (sorted[middle] as number) : ((sorted[middle - 1] as number) + (sorted[middle] as number)) / 2;
+}
+
+function standardNormal(rng: SeededRng): number {
+  const u1 = Math.max(rng.next(), Number.MIN_VALUE);
+  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * rng.next());
+}
+
+/**
+ * The derived cap for `winningSessions` winning sessions with the given median and spread. It is the (1 − alpha) quantile of
+ * the largest session's share, when the winning sessions are exchangeable draws from a normal with that median and spread,
+ * truncated to positive. Deterministic for a seed. With no spread, every winner is equal, so the cap is the fair share 1/W.
+ */
+export function simulatedDominanceCap(winningSessions: number, median: number, spread: number, seed: number): number | undefined {
+  if (winningSessions < 2 || !(median > 0)) {
+    return undefined;
+  }
+  if (spread === 0) {
+    return 1 / winningSessions;
+  }
+  const rng = new SeededRng(seed);
+  const shares: number[] = [];
+  for (let simulation = 0; simulation < DOMINANCE_SIMULATIONS; simulation += 1) {
+    let sum = 0;
+    let largest = 0;
+    for (let session = 0; session < winningSessions; session += 1) {
+      let draw = Number.NaN;
+      while (!(draw > 0)) {
+        draw = median + spread * standardNormal(rng);
+      }
+      sum += draw;
+      largest = Math.max(largest, draw);
+    }
+    shares.push(largest / sum);
+  }
+  shares.sort((a, b) => a - b);
+  return shares[Math.min(shares.length - 1, Math.ceil((1 - DOMINANCE_ALPHA) * shares.length) - 1)];
+}
+
+/**
+ * The cap for a holdout's own winning sessions. Its location and spread are the median and the scaled median absolute
+ * deviation (1.4826 × MAD) of those sessions. The MAD is used, not the standard deviation, because a standard deviation
+ * would be inflated by the very outlier the cap exists to catch.
+ */
+export function dominanceCap(positiveTotals: readonly number[], seed: number): number | undefined {
+  if (positiveTotals.length < 2) {
+    return undefined;
+  }
+  const centre = median(positiveTotals);
+  const spread = 1.4826 * median(positiveTotals.map((total) => Math.abs(total - centre)));
+  return simulatedDominanceCap(positiveTotals.length, centre, spread, seed);
+}
+
+export interface DominanceTest {
+  readonly share: number | undefined;
+  readonly cap: number | undefined;
+  readonly winningSessions: number;
+  /** Passes only when both the share and the cap are defined and the share does not exceed the cap. */
+  readonly passes: boolean;
+}
+
+/** The profit-share test for a holdout: does its largest winning session stay within the cap derived from its own winners? */
+export function dominanceTest(days: readonly DayOutcome[], seed: number): DominanceTest {
+  const totals = days.map((day) => day.trades.reduce((sum, trade) => sum + trade.r, 0));
+  const positive = totals.filter((total) => total > 0);
+  const share = bestSessionShare(days);
+  const cap = dominanceCap(positive, seed);
+  // The tolerance absorbs rounding: identical winners give a share exactly equal to the fair share.
+  const passes = share !== undefined && cap !== undefined && share <= cap + 1e-9;
+  return { share, cap, winningSessions: positive.length, passes };
+}
+
+/**
+ * Mean net R of the holdout with its single most profitable session removed. A result that needs one session to stay
+ * positive is not robust. Undefined when nothing is left to average.
+ */
+export function meanWithoutBestSession(days: readonly DayOutcome[]): number | undefined {
+  if (days.length === 0) {
+    return undefined;
+  }
+  const totals = days.map((day) => ({ day, total: day.trades.reduce((sum, trade) => sum + trade.r, 0) }));
+  const best = totals.reduce((top, next) => (next.total > top.total ? next : top));
+  const rest = days.filter((day) => day !== best.day).flatMap((day) => day.trades);
+  if (rest.length === 0) {
+    return undefined;
+  }
+  return rest.reduce((sum, trade) => sum + trade.r, 0) / rest.length;
+}
+
 export function defaultBlockLength(days: number): number {
   return Math.max(1, Math.round(Math.cbrt(days)));
 }

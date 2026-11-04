@@ -69,7 +69,7 @@ decimal places.
 
 ## Fidelity to the live agent
 
-Live code that the replay calls unchanged: `StrategySession.evaluate` (all five strategies and postures),
+Live code that the replay calls unchanged: `StrategySession.evaluate` (the five active strategies and postures; `prev_day` is research-only and off unless named),
 `contextVerdict`/`marketContext`, `structureTurnedAgainst`, `nearestAtmStrike`/`targetEntryStrike`,
 `bracketLevels`, `calculateTrailingStop`, `sizePosition`, `evaluatePreTrade` and `roundTripChargesInr`.
 
@@ -112,9 +112,14 @@ with a ₹187k day-end drawdown and 5 days losing ₹30k or more, against ₹216
 
 | Verdict | Condition |
 | --- | --- |
-| `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 10 out-of-sample trades, or more than 5% data-gap trades |
-| `NO_TRADE` | The bootstrap 95% interval of mean net R does not lie above zero, or the out-of-sample mean net R ≤ 0 |
-| `EDGE_SUPPORTED` | Otherwise |
+| `INSUFFICIENT_EVIDENCE` | Fewer than 30 priced trades (the same threshold as `report:performance`), fewer than 30 holdout trades, fewer than 30 independent holdout sessions, or more than 5% data-gap trades |
+| `NO_TRADE` | The block-bootstrap 95% interval of mean net R, computed on the holdout days only, does not lie above zero; or the holdout mean net R ≤ 0; the holdout mean without its single best session is not above zero, or that session supplies more than the derived cap of positive net R; or the verdict fails a cost stress |
+| `EDGE_SUPPORTED` | Holds on the holdout, survives removing its single best session, stays within the profit-share cap derived from its winning sessions (`docs/research/DOMINANCE.md`), and holds under both cost stresses: 1% half-spread, and twice the stop slippage |
+
+The holdout is the chronologically later part of the sample (`splitFraction`, 0.6 by default). The whole sample never
+decides a verdict. A whole-sample interval lets the earlier days carry the result. Cost stress can only downgrade:
+a stressed run that is not `EDGE_SUPPORTED` makes the verdict `NO_TRADE`, and no stress run can upgrade a weaker one.
+Rule version `holdout-v3` is recorded on every `runs.jsonl` line and in every ledger record. `holdout-v1` used 20 holdout sessions with no best-session test. `holdout-v2` had no profit-share cap and used the holiday-shift expiry. None of the three are comparable to v3.
 
 `EDGE_SUPPORTED` means only that this sample does not contradict a positive expectancy after modelled costs. It
 does not authorise live trading. Every parameter sweep is another test on the same days: if you try k
@@ -125,7 +130,8 @@ above) can be counted.
 
 ## Data source: Dhan `/charts/rollingoption`
 
-`client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 1.3.0 posts to `/charts/rollingoption`.
+`client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 2.0.1 posts to `/charts/rollingoption`. The response
+layout below was written against the 1.3.0-era SDK. It is re-verified on 2.0.1 by OTA-314, and no recording exists yet.
 Facts verified from the SDK source:
 
 - Strikes are **relative to ATM at each bar** (`ATM`, `ATM+1`, `ATM-2`, …). The request takes the underlying's
@@ -164,16 +170,16 @@ These items cannot be verified from this environment (no broker credentials):
    expiry and expiry-day theta is in the sample. BSE agrees: on SENSEX 2026-04..09 5-minute data the median
    15:20 ATM straddle was ₹60 on Thursdays (expiry) against ₹510–970 on other weekdays; the few high Thursdays
    pair with low Wednesdays, consistent with holiday-shifted expiries. BANKNIFTY (monthly) not yet checked.
-5. **Expiry dates.** The rolling source does not return them, so the expiry-day entry cutoff is skipped (the
-   report warns). An expiry calendar per underlying would close this.
+5. **Expiry dates.** The rolling source does not return them. Each session takes its nominal expiry, the next expiry weekday on or after its date, from its own date alone. An exchange holiday on the expiry weekday is not modelled, so the session before it is NEAR rather than EXPIRY. The earlier holiday-shift rule read later sessions, which is look-ahead, and was removed.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
 
 ## Context cells (`run --cells`)
 
 `run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
 at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
-A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0) is below 0.025 ÷ (cells × runs already logged on the same
-`dataSha256`), and its out-of-sample days are positive. Under 30 trades is `INSUFFICIENT_EVIDENCE`.
+A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0), on its holdout days, is below 0.025 ÷ (cells × variants evaluated
+across the research program), its holdout mean is positive, and it holds under both cost stresses. Fewer than 30 holdout
+trades or fewer than 30 holdout sessions is `INSUFFICIENT_EVIDENCE`. The variant count is every record in the research ledger, `docs/research/experiments.jsonl` (OTA-313, OTA-315).
 
 Hold-out discipline: choose candidate cells on one period, then confirm them once on a later period that played no
 part in the choice. First pass (2026-11-02): NIFTY 2025H, 60 cells, none passed. The two best,

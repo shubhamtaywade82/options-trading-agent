@@ -1,7 +1,7 @@
 import type { Candle } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
 import type { ReplayResult, ReplayTrade } from './replay.js';
-import { bootstrapMeanR, chronologicalSplit, groupByDay, summarize, type Interval, type TradeSample } from './stats.js';
+import { bootstrapMeanR, chronologicalSplit, dominanceTest, groupByDay, holdoutBlockLength, meanWithoutBestSession, summarize, type Interval, type TradeSample } from './stats.js';
 
 /** Extra per-day tags joined by date, such as the VIX tercile. */
 export type DayTags = ReadonlyMap<string, Readonly<Record<string, string>>>;
@@ -11,8 +11,13 @@ export interface CellOptions {
   readonly seed: number;
   readonly minTrades: number;
   readonly splitFraction: number;
-  /** Earlier runs on the same dataset. Each was another look at the same days, so each multiplies the test count. */
+  /**
+   * Variants evaluated before this run across the whole research program: logged runs on any dataset, plus seeded
+   * floors (`ledger.ts`). Each was another draw from the same search, so each multiplies the test count.
+   */
   readonly priorRuns: number;
+  /** Independent sessions the holdout must span before a cell can be EDGE_SUPPORTED. */
+  readonly minHoldoutDays: number;
 }
 
 export interface Cell {
@@ -38,9 +43,34 @@ export interface CellReport {
 /** One-sided, matching the lower bound of the 95% interval the whole-sample verdict uses. */
 const FAMILY_ALPHA = 0.025;
 
+/**
+ * Cost stress for cells, with the same rule as the Time Machine verdict: a cell stays EDGE_SUPPORTED only if the same
+ * cell is EDGE_SUPPORTED under every stressed cost model. Otherwise it is NO_TRADE. It never upgrades a cell.
+ */
+export function applyCostStressToCells(base: CellReport, stresses: readonly { readonly label: string; readonly report: CellReport }[]): CellReport {
+  const cells = base.cells.map((cell) => {
+    if (cell.verdict !== 'EDGE_SUPPORTED') {
+      return cell;
+    }
+    const holds = stresses.every((stress) => stress.report.cells.find((other) => other.key === cell.key)?.verdict === 'EDGE_SUPPORTED');
+    return holds ? cell : { ...cell, verdict: 'NO_TRADE' as const };
+  });
+  return { ...base, cells };
+}
+
 function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string> {
-  const { regime, trendAlignment, timeBucket, expiryDay } = trade.context;
-  return { regime, trendAlignment, timeBucket, expiryDay: String(expiryDay), ...dayTags.get(trade.date) };
+  const { regime, trendAlignment, timeBucket, expiryDay, volatility, structureAlignment, expiryBucket } = trade.context;
+  // chainBias is not a dimension: it is UNKNOWN on every trade, so a cell on it would only add to the divisor.
+  return {
+    regime,
+    trendAlignment,
+    timeBucket,
+    expiryDay: String(expiryDay),
+    volatility,
+    structureAlignment,
+    expiryBucket,
+    ...dayTags.get(trade.date),
+  };
 }
 
 function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags): Map<string, ReplayTrade[]> {
@@ -58,22 +88,29 @@ function judgeCell(key: string, trades: readonly ReplayTrade[], dates: readonly 
   const samples: TradeSample[] = trades.map((trade) => ({ date: trade.date, netPnlInr: trade.netPnlInr, r: trade.r, exitReason: trade.exitReason }));
   const days = groupByDay(dates, samples);
   const summary = summarize(samples, days.length);
-  const bootstrap = bootstrapMeanR(days, { iterations: options.iterations, seed: options.seed });
-  const outOfSample = chronologicalSplit(days, options.splitFraction).outOfSample.flatMap((day) => day.trades);
-  const outOfSampleMeanR = summarize(outOfSample, 0).meanR;
+  // Judged on the holdout (the later days) only. The whole-cell figures are reported for context and never decide.
+  const holdout = chronologicalSplit(days, options.splitFraction).outOfSample;
+  const holdoutTrades = holdout.flatMap((day) => day.trades);
+  const outOfSampleMeanR = summarize(holdoutTrades, 0).meanR;
+  const bootstrap =
+    holdout.length > 0 && holdoutTrades.length > 0
+      ? bootstrapMeanR(holdout, { iterations: options.iterations, seed: options.seed, blockLength: holdoutBlockLength(holdout.length) })
+      : undefined;
   let verdict: Cell['verdict'] = 'NO_TRADE';
-  if (trades.length < options.minTrades) {
+  if (holdoutTrades.length < options.minTrades || holdout.length < options.minHoldoutDays || bootstrap === undefined) {
     verdict = 'INSUFFICIENT_EVIDENCE';
   } else if (bootstrap.probMeanRNonPositive < threshold && outOfSampleMeanR > 0) {
-    verdict = 'EDGE_SUPPORTED';
+    // Robust only if the holdout mean stays positive without its single best session (OTA-308 eligibility).
+    const robust = (meanWithoutBestSession(holdout) ?? 0) > 0 && dominanceTest(holdout, options.seed).passes;
+    verdict = robust ? 'EDGE_SUPPORTED' : 'NO_TRADE';
   }
   return {
     key,
     trades: trades.length,
     meanR: summary.meanR,
     profitFactor: summary.profitFactor,
-    meanRCi95: bootstrap.meanRCi95,
-    probMeanRNonPositive: bootstrap.probMeanRNonPositive,
+    meanRCi95: bootstrap?.meanRCi95,
+    probMeanRNonPositive: bootstrap?.probMeanRNonPositive ?? 1,
     outOfSampleMeanR,
     verdict,
   };

@@ -261,3 +261,14 @@ describe('loadConfig posture and YAML loading', () => {
   });
 });
 
+describe('all-in risk budget flag (OTA-311)', () => {
+  it('is off unless ALL_IN_RISK_BUDGET is set, so live sizing is unchanged by default', () => {
+    assert.equal(loadConfig(BASE).capital.allInRiskPolicy, 'off');
+    assert.equal(loadConfig({ ...BASE, ALL_IN_RISK_POLICY: 'shadow' }).capital.allInRiskPolicy, 'shadow');
+  });
+
+  it('is on in the paper config, where it runs first and waits for operator sign-off before live', () => {
+    const paper = loadConfig({ ...BASE, MODE: 'paper' }, 'config.paper.yml');
+    assert.equal(paper.capital.allInRiskPolicy, 'shadow');
+  });
+});

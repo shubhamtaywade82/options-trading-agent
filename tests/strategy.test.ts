@@ -232,8 +232,9 @@ describe('StrategySession', () => {
 
 
 describe('previous-day break', () => {
-  // Previous day ranges 90 to 100.5 (closes 90→100, ±0.5). Today opens inside it.
-  const rising = risingWarmup();
+  // A complete 75-bar previous session (09:15 to 15:25), closes 90→100, so its range is 89.5 to 100.5 (OTA-310).
+  // Today opens inside it.
+  const rising = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 75 }, (_, i) => 90 + (i * 10) / 74));
 
   it('fires BULLISH on the bar that closes through the previous day high', () => {
     const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 100.2, 101]);
@@ -257,7 +258,7 @@ describe('previous-day break', () => {
     // Day 1 establishes a downtrend 110 → 95
     const day1 = dayBars('2026-10-08', 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 110 - (i * 15) / 59));
     // Day 2 (previous day) consolidates at 96 (high 96.5, SuperTrend upper line ~99)
-    const day2 = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, () => 96));
+    const day2 = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 75 }, () => 96));
     // Today breaks Day 2's high (96.5) at 97.2, while SuperTrend is still DOWN (~99)
     const today = dayBars(SESSION_DAY, 9 * 60 + 15, [96, 96, 96, 96.4, 97.2]);
     const bars = [...day1, ...day2, ...today];

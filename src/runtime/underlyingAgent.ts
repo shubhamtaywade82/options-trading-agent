@@ -29,8 +29,9 @@ import type { AgentView, CandidateView, DropView, ExitView, PositionView, Signal
 import type { EventLog } from '../ops/eventLog.js';
 import type { Logger } from '../ops/logger.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
+import { adverseCostsFor, allInAdverseLossInr } from '../risk/allInLoss.js';
 import { DayBook } from '../risk/dayBook.js';
-import { evaluatePreTrade, type RiskVerdict } from '../risk/riskEngine.js';
+import { evaluatePreTradeUnderPolicy, type PolicyVerdict } from '../risk/riskEngine.js';
 import { buildEntrySnapshot, planEntryPrices, type EntryPrices, type TwoSidedQuote } from './entryPlan.js';
 import type { FeedPort, MarketPort } from './ports.js';
 import { SerialQueue } from './serialQueue.js';
@@ -64,7 +65,15 @@ export interface AgentDependencies {
 }
 
 type Rejection = { readonly ok: false; readonly code: string; readonly detail: string };
-type Preparation = { readonly ok: true; readonly order: EntryOrder; readonly snapshot: EntrySnapshot } | Rejection;
+/** The risk an entry was decided on, journalled with it: planned, all-in, the policy, and what the all-in budget would have said (OTA-311). */
+interface EntryRisk {
+  readonly plannedRiskInr: number;
+  readonly allInRiskInr: number | null;
+  readonly policy: 'off' | 'shadow' | 'enforce';
+  readonly allInWouldReject: boolean;
+}
+
+type Preparation = { readonly ok: true; readonly order: EntryOrder; readonly snapshot: EntrySnapshot; readonly risk: EntryRisk } | Rejection;
 
 function rejected(code: string, detail: string): Rejection {
   return { ok: false, code, detail };
@@ -239,7 +248,7 @@ export class UnderlyingAgent {
     slot.fsm.adopt('RISK_MANAGEMENT_ACTIVE');
     this.deps.book.markOpen(this.symbol, slot.optionType);
     this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
-    this.deps.book.setOpenRisk(this.symbol, riskAtStop(position.quantity, position.averagePrice, position.stopLossPrice), slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(position.contract, position.quantity, position.averagePrice, position.stopLossPrice), slot.optionType);
     this.deps.feed.subscribe([instrumentRefOf(position.contract)]);
     this.deps.logger.info('open position adopted into risk management', {
       underlying: this.symbol,
@@ -318,7 +327,7 @@ export class UnderlyingAgent {
       const moved = newStop > position.stopLossPrice;
       slot.position = { ...position, highWaterMark: hwm, stopLossPrice: newStop };
       if (moved) {
-        this.deps.book.setOpenRisk(this.symbol, riskAtStop(position.quantity, position.averagePrice, newStop), slot.optionType);
+        this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(position.contract, position.quantity, position.averagePrice, newStop), slot.optionType);
         this.record('trailing_stop_updated', { positionId: position.positionId, stopLossPrice: newStop, highWaterMark: hwm });
         this.deps.logger.info('trailing stop updated', { underlying: this.symbol, positionId: position.positionId, stopLossPrice: newStop });
       }
@@ -608,7 +617,7 @@ export class UnderlyingAgent {
       this.drop('STALE_AT_SUBMIT', stale, slot);
       return;
     }
-    await this.submitPreparedOrder(prepared.order, prepared.snapshot, slot);
+    await this.submitPreparedOrder(prepared.order, prepared.snapshot, prepared.risk, slot);
   }
 
   /**
@@ -629,12 +638,20 @@ export class UnderlyingAgent {
     return undefined;
   }
 
-  private async submitPreparedOrder(order: EntryOrder, snapshot: EntrySnapshot, slot: SideSlot): Promise<void> {
+  private async submitPreparedOrder(order: EntryOrder, snapshot: EntrySnapshot, risk: EntryRisk, slot: SideSlot): Promise<void> {
     try {
       await withDeadline(
         this.durableRecord('entry_submitted', {
           correlationId: order.correlationId,
           contract: order.contract.symbol,
+          // Read back on restart to price an unresolved entry's charges at its own segment's rate.
+          exchangeSegment: order.contract.exchangeSegment,
+          tickSize: order.contract.tickSize,
+          // The planned risk the decision used, and the all-in figure the shadow comparison checks against realised losses (OTA-311).
+          plannedRiskInr: risk.plannedRiskInr,
+          allInRiskInr: risk.allInRiskInr,
+          riskPolicy: risk.policy,
+          allInWouldReject: risk.allInWouldReject,
           quantity: order.quantity,
           entryReference: order.entryReference,
           stopLossPrice: order.stopLossPrice,
@@ -669,7 +686,7 @@ export class UnderlyingAgent {
     slot.fsm.dispatch('ENTRY_SUBMITTED');
     slot.pending = order;
     this.deps.book.recordEntry(this.symbol, slot.optionType);
-    this.deps.book.setOpenRisk(this.symbol, riskAtStop(order.quantity, order.entryReference, order.stopLossPrice), slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(order.contract, order.quantity, order.entryReference, order.stopLossPrice), slot.optionType);
     this.deps.feed.subscribe([instrumentRefOf(order.contract)]);
     this.deps.logger.info('entry submitted', {
       underlying: this.symbol,
@@ -750,7 +767,13 @@ export class UnderlyingAgent {
       return advice;
     }
     this.sequence += 1;
-    return { ok: true, snapshot, order: this.entryOrder(correlationIdFor('E', now, this.sequence), contract, sizing.quantity, prices) };
+    const risk: EntryRisk = {
+      plannedRiskInr: verdict.riskInr,
+      allInRiskInr: verdict.allInRiskInr ?? null,
+      policy: this.deps.config.capital.allInRiskPolicy,
+      allInWouldReject: verdict.allInWouldReject,
+    };
+    return { ok: true, snapshot, risk, order: this.entryOrder(correlationIdFor('E', now, this.sequence), contract, sizing.quantity, prices) };
   }
 
   /** Expiry, chain gates and contract selection. The quote returned is two-sided. */
@@ -823,6 +846,38 @@ export class UnderlyingAgent {
       stopLossPrice: bracket.stopLossPrice,
       lotSize: contract.lotSize,
       maxLotsPerOrder: this.deps.config.capital.maxLotsPerOrder,
+      // Sized on the all-in loss when that budget is on, so the budget bounds what the account can lose (OTA-311).
+      ...(this.deps.config.capital.allInRiskPolicy === 'enforce'
+        ? {
+            perLotRiskInr: allInAdverseLossInr({
+              quantity: contract.lotSize,
+              entryPrice: bracket.entryReference,
+              stopPrice: bracket.stopLossPrice,
+              costs: adverseCostsFor(this.deps.config),
+              tickSize: contract.tickSize,
+              exchangeSegment: contract.exchangeSegment,
+            }),
+          }
+        : {}),
+    });
+  }
+
+  /**
+   * Open risk a position carries at its stop: the planned stop distance, or the all-in loss when that budget is on (OTA-311).
+   * The book's daily-loss check uses this figure, so it must be the same number the entry gate used.
+   */
+  private budgetRiskAtStop(contract: OptionContract, quantity: number, entryPrice: number, stopLossPrice: number): number {
+    const { config } = this.deps;
+    if (config.capital.allInRiskPolicy !== 'enforce') {
+      return riskAtStop(quantity, entryPrice, stopLossPrice);
+    }
+    return allInAdverseLossInr({
+      quantity,
+      entryPrice,
+      stopPrice: stopLossPrice,
+      costs: adverseCostsFor(config),
+      tickSize: contract.tickSize,
+      exchangeSegment: contract.exchangeSegment,
     });
   }
 
@@ -834,14 +889,14 @@ export class UnderlyingAgent {
     readonly funds: number;
     readonly isExpiryDay: boolean;
     readonly slot: SideSlot;
-  }): RiskVerdict {
+  }): PolicyVerdict {
     const { config, spec, book } = this.deps;
     const { prices, sizing, contract } = input;
     // Re-read after every await: another underlying may have changed the book while this one was waiting.
     // The clock too: the expiry, chain and funds calls took time, and the quote's age must include it.
     const snapshot = book.snapshot();
     const gateNow = this.now();
-    return evaluatePreTrade({
+    return evaluatePreTradeUnderPolicy({
       side: 'BUY',
       entryReference: prices.bracket.entryReference,
       stopLossPrice: prices.bracket.stopLossPrice,
@@ -850,6 +905,14 @@ export class UnderlyingAgent {
       lotSize: contract.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
+      allInRiskInr: allInAdverseLossInr({
+              quantity: sizing.quantity,
+              entryPrice: prices.bracket.entryReference,
+              stopPrice: prices.bracket.stopLossPrice,
+              costs: adverseCostsFor(config),
+              tickSize: contract.tickSize,
+              exchangeSegment: contract.exchangeSegment,
+      }),
       availableFundsInr: input.funds,
       nowMs: gateNow,
       minuteOfDay: istParts(gateNow).minuteOfDay,
@@ -876,7 +939,7 @@ export class UnderlyingAgent {
       spotTickAgeMs: this.deps.feed.ageMs(spec.spot),
       optionQuoteAgeMs: gateNow - input.quote.observedAt,
       staleMs: config.feed.staleMs,
-    });
+    }, config.capital.allInRiskPolicy);
   }
 
   private rememberCandidate(snapshot: EntrySnapshot, contract: OptionContract, quantity: number, bid: number, at: number): void {
@@ -980,7 +1043,7 @@ export class UnderlyingAgent {
     slot.position = position;
     slot.lastMark = averagePrice;
     this.deps.book.setOpenPnl(this.symbol, 0, slot.optionType);
-    this.deps.book.setOpenRisk(this.symbol, riskAtStop(quantity, averagePrice, position.stopLossPrice), slot.optionType);
+    this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(position.contract, quantity, averagePrice, position.stopLossPrice), slot.optionType);
 
     if (slot.fsm.state === 'ENTRY_PENDING') {
       slot.fsm.dispatch('ENTRY_FILLED');

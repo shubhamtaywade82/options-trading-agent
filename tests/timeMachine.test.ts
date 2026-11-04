@@ -21,9 +21,10 @@ import {
   wilsonInterval,
   type TradeSample,
 } from '../src/research/stats.js';
-import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
-import { contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
-import { weeklyExpiryDates } from '../src/time/calendar.js';
+import { bestSessionShare, dominanceCap, dominanceTest, holdoutBlockLength, meanWithoutBestSession, simulatedDominanceCap } from '../src/research/stats.js';
+import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
+import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
+import { nominalWeeklyExpiry } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
 
@@ -61,7 +62,7 @@ const CONFIG: ReplayConfig = {
     breakevenAtRr: 1,
     runnerMode: false,
   },
-  capital: { inr: 100_000, maxRiskPerTradePct: 2, maxDailyLossPct: 5, maxTradesPerDay: 3, maxLotsPerOrder: 15 },
+  capital: { inr: 100_000, maxRiskPerTradePct: 2, maxDailyLossPct: 5, maxTradesPerDay: 3, maxLotsPerOrder: 15, allInRiskPolicy: 'off' },
 };
 
 function hhmm(minute: number): string {
@@ -180,6 +181,16 @@ describe('rolling option parsing', () => {
 describe('research dataset validation', () => {
   it('accepts a well-formed dataset', () => {
     assert.equal(parseDataset(JSON.parse(JSON.stringify(dataset([session(DAY)])))).sessions.length, 1);
+  });
+
+  it('keeps the SDK and parser versions a dataset was fetched with, through a reload', () => {
+    const fetched = JSON.parse(JSON.stringify(dataset([session(DAY)])));
+    fetched.source = { ...fetched.source, provenance: { sdkVersion: '2.0.1', parserVersion: 'rollingoption-v1', responseSchemaVersion: 'rollingoption-layout-1' } };
+    assert.deepEqual(parseDataset(fetched).source.provenance, { sdkVersion: '2.0.1', parserVersion: 'rollingoption-v1', responseSchemaVersion: 'rollingoption-layout-1' });
+  });
+
+  it('accepts a dataset fetched before provenance was recorded, and reports none', () => {
+    assert.equal(parseDataset(JSON.parse(JSON.stringify(dataset([session(DAY)])))).source.provenance, undefined);
   });
 
   it('refuses bars outside the session, off the grid, out of order, or on another day', () => {
@@ -356,6 +367,57 @@ describe('statistics', () => {
     assert.equal(summary.meanR, 0);
   });
 
+  it('measures the holdout mean without its best session, so one lucky day cannot carry the result (OTA-308)', () => {
+    const dates = ['2026-12-01', '2026-12-02', '2026-12-03'];
+    const days = groupByDay(dates, [sample(dates[0] as string, 5), sample(dates[1] as string, -1), sample(dates[2] as string, -1)]);
+    assert.equal(meanWithoutBestSession(days), -1, 'removing the +5 day leaves two losing days');
+    assert.equal(meanWithoutBestSession([]), undefined);
+  });
+
+  it('caps the share of profit any one holdout session can supply (OTA-308 eligibility)', () => {
+    const dates = ['2026-12-01', '2026-12-02', '2026-12-03', '2026-12-04'];
+    const lumpy = groupByDay(dates, [sample(dates[0] as string, 6), sample(dates[1] as string, 1), sample(dates[2] as string, 1), sample(dates[3] as string, -2)]);
+    assert.ok((bestSessionShare(lumpy) ?? 0) > 0.6, 'one session supplies 6 of 8 units of profit');
+    const even = groupByDay(dates, [sample(dates[0] as string, 1), sample(dates[1] as string, 1), sample(dates[2] as string, 1), sample(dates[3] as string, 1)]);
+    assert.equal(bestSessionShare(even), 0.25);
+    const losing = groupByDay(dates, [sample(dates[0] as string, -1), sample(dates[1] as string, -2), sample(dates[2] as string, -1), sample(dates[3] as string, -1)]);
+    assert.equal(bestSessionShare(losing), undefined, 'no profit, no share');
+  });
+
+  it('derives the profit-share cap from the holdout\'s own winners, so a tight holdout gets a tight cap (OTA-308)', () => {
+    // Equal winners have no spread, so the only fair share is 1/W, and any excess is dominance.
+    assert.equal(simulatedDominanceCap(10, 1, 0, 19), 1 / 10);
+    // Spread raises the cap: a dispersed set of winners can legitimately have a larger largest session.
+    const tight = simulatedDominanceCap(15, 1, 0.1, 19) ?? 0;
+    const loose = simulatedDominanceCap(15, 1, 0.6, 19) ?? 0;
+    assert.ok(tight > 1 / 15 && loose > tight, 'the cap widens with the spread');
+    // More winners lower the fair share, so the cap falls with the number of winners at a given relative spread.
+    assert.ok((simulatedDominanceCap(30, 1, 0.5, 19) ?? 1) < (simulatedDominanceCap(10, 1, 0.5, 19) ?? 0));
+    // Deterministic for a seed.
+    assert.equal(simulatedDominanceCap(15, 1, 0.5, 19), simulatedDominanceCap(15, 1, 0.5, 19));
+  });
+
+  it('passes a mildly dispersed holdout and refuses one session that carries it', () => {
+    const dates = Array.from({ length: 10 }, (_, i) => `2026-12-${String(i + 1).padStart(2, '0')}`);
+    const winners = [1.2, 1.5, 1.1, 1.4, 1.3, 1.6, 1.2, 1.5, 1.3, 1.4];
+    const mild = groupByDay(dates, winners.map((r, i) => sample(dates[i] as string, r)));
+    const mildTest = dominanceTest(mild, 19);
+    assert.equal(mildTest.passes, true, `share ${mildTest.share} within cap ${mildTest.cap}`);
+    const carried = groupByDay(dates, [...winners.slice(0, 9), 8.0].map((r, i) => sample(dates[i] as string, r)));
+    assert.equal(dominanceTest(carried, 19).passes, false, 'one 8R session is far beyond what these winners allow');
+  });
+
+  it('refuses a cap when there are fewer than two winning sessions to compare', () => {
+    assert.equal(dominanceCap([2.0], 19), undefined);
+    const dates = ['2026-12-01', '2026-12-02'];
+    assert.equal(dominanceTest(groupByDay(dates, [sample(dates[0] as string, 1), sample(dates[1] as string, -1)]), 19).passes, false);
+  });
+
+  it('blocks the holdout bootstrap in at least five sessions, so dependence within a trading week survives', () => {
+    assert.equal(holdoutBlockLength(30), 5, 'the cube-root rule alone would give 3');
+    assert.equal(holdoutBlockLength(1000), 10);
+  });
+
   it('bootstraps whole days, deterministically, including days with no trade', () => {
     const dates = Array.from({ length: 40 }, (_, i) => shiftDateKey(DAY, i));
     const winners = groupByDay(dates, dates.map((date) => sample(date, 1)));
@@ -392,25 +454,26 @@ describe('statistics', () => {
   });
 });
 
-describe('weekly expiry calendar', () => {
-  it('marks the expiry weekday, and the last session before it when that day is a holiday', () => {
-    // Mon 12 Oct to Fri 23 Oct 2026; Tue 20 Oct is missing (a holiday), so Mon 19 Oct is that week's expiry.
-    const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-19', '2026-10-21', '2026-10-22'];
-    assert.deepEqual([...(weeklyExpiryDates('NIFTY', dates) ?? [])], ['2026-10-13', '2026-10-19']);
-    assert.deepEqual([...(weeklyExpiryDates('SENSEX', dates) ?? [])], ['2026-10-22']);
+describe('weekly expiry calendar (look-ahead free)', () => {
+  it('gives each session the next expiry weekday on or after its date, from its own date alone', () => {
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-12'), '2026-10-13', 'a Monday trades against that Tuesday');
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-13'), '2026-10-13', 'the expiry day is its own expiry');
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-14'), '2026-10-20', 'a Wednesday trades against the next Tuesday');
+    assert.equal(nominalWeeklyExpiry('SENSEX', '2026-10-23'), '2026-10-29', 'SENSEX expires on Thursday, so a Friday waits a week');
   });
 
-  it('does not guess a holiday shift in a trailing week that ends before the expiry weekday', () => {
-    assert.deepEqual([...(weeklyExpiryDates('NIFTY', ['2026-10-12']) ?? [])], []);
+  it('does not look ahead: a holiday on the expiry weekday does not move an earlier session', () => {
+    // Tue 20 Oct is a holiday. Monday 19 Oct cannot know that from its own date, so its expiry is the nominal Tuesday.
+    assert.equal(nominalWeeklyExpiry('NIFTY', '2026-10-19'), '2026-10-20');
   });
 
   it('has no rule for an index whose expiry convention is unverified', () => {
-    assert.equal(weeklyExpiryDates('BANKNIFTY', ['2026-10-13']), undefined);
+    assert.equal(nominalWeeklyExpiry('BANKNIFTY', '2026-10-13'), undefined);
   });
 });
 
 describe('context cells', () => {
-  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0 };
+  const options = { iterations: 500, seed: 19, minTrades: 30, splitFraction: 0.6, priorRuns: 0, minHoldoutDays: 30 };
 
   it('tags each replayed trade with the context at its signal', () => {
     const result = replayDataset(dataset([session(DAY, { '10:00': [10, 16.5, 10, 16] })]), CONFIG, NO_COSTS);
@@ -419,22 +482,47 @@ describe('context cells', () => {
     assert.equal(context?.expiryDay, false);
     assert.ok(['TRENDING', 'RANGING'].includes(context?.regime ?? ''));
     assert.ok(['WITH', 'AGAINST', 'NEUTRAL'].includes(context?.trendAlignment ?? ''));
+    // OTA-309: the new features are present, typed, and never a guessed chain bias.
+    assert.ok(['LOW', 'MID', 'HIGH', 'UNKNOWN'].includes(context?.volatility ?? ''));
+    assert.ok(['WITH', 'AGAINST', 'NEUTRAL', 'UNKNOWN'].includes(context?.structureAlignment ?? ''));
+    assert.ok(['EXPIRY', 'NEAR', 'FAR', 'UNKNOWN'].includes(context?.expiryBucket ?? ''));
+    assert.equal(context?.chainBias, 'UNKNOWN');
   });
 
   it('reports each strategy per context value, and corrects the bar for every cell tested', () => {
-    const result = replayDataset(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const result = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
     const report = contextCells(result, new Map(), options);
     const open = report.cells.find((cell) => cell.key === 'range | timeBucket=OPEN');
-    assert.equal(open?.trades, 50);
+    assert.equal(open?.trades, 80);
     assert.equal(open?.verdict, 'EDGE_SUPPORTED');
     assert.equal(report.testsCounted, report.cells.length);
     assert.match(formatCells(report), /range \| timeBucket=OPEN/);
+    assert.ok(report.cells.some((cell) => cell.key.includes(' | volatility=')), 'volatility is a cell dimension');
+    assert.ok(!report.cells.some((cell) => cell.key.includes('chainBias')), 'chainBias is not a cell dimension');
   });
 
   it('says INSUFFICIENT_EVIDENCE for a cell below the minimum trade count', () => {
     const result = replayDataset(dataset(days(10, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
     const report = contextCells(result, new Map(), options);
     assert.ok(report.cells.every((cell) => cell.verdict === 'INSUFFICIENT_EVIDENCE'));
+  });
+
+  it('says INSUFFICIENT_EVIDENCE for a cell whose holdout spans too few sessions, even with enough trades', () => {
+    const result = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const report = contextCells(result, new Map(), { ...options, minHoldoutDays: 50 });
+    assert.ok(report.cells.every((cell) => cell.verdict === 'INSUFFICIENT_EVIDENCE'));
+  });
+
+  it('downgrades an EDGE_SUPPORTED cell that fails a cost stress, and never upgrades one', () => {
+    const winners = replayDataset(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS);
+    const losers = replayDataset(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS);
+    const base = contextCells(winners, new Map(), options);
+    const open = applyCostStressToCells(base, [{ label: 'stop slippage 2x', report: contextCells(losers, new Map(), options) }]).cells.find(
+      (cell) => cell.key === 'range | timeBucket=OPEN',
+    );
+    assert.equal(open?.verdict, 'NO_TRADE');
+    const kept = applyCostStressToCells(base, [{ label: 'half-spread 1%', report: contextCells(winners, new Map(), options) }]);
+    assert.ok(kept.cells.some((cell) => cell.verdict === 'EDGE_SUPPORTED'));
   });
 
   it('charges earlier runs on the same data against the significance bar', () => {
@@ -471,24 +559,54 @@ describe('time machine verdict', () => {
   });
 
   it('says EDGE_SUPPORTED only when the interval excludes zero and the later days hold up', () => {
-    const report = runTimeMachine(dataset(days(50, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'EDGE_SUPPORTED');
     assert.ok((report.bootstrap?.meanRCi95.low ?? 0) > 0);
     assert.match(formatReport(report), /does not authorise live trading/);
   });
 
   it('says NO_TRADE when every trade stops out', () => {
-    const report = runTimeMachine(dataset(days(50, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'NO_TRADE');
     assert.equal(report.overall.stopFirst.rate, 1);
   });
 
   it('says NO_TRADE when the newer days lose even though the whole sample wins', () => {
     const winners = days(40, { '10:00': [10, 16.5, 10, 16] });
-    const losers = Array.from({ length: 25 }, (_, i) => session(shiftDateKey('2026-12-01', i), { '10:00': [10, 10, 6.5, 7] }));
+    const losers = Array.from({ length: 60 }, (_, i) => session(shiftDateKey('2026-12-01', i), { '10:00': [10, 10, 6.5, 7] }));
     const report = runTimeMachine(dataset([...winners, ...losers]), CONFIG, NO_COSTS, [], options);
     assert.equal(report.verdict, 'NO_TRADE');
     assert.match(report.reasons.join(' '), /out-of-sample mean net R/);
+  });
+
+  it('says INSUFFICIENT_EVIDENCE when the holdout spans fewer independent sessions than the minimum', () => {
+    const report = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], { ...options, minHoldoutDays: 50 });
+    assert.equal(report.verdict, 'INSUFFICIENT_EVIDENCE');
+    assert.match(report.reasons.join(' '), /independent holdout sessions, below the 50 needed/);
+  });
+
+  it('judges the holdout interval alone: a winning discovery period cannot carry a holdout whose interval includes zero', () => {
+    // 48 winning sessions, then a 32-session holdout with 17 wins and 15 losses. The whole sample is almost all wins,
+    // but the holdout mean is only slightly positive, and its interval reaches zero.
+    const discovery = days(48, { '10:00': [10, 16.5, 10, 16] });
+    const holdout = Array.from({ length: 32 }, (_, i) =>
+      session(shiftDateKey('2026-11-29', i), { '10:00': i < 17 ? [10, 16.5, 10, 16] : [10, 10, 6.5, 7] }),
+    );
+    const report = runTimeMachine(dataset([...discovery, ...holdout]), CONFIG, NO_COSTS, [], options);
+    assert.notEqual(report.verdict, 'EDGE_SUPPORTED');
+    assert.ok((report.bootstrap?.meanRCi95.low ?? 1) <= 0, 'the holdout interval includes zero');
+    assert.match(report.reasons.join(' '), /holdout 95% interval/);
+  });
+
+  it('keeps EDGE_SUPPORTED only while every cost stress also holds, and never upgrades a weaker result', () => {
+    const base = runTimeMachine(dataset(days(80, { '10:00': [10, 16.5, 10, 16] })), CONFIG, NO_COSTS, [], options);
+    const losing = runTimeMachine(dataset(days(80, { '10:00': [10, 10, 6.5, 7] })), CONFIG, NO_COSTS, [], options);
+    assert.equal(base.verdict, 'EDGE_SUPPORTED');
+    assert.equal(applyCostStress(base, [{ label: 'half-spread 1%', report: base }]).verdict, 'EDGE_SUPPORTED');
+    const broke = applyCostStress(base, [{ label: 'stop slippage 2x', report: losing }]);
+    assert.equal(broke.verdict, 'NO_TRADE');
+    assert.match(broke.reasons.join(' '), /fails cost stress "stop slippage 2x": NO_TRADE/);
+    assert.equal(applyCostStress(losing, [{ label: 'half-spread 1%', report: base }]).verdict, 'NO_TRADE', 'a stress never upgrades a result');
   });
 
   it('refuses to judge when too many trades lose their premium series', () => {

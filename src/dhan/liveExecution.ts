@@ -90,6 +90,12 @@ interface TrackedPosition {
   orderId: string | undefined;
   confirmed: boolean;
   exitInFlight: boolean;
+  /**
+   * Set before a SELL is written and cleared only by a definitive outcome (a broker rejection, or a no-fill terminal
+   * status). While it is set, the SELL may be live at the broker, so no second SELL is sent. Reconciliation still
+   * settles the position from the broker.
+   */
+  exitOutcomeUnknown: boolean;
   mismatchReported: boolean;
   /** Legs whose cancel request the broker accepted. A retry requests only the rest; the order book confirms them. */
   cancelledLegs: Set<BracketLeg>;
@@ -100,7 +106,11 @@ const LEG_CANCEL_BACKOFF_MS = 250;
 /** An accepted cancel is not a cancelled leg. The super order book is polled this many times for a terminal status. */
 const LEG_STATUS_POLLS = 8;
 const LEG_STATUS_POLL_MS = 250;
-const TERMINAL_ORDER_STATUSES = new Set(['CANCELLED', 'TRADED', 'REJECTED', 'EXPIRED', 'CLOSED']);
+/**
+ * Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live.
+ * Shared with the restart guard in createRuntime, so the adapter and the guard cannot disagree about what is live.
+ */
+export const TERMINAL_ORDER_STATUSES: ReadonlySet<string> = new Set(['CANCELLED', 'TRADED', 'REJECTED', 'EXPIRED', 'CLOSED']);
 
 type SuperOrderRow = Awaited<ReturnType<DhanClient['superOrders']['list']>>[number];
 
@@ -324,6 +334,18 @@ export class LiveExecutionPort implements ExecutionPort {
         return;
       }
 
+      // A SELL whose outcome is unknown may still be live. A second one could sell the same quantity twice.
+      if (tracked.exitOutcomeUnknown) {
+        this.emit({
+          kind: 'EXIT_UNCONFIRMED',
+          correlationId: order.correlationId,
+          underlying: order.underlying,
+          positionId: order.positionId,
+          reason: 'an earlier SELL for this position has no known outcome; not resent. Reconciliation settles it from the broker position',
+        });
+        return;
+      }
+
       // A SELL is never sent while a leg could still fire. A cancel that errors may mean the leg already traded,
       // so the order book decides, not the cancel response.
       await this.cancelBracketLegsWithRetry(tracked);
@@ -362,6 +384,8 @@ export class LiveExecutionPort implements ExecutionPort {
       const quantity = Math.min(order.quantity, broker.netQty);
       const waiter = this.tracker.waitFor(order.correlationId, { timeoutMs: this.options.orderTimeoutMs });
       waiter.catch(() => undefined);
+      // Set before the write. From here until a definitive outcome, the SELL may be live at the broker.
+      tracked.exitOutcomeUnknown = true;
       await this.client.orders.place({
         correlationId: order.correlationId,
         transactionType: 'SELL',
@@ -377,6 +401,10 @@ export class LiveExecutionPort implements ExecutionPort {
     } catch (error) {
       const verdict = classifyPlacementError(error);
       this.options.logger.error('exit placement failed', { cid: order.correlationId, verdict, reason: describeError(error) });
+      // A definitive rejection means the SELL never reached the matching engine, so nothing is outstanding.
+      if (verdict === 'REJECTED') {
+        tracked.exitOutcomeUnknown = false;
+      }
       this.emit({
         kind: verdict === 'REJECTED' ? 'EXIT_REJECTED' : 'EXIT_UNCONFIRMED',
         correlationId: order.correlationId,
@@ -443,6 +471,7 @@ export class LiveExecutionPort implements ExecutionPort {
       orderId,
       confirmed: false,
       exitInFlight: false,
+      exitOutcomeUnknown: false,
       mismatchReported: false,
       cancelledLegs: new Set(),
     });
@@ -519,6 +548,8 @@ export class LiveExecutionPort implements ExecutionPort {
         });
         return;
       }
+      // A terminal status with no fill is definitive: the SELL is no longer live, so a retry is safe.
+      tracked.exitOutcomeUnknown = false;
       this.emitTerminal(`exit:${cid}`, {
         kind: 'EXIT_REJECTED',
         correlationId: cid,

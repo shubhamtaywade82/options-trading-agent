@@ -16,28 +16,23 @@ function weekdayOf(dateKey: string): number {
 }
 
 /**
- * Which of `sessionDates` are a weekly expiry: the expiry weekday, or the last session before it when that day is
- * missing and a later session in the same week proves it was a holiday. Undefined for an index with no verified rule.
+ * The weekly expiry a session trades against, from its calendar date alone (OTA-203, revised for look-ahead).
+ * It is the next expiry weekday on or after the date, so a Monday trades against that week's Tuesday. Nothing here depends
+ * on which other sessions exist, so the answer is the same whenever it is asked, and no later data can change it.
+ *
+ * Known limit: an exchange holiday on the expiry weekday moves the real expiry to the session before it. That shift is not
+ * modelled, because the exchange holiday calendar is not in the repository. Sessions in such a week are classed by the
+ * nominal date, so the session before the holiday is NEAR when it was in fact the expiry day.
  */
-export function weeklyExpiryDates(underlying: string, sessionDates: readonly string[]): Set<string> | undefined {
+export function nominalWeeklyExpiry(underlying: string, dateKey: string): string | undefined {
   const expiryWeekday = WEEKLY_EXPIRY_WEEKDAY[underlying];
   if (expiryWeekday === undefined) {
     return undefined;
   }
-  const weeks = new Map<number, string[]>();
-  for (const date of sessionDates) {
-    const week = Math.floor((Date.parse(`${date}T00:00:00Z`) / 86_400_000 + 3) / 7);
-    weeks.set(week, [...(weeks.get(week) ?? []), date]);
-  }
-  const expiries = new Set<string>();
-  for (const dates of weeks.values()) {
-    const onDay = dates.find((date) => weekdayOf(date) === expiryWeekday);
-    const before = dates.filter((date) => weekdayOf(date) < expiryWeekday).at(-1);
-    const holidayProven = dates.some((date) => weekdayOf(date) > expiryWeekday);
-    const expiry = onDay ?? (holidayProven ? before : undefined);
-    if (expiry !== undefined) {
-      expiries.add(expiry);
-    }
-  }
-  return expiries;
+  const daysAhead = (expiryWeekday - weekdayOf(dateKey) + 7) % 7;
+  return daysAhead === 0 ? dateKey : shiftDays(dateKey, daysAhead);
+}
+
+function shiftDays(dateKey: string, days: number): string {
+  return new Date(Date.parse(`${dateKey}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 }

@@ -7,6 +7,7 @@
 import 'dotenv/config';
 import { loadConfig } from '../src/config.js';
 import { createDhanClient } from '../src/dhan/client.js';
+import { jsonlSink, recordWireCalls } from '../src/dhan/wireRecorder.js';
 import { InstrumentMaster } from '../src/dhan/instrumentMaster.js';
 import { DhanMarketData } from '../src/dhan/marketData.js';
 import { pickExpiry, selectContract } from '../src/options/selector.js';
@@ -42,7 +43,13 @@ function record(name: string, passed: boolean, detail: string): void {
 
 async function main(): Promise<void> {
   const config = loadConfig({ ...process.env, MODE: 'paper' });
-  const client = await createDhanClient(config.dhan, { logger: createConsoleLogger() });
+  // Every trading and position call is written, redacted, to docs/sandbox/ for the OTA-106 record (src/dhan/wireRecorder.ts).
+  const wireFile = `docs/sandbox/wire-${istParts(Date.now()).date}.jsonl`;
+  const client = recordWireCalls(
+    await createDhanClient(config.dhan, { logger: createConsoleLogger() }),
+    ['orders', 'superOrders', 'positions', 'traderControls'],
+    jsonlSink(wireFile, (error) => console.error(`wire record failed: ${String(error)}`)),
+  );
   const master = new InstrumentMaster(client.instruments, () => istParts(Date.now()).date);
   const market = new DhanMarketData(client, { istShiftedTimestamps: config.feed.istShiftedTimestamps });
   const underlying = config.underlyings[0];

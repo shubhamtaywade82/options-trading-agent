@@ -1,10 +1,67 @@
+import { allInAdverseLossInr, type AdverseCosts } from '../risk/allInLoss.js';
 import { DayBook } from '../risk/dayBook.js';
 import { istParts } from '../time/ist.js';
 
 export interface RestoreResult {
   readonly eventsApplied: number;
-  /** Underlyings with an entry journalled today and no terminal outcome. Released so they are not blocked forever. */
+  /**
+   * Underlyings whose last entry has no journalled outcome. They are released so they are not blocked forever, and
+   * the planned loss of that entry is booked (see `bookUnresolved`).
+   */
   readonly releasedUnresolved: readonly string[];
+}
+
+/** The fields of an entry_submitted line that size its loss. Read as journalled: they are validated only when a loss must be booked. */
+interface IntentFields {
+  readonly quantity: unknown;
+  readonly entryReference: unknown;
+  readonly stopLossPrice: unknown;
+  readonly exchangeSegment: unknown;
+  readonly tickSize: unknown;
+}
+
+/** An entry_submitted line whose outcome is not (yet) in the journal. */
+interface PendingIntent {
+  readonly at: number;
+  readonly line: number;
+  readonly fields: IntentFields;
+}
+
+/** Fallback when an older journal line carries no segment. Matches `roundTripChargesInr`'s own default, which is the higher rate. */
+const DEFAULT_SEGMENT = 'NSE_FNO';
+
+function isPositiveFinite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/**
+ * Books an entry whose outcome the journal never recorded at its all-in adverse loss: the planned stop distance, plus the
+ * stop slippage the costs allow, plus the round-trip charges. The journal cannot tell a rejected entry from a fill that the
+ * bracket closed during the outage, and booking zero would hide the second case from the daily-loss counter. The worst case
+ * over-counts the first by one trade's loss, which fails toward more protection.
+ *
+ * Throws when the line has no usable stop or tick, since there is then no loss to book and the day cannot be counted honestly.
+ */
+function bookUnresolved(book: DayBook, underlying: string, intent: PendingIntent, costs: AdverseCosts): void {
+  const { quantity, entryReference, stopLossPrice, exchangeSegment, tickSize } = intent.fields;
+  if (
+    !isPositiveFinite(quantity) ||
+    !isPositiveFinite(entryReference) ||
+    !isPositiveFinite(stopLossPrice) ||
+    !(entryReference > stopLossPrice) ||
+    !isPositiveFinite(tickSize)
+  ) {
+    throw new Error(`event journal line ${intent.line} records an unresolved ${underlying} entry without a usable stop or tick; inspect it before restarting`);
+  }
+  const lossInr = allInAdverseLossInr({
+    quantity,
+    entryPrice: entryReference,
+    stopPrice: stopLossPrice,
+    costs,
+    tickSize,
+    exchangeSegment: typeof exchangeSegment === 'string' ? exchangeSegment : DEFAULT_SEGMENT,
+  });
+  book.recordClose({ underlying, pnlInr: -lossInr, closedAtMs: intent.at });
 }
 
 /**
@@ -15,9 +72,10 @@ export interface RestoreResult {
  * Fail-closed: a malformed journal line for the current IST day throws, because
  * skipping it could under-count losses. A truncated final line from an
  * interrupted write is the usual cause, and the operator must inspect it first.
+ * An unresolved entry without a usable stop also throws, since it has no loss to book.
  */
-export function restoreDayBook(book: DayBook, journalLines: readonly string[], dayKey: string): RestoreResult {
-  const open = new Map<string, { index: number; at: number }>();
+export function restoreDayBook(book: DayBook, journalLines: readonly string[], dayKey: string, costs: AdverseCosts): RestoreResult {
+  const open = new Map<string, PendingIntent>();
   let applied = 0;
   journalLines.forEach((line, index) => {
     if (line.trim() === '') {
@@ -31,6 +89,11 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
       reason?: unknown;
       baselineInr?: unknown;
       enabled?: unknown;
+      quantity?: unknown;
+      entryReference?: unknown;
+      stopLossPrice?: unknown;
+      exchangeSegment?: unknown;
+      tickSize?: unknown;
     };
     try {
       event = JSON.parse(line) as typeof event;
@@ -48,8 +111,24 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
     switch (event.type) {
       case 'entry_submitted':
         if (underlying !== undefined) {
+          // A new entry for this underlying can only follow an earlier one that the broker has shown settled. That
+          // earlier intent has no journalled outcome, so it is booked now rather than overwritten.
+          const superseded = open.get(underlying);
+          if (superseded !== undefined) {
+            bookUnresolved(book, underlying, superseded, costs);
+          }
           book.recordEntry(underlying);
-          open.set(underlying, { index, at });
+          open.set(underlying, {
+            at,
+            line: index + 1,
+            fields: {
+              quantity: event.quantity,
+              entryReference: event.entryReference,
+              stopLossPrice: event.stopLossPrice,
+              exchangeSegment: event.exchangeSegment,
+              tickSize: event.tickSize,
+            },
+          });
           applied += 1;
         }
         break;
@@ -103,8 +182,10 @@ export function restoreDayBook(book: DayBook, journalLines: readonly string[], d
   });
   const released = [...open.keys()].sort();
   for (const underlying of released) {
-    // An intent with no outcome may have reached the broker. It still starts a cooldown, so a restart cannot re-enter at once.
-    book.recordClose({ underlying, pnlInr: 0, closedAtMs: open.get(underlying)?.at ?? 0 });
+    const intent = open.get(underlying);
+    if (intent !== undefined) {
+      bookUnresolved(book, underlying, intent, costs);
+    }
   }
   return { eventsApplied: applied, releasedUnresolved: released };
 }

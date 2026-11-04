@@ -1,15 +1,24 @@
 import type { AgentConfig } from '../config.js';
-import type { Candle, Direction, OptionSegment, OptionType } from '../domain/types.js';
+import type { Candle, Direction, OptionSegment, OptionType, Signal } from '../domain/types.js';
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { directionToOptionType, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
+import { adverseCostsFor, allInAdverseLossInr, stopExitPrice } from '../risk/allInLoss.js';
 import { evaluatePreTrade } from '../risk/riskEngine.js';
 import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
-import { weeklyExpiryDates } from '../time/calendar.js';
+import { nominalWeeklyExpiry } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
+import {
+  expiryBucket,
+  structureAlignment,
+  volatilityBucket,
+  type ExpiryBucket,
+  type StructureAlignment,
+  type VolatilityBucket,
+} from './tradeFeatures.js';
 
 /** The live settings a replay honours. Built from AgentConfig so a replay runs the rules the agent would run. */
 export interface ReplayConfig {
@@ -25,7 +34,10 @@ export interface ReplayConfig {
   readonly entryLimitBufferPct: number;
   readonly expiryDayEntryCutoffMinute: number;
   readonly exits: AgentConfig['exits'];
-  readonly capital: Pick<AgentConfig['capital'], 'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder'>;
+  readonly capital: Pick<
+    AgentConfig['capital'],
+    'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder' | 'allInRiskPolicy'
+  >;
 }
 
 /**
@@ -81,18 +93,39 @@ export interface TradeContext {
   readonly trendAlignment: 'WITH' | 'AGAINST' | 'NEUTRAL';
   readonly timeBucket: 'OPEN' | 'MID' | 'LATE';
   readonly expiryDay: boolean;
+  /** ATR tercile of its own history at the signal bar. */
+  readonly volatility: VolatilityBucket;
+  /** Market-structure trend against the trade's direction. */
+  readonly structureAlignment: StructureAlignment;
+  /** Sessions to expiry, or UNKNOWN where the session has no expiry on record. */
+  readonly expiryBucket: ExpiryBucket;
+  /** Not replayed: there is no historical option chain. Always UNKNOWN, never a neutral stand-in. */
+  readonly chainBias: 'UNKNOWN';
 }
 
 const MID_SESSION_MINUTE = 10 * 60 + 30;
 const LATE_SESSION_MINUTE = 12 * 60 + 30;
 
-function tradeContext(context: MarketContext, direction: Direction, signalBarTime: number, expiryDay: boolean): TradeContext {
+/**
+ * Context at the signal bar. `history` ends at that bar, so every feature here is known when the trade is taken (OTA-309).
+ */
+function tradeContext(
+  context: MarketContext,
+  direction: Direction,
+  signalBarTime: number,
+  session: ResearchSession,
+  history: readonly Candle[],
+): TradeContext {
   const minute = istParts(signalBarTime).minuteOfDay;
   return {
     regime: context.regime,
     trendAlignment: context.dayTrend === 'NEUTRAL' ? 'NEUTRAL' : context.dayTrend === direction ? 'WITH' : 'AGAINST',
     timeBucket: minute < MID_SESSION_MINUTE ? 'OPEN' : minute < LATE_SESSION_MINUTE ? 'MID' : 'LATE',
-    expiryDay,
+    expiryDay: session.expiry === session.date,
+    volatility: volatilityBucket(history),
+    structureAlignment: structureAlignment(context.structure, direction),
+    expiryBucket: expiryBucket(session.date, session.expiry),
+    chainBias: 'UNKNOWN',
   };
 }
 
@@ -152,6 +185,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
         maxDailyLossPct: capital.maxDailyLossPct,
         maxTradesPerDay: capital.maxTradesPerDay,
         maxLotsPerOrder: capital.maxLotsPerOrder,
+        allInRiskPolicy: capital.allInRiskPolicy,
       },
     },
     divergences,
@@ -160,8 +194,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
 
 /** The widest spread the live gate accepts is MAX_SPREAD_PCT, so half of it is the worst accepted half-spread. */
 export function defaultCostModel(config: AgentConfig): CostModel {
-  const halfSpreadPct = config.contract.maxSpreadPct / 2;
-  return { halfSpreadPct, stopSlippagePct: halfSpreadPct };
+  return adverseCostsFor(config);
 }
 
 interface PendingEntry {
@@ -206,15 +239,33 @@ interface DayState {
  * Expiry days for a rolling-option dataset, which records no expiry. Only the nearest weekly contract
  * (expiry code 1) expires on the calendar's expiry day; other codes and monthly series get none.
  */
-export function derivedExpiryDates(dataset: ResearchDataset): Set<string> | undefined {
+/**
+ * The expiry each session trades against, for a rolling dataset of the current weekly contract. Look-ahead free: it depends
+ * on the session's own date only. Undefined where no rule is verified, or for a monthly or next-week contract.
+ */
+export function rollingWeeklyExpiry(dataset: ResearchDataset): ((date: string) => string | undefined) | undefined {
   const { kind, expiryFlag, expiryCode } = dataset.source;
   if (kind !== 'dhan_rollingoption' || expiryFlag === 'MONTH' || (expiryCode ?? 1) !== 1) {
     return undefined;
   }
-  return weeklyExpiryDates(dataset.underlying, dataset.sessions.map((session) => session.date));
+  return (date) => nominalWeeklyExpiry(dataset.underlying, date);
 }
 
-export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, costs: CostModel, divergences: readonly string[] = []): ReplayResult {
+/**
+ * Sees every bar where the replay looks for an entry: every enabled family's signal, and the one first-match credited.
+ * Research only (OTA-307). It never changes which trade is taken.
+ */
+export interface EntryObserver {
+  onEntryBar(candidates: readonly Signal[], credited: Signal | undefined): void;
+}
+
+export function replayDataset(
+  dataset: ResearchDataset,
+  config: ReplayConfig,
+  costs: CostModel,
+  divergences: readonly string[] = [],
+  observer?: EntryObserver,
+): ReplayResult {
   if (dataset.barMinutes !== config.barMinutes) {
     throw new Error(`dataset bars are ${dataset.barMinutes}-minute but BAR_MINUTES is ${config.barMinutes}`);
   }
@@ -230,11 +281,12 @@ export function replayDataset(dataset: ResearchDataset, config: ReplayConfig, co
     drops[code] = (drops[code] ?? 0) + 1;
   };
 
-  const expiryDates = derivedExpiryDates(dataset);
+  const expiryOf = rollingWeeklyExpiry(dataset);
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
-    const dated = session.expiry === undefined && expiryDates?.has(session.date) ? { ...session, expiry: session.date } : session;
-    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop);
+    const expiry = session.expiry ?? expiryOf?.(session.date);
+    const dated = expiry === undefined ? session : { ...session, expiry };
+    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, observer);
     signals += outcome.signals;
     trades.push(...outcome.trades);
   });
@@ -250,6 +302,7 @@ function replaySession(
   strategySession: StrategySession,
   params: OrbSupertrendParams,
   drop: (code: string) => void,
+  observer: EntryObserver | undefined,
 ): { trades: ReplayTrade[]; signals: number } {
   const barMs = config.barMinutes * 60_000;
   const tick = session.tickSize;
@@ -263,8 +316,7 @@ function replaySession(
 
   const ask = (price: number): number => roundUpToTick(price * (1 + costs.halfSpreadPct / 100), tick);
   const bid = (price: number): number => Math.max(tick, roundDownToTick(price * (1 - costs.halfSpreadPct / 100), tick));
-  const stopFill = (price: number): number =>
-    Math.max(tick, roundDownToTick(price * (1 - (costs.halfSpreadPct + costs.stopSlippagePct) / 100), tick));
+  const stopFill = (price: number): number => stopExitPrice(price, costs, tick);
 
   const close = (held: HeldPosition, exitTime: number, exitPrice: number, exitReason: ReplayExitReason, flags: { ambiguousBar?: boolean; gapThroughStop?: boolean } = {}): void => {
     const grossPnlInr = Number(((exitPrice - held.entryPrice) * held.quantity).toFixed(2));
@@ -339,6 +391,19 @@ function replaySession(
       stopLossPrice: bracket.stopLossPrice,
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
+      // Sized on the all-in loss when that budget is on, so the replay risks what the live gate would allow (OTA-311).
+      ...(config.capital.allInRiskPolicy === 'enforce'
+        ? {
+            perLotRiskInr: allInAdverseLossInr({
+              quantity: session.lotSize,
+              entryPrice: bracket.entryReference,
+              stopPrice: bracket.stopLossPrice,
+              costs,
+              tickSize: tick,
+              exchangeSegment: optionSegment,
+            }),
+          }
+        : {}),
     });
     if (sizing.lots < 1) {
       drop('RISK_BUDGET_TOO_SMALL');
@@ -354,6 +419,18 @@ function replaySession(
       lotSize: session.lotSize,
       maxLotsPerOrder: config.capital.maxLotsPerOrder,
       maxRiskInr: sizing.riskBudgetInr,
+      ...(config.capital.allInRiskPolicy === 'enforce'
+        ? {
+            allInRiskInr: allInAdverseLossInr({
+              quantity: sizing.quantity,
+              entryPrice: bracket.entryReference,
+              stopPrice: bracket.stopLossPrice,
+              costs,
+              tickSize: tick,
+              exchangeSegment: optionSegment,
+            }),
+          }
+        : {}),
       availableFundsInr: capital,
       nowMs: time,
       minuteOfDay: istParts(time).minuteOfDay,
@@ -488,6 +565,9 @@ function replaySession(
       continue;
     }
     const signal = strategySession.evaluate(history, params);
+    if (observer !== undefined) {
+      observer.onEntryBar(strategySession.candidates(history, params), signal);
+    }
     if (signal === undefined) {
       continue;
     }
@@ -509,7 +589,7 @@ function replaySession(
       optionType,
       strike: targetEntryStrike(atm, session.strikeStep, signal.direction, config.strikeOffsetSteps),
       signalBarTime: signal.barTime,
-      context: tradeContext(context, signal.direction, signal.barTime, session.expiry === session.date),
+      context: tradeContext(context, signal.direction, signal.barTime, session, history),
     };
   }
 

@@ -9,7 +9,7 @@ import { PaperExchangeGateway } from '../paper/exchangeGateway.js';
 import { DhanFeed } from '../dhan/feed.js';
 import { InstrumentMaster } from '../dhan/instrumentMaster.js';
 import { DhanMarketData } from '../dhan/marketData.js';
-import { LiveExecutionPort, type LiveClient } from '../dhan/liveExecution.js';
+import { LiveExecutionPort, TERMINAL_ORDER_STATUSES, type LiveClient } from '../dhan/liveExecution.js';
 import type { AgentConfig } from '../config.js';
 import type { ExecutionPort } from '../execution/ports.js';
 import { PostgresPaperExecutionPort } from '../execution/postgresPaper.js';
@@ -22,6 +22,7 @@ import { EventLog, journalFileName } from '../ops/eventLog.js';
 import { createAlertSink } from '../ops/alerts.js';
 import { ChainRecorder } from '../ops/chainRecorder.js';
 import { restoreDayBook } from '../ops/dayState.js';
+import { adverseCostsFor } from '../risk/allInLoss.js';
 import { DayBook } from '../risk/dayBook.js';
 import { createConsoleLogger, RingLogger, type Logger } from '../ops/logger.js';
 import { backfillDay } from '../persistence/backfill.js';
@@ -193,7 +194,9 @@ async function compose(
     session.ledger === undefined
       ? await readJournal(config.ops.eventLogDir, dayKey, scope)
       : await restoreFromLedger(session.ledger, config.ops.eventLogDir, dayKey, scope, logger, session.secrets);
-  const restored = restoreDayBook(dayBook, lines, dayKey);
+  // The restart booking follows the enforced policy. Otherwise it books planned stop distance plus charges, as it did before OTA-311.
+  const restartCosts = config.capital.allInRiskPolicy === 'enforce' ? adverseCostsFor(config) : { halfSpreadPct: 0, stopSlippagePct: 0 };
+  const restored = restoreDayBook(dayBook, lines, dayKey, restartCosts);
   logger.info('day state restored', {
     source: session.ledger === undefined ? 'journal' : 'ledger',
     eventsApplied: restored.eventsApplied,
@@ -416,9 +419,6 @@ async function readJournal(directory: string, dayKey: string, scope: { readonly 
   }
   return scopeJournalLines(text, scope, dayKey);
 }
-
-/** Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live. */
-const TERMINAL_ORDER_STATUSES: ReadonlySet<string> = new Set(['TRADED', 'CANCELLED', 'REJECTED', 'EXPIRED', 'CLOSED']);
 
 async function countLiveOrders(client: Pick<LiveClient, 'orders' | 'superOrders'>): Promise<number> {
   const [orders, superOrders] = await Promise.all([client.orders.list(), client.superOrders.list()]);

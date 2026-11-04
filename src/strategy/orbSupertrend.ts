@@ -1,5 +1,6 @@
 import type { Candle, Direction, Signal } from '../domain/types.js';
 import { istParts } from '../time/ist.js';
+import { barsInWindow } from '../time/sessionCoverage.js';
 import { ema, superTrend } from '../market/indicators.js';
 
 export interface OrbSupertrendParams {
@@ -40,7 +41,7 @@ export function sessionRange(
       opens.add(parts.minuteOfDay);
     }
   }
-  const expectedBars = Math.ceil((window.toMinute - window.fromMinute) / window.barMinutes);
+  const expectedBars = barsInWindow(window.fromMinute, window.toMinute, window.barMinutes);
   return opens.size === expectedBars ? { high, low } : undefined;
 }
 

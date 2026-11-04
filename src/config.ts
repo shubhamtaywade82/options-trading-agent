@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { createHash } from 'node:crypto';
 import type { OptionSegment } from './domain/types.js';
+import type { AllInRiskPolicy } from './risk/allInLoss.js';
 import { TRADING_MODES, type TradingMode } from './domain/mode.js';
 import { POSTURES, type StrategyPosture, STRATEGY_CATALOG, type StrategyId } from './strategy/session.js';
 
@@ -26,6 +27,8 @@ export const KNOWN_UNDERLYINGS: Readonly<Record<string, OptionSegment>> = {
 };
 
 export const LIVE_ACK_PHRASE = 'I_ACCEPT_LIVE_ORDER_RISK';
+/** Operator sign-off for enforcing all-in risk live (OTA-311). Shadow comparison needs no sign-off. */
+export const ALL_IN_LIVE_ACK_PHRASE = 'I_APPROVE_ALL_IN_RISK_ENFORCEMENT';
 
 /**
  * How the Dhan access token is obtained. `otp` logs in with PIN + TOTP at startup and renews
@@ -77,6 +80,8 @@ export interface AgentConfig {
     readonly maxTradesPerDay: number;
     readonly maxLotsPerOrder: number;
     readonly enforceDailyLoss: boolean;
+    /** OTA-311 rollout: 'off', 'shadow' (planned risk decides, all-in is journalled), or 'enforce' (all-in decides). */
+    readonly allInRiskPolicy: AllInRiskPolicy;
   };
   readonly contract: {
     readonly minDaysToExpiry: number;
@@ -203,6 +208,15 @@ function number(env: Env, key: string, fallback: number, bounds: { min: number; 
   return value;
 }
 
+/** OTA-311 rollout policy. Anything other than the three names is refused, so a typo cannot silently enforce or disable a check. */
+function riskPolicy(env: Env): AllInRiskPolicy {
+  const value = text(env, 'ALL_IN_RISK_POLICY', 'off');
+  if (value !== 'off' && value !== 'shadow' && value !== 'enforce') {
+    throw new Error(`ALL_IN_RISK_POLICY must be off, shadow or enforce, got ${value}`);
+  }
+  return value;
+}
+
 function flag(env: Env, key: string, fallback: boolean): boolean {
   const raw = optionalText(env, key);
   if (raw === undefined) {
@@ -324,6 +338,7 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
   'limits.enforce_daily_loss': 'ENFORCE_DAILY_LOSS',
+  'limits.all_in_risk_policy': 'ALL_IN_RISK_POLICY',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
   'contract.min_days_to_expiry': 'MIN_DAYS_TO_EXPIRY',
   'contract.max_days_to_expiry': 'MAX_DAYS_TO_EXPIRY',
@@ -429,6 +444,9 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
   if (mode === 'live' && text(env, 'LIVE_TRADING_ACK', '') !== LIVE_ACK_PHRASE) {
     throw new Error(`live mode requires LIVE_TRADING_ACK=${LIVE_ACK_PHRASE}`);
   }
+  if (mode === 'live' && riskPolicy(env) === 'enforce' && text(env, 'ALL_IN_RISK_LIVE_ACK', '') !== ALL_IN_LIVE_ACK_PHRASE) {
+    throw new Error(`live mode with ALL_IN_RISK_POLICY=enforce requires ALL_IN_RISK_LIVE_ACK=${ALL_IN_LIVE_ACK_PHRASE}`);
+  }
 
   const dhanBaseUrl = optionalText(env, 'DHAN_BASE_URL');
   const config: AgentConfig = {
@@ -453,6 +471,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
       enforceDailyLoss: flag(env, 'ENFORCE_DAILY_LOSS', true),
+      allInRiskPolicy: riskPolicy(env),
     },
     contract: {
       minDaysToExpiry: number(env, 'MIN_DAYS_TO_EXPIRY', 0, { min: 0, max: 60, integer: true }),

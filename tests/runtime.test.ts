@@ -583,6 +583,12 @@ describe('runtime: vetoes', () => {
     await assert.rejects(harness.orchestrator.start(), /open option position/);
   });
 
+  it('refuses to start while the broker holds a live order with no position yet', async () => {
+    // An entry accepted just before a crash has no position yet, so only the order book can show it.
+    const harness = build({}, { brokerLiveOrders: 1 });
+    await assert.rejects(harness.orchestrator.start(), /not in a terminal status/);
+  });
+
   it('adopts open option positions on startup and activates risk management', async () => {
     const position: DiscoveredOpenPosition = {
       positionId: 'recovered-1',

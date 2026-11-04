@@ -429,6 +429,54 @@ describe('LiveExecutionPort exits', () => {
   });
 });
 
+describe('LiveExecutionPort ambiguous exits (failure injection)', () => {
+  const FILLED_ENTRY = { orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} };
+
+  it('never resends a SELL whose placement failed ambiguously, because the first may have reached the venue', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)], sellError: new Error('socket hang up') });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 1, 'a second SELL could leave the account net short');
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.close();
+  });
+
+  it('never resends a SELL still unresolved when its outcome timed out, and sends nothing while the broker shows the position open', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker, 50);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(broker.calls.place.length, 1, 'the first SELL was accepted and is still outstanding');
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 1, 'the retry must not place a second SELL');
+    await live.close();
+  });
+
+  it('still retries an exit after the broker definitively rejects the SELL', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    broker.emitOrder({ orderId: 'EXIT-1', correlationId: 'EXT-1', status: 'REJECTED', tradedQty: 0, securityId: '48001', raw: {} });
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 2, 'a known rejection leaves nothing outstanding, so the exit may be sent again');
+    await live.close();
+  });
+});
+
 describe('LiveExecutionPort broker kill switch', () => {
   it('should resolve once the broker reads the switch back as activated', async () => {
     const broker = fakeBroker();

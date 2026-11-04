@@ -21,15 +21,30 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { configFingerprint, loadConfig, KNOWN_UNDERLYINGS, type AgentConfig } from '../src/config.js';
 import type { Candle, OptionType } from '../src/domain/types.js';
-import { contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
-import { buildSessions, parseDataset, parseRollingOptionResponse, pivotByStrike, type ResearchDataset, type RollingBar } from '../src/research/dataset.js';
+import { applyCostStressToCells, contextCells, formatCells, vixTerciles, type CellReport } from '../src/research/contextCells.js';
+import { costsFingerprint, overlapGroupFor, priorVariantCount, UNKNOWN, type ExperimentType, type HoldoutStatus, type LedgerBody } from '../src/research/experimentLedger.js';
+import { appendToLedgerFile, LEDGER_PATH, readLedgerFile } from '../src/research/ledgerStore.js';
+import {
+  buildSessions,
+  parseDataset,
+  parseRollingOptionResponse,
+  pivotByStrike,
+  ROLLING_PARSER_VERSION,
+  ROLLING_RESPONSE_SCHEMA_VERSION,
+  type ResearchDataset,
+  type RollingBar,
+} from '../src/research/dataset.js';
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
-import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel } from '../src/research/replay.js';
+import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
+import { createShadowTally, shadowObserver } from '../src/research/shadow.js';
+import { STRATEGY_CATALOG, type StrategyId } from '../src/strategy/session.js';
 import { summarize } from '../src/research/stats.js';
-import { DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type TimeMachineReport } from '../src/research/timeMachine.js';
+import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type CostStressRun, type TimeMachineReport } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
 
 /** Dhan's intraday chart window is 90 days and the rolling-option one 180; 30-day windows stay well inside both. */
@@ -39,6 +54,18 @@ const WINDOW_DAYS = 30;
  * This log keeps k countable per dataset.
  */
 const RUN_LOG = 'data/research/runs.jsonl';
+
+/** The exact SDK the fetch actually loaded, read from the installed package, not from the declared range. */
+function installedSdkVersion(): string {
+  const manifest = fileURLToPath(new URL('../node_modules/@nemesis-oss/dhanhq-sdk/package.json', import.meta.url));
+  return (JSON.parse(readFileSync(manifest, 'utf8')) as { version: string }).version;
+}
+/**
+ * Which verdict rules produced a line. v1 used 20 holdout sessions and no best-session test. v2 uses 30 sessions, removes
+ * the single best session, and blocks the holdout bootstrap in at least five sessions. v3 also caps one session's share of profit,
+ * and uses the look-ahead-free expiry. v1 and v2 results are not comparable to v3.
+ */
+const HOLDOUT_RULES = 'holdout-v4';
 const MAX_ATTEMPTS = 3;
 
 function argument(name: string): string | undefined {
@@ -201,6 +228,7 @@ async function fetchDataset(): Promise<void> {
       offsets,
       fetchedAt: new Date().toISOString(),
       conflictingBars: calls.conflicts + puts.conflicts,
+      provenance: { sdkVersion: installedSdkVersion(), parserVersion: ROLLING_PARSER_VERSION, responseSchemaVersion: ROLLING_RESPONSE_SCHEMA_VERSION },
     },
     sessions: buildSessions({ spot: uniqueSpot, calls: calls.byStrike, puts: puts.byStrike, lotSize, tickSize, fromDate, toDate }),
   };
@@ -236,16 +264,24 @@ async function runReplay(): Promise<void> {
   const config = offlineConfig(configPath);
   const dataText = await readFile(dataPath, 'utf8');
   const dataset = parseDataset(JSON.parse(dataText));
-  const { replay, divergences } = replayConfigFrom(config);
+  const { replay: configured, divergences } = replayConfigFrom(config);
+  const replay = strategyOverride(configured, argument('--strategy'));
   const costs = costsArgument(config);
-  const report = runTimeMachine(dataset, replay, costs, divergences, {
+  const options = {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
     seed: numberArgument('--seed', DEFAULT_TIME_MACHINE_OPTIONS.seed, (value) => Number.isInteger(value) && value >= 0 && value < 2 ** 32),
     iterations: numberArgument('--iterations', DEFAULT_TIME_MACHINE_OPTIONS.iterations, (value) => Number.isInteger(value) && value >= 100 && value <= 1_000_000),
     horizonDays: numberArgument('--horizon', DEFAULT_TIME_MACHINE_OPTIONS.horizonDays, (value) => Number.isInteger(value) && value >= 1),
     splitFraction: numberArgument('--split', DEFAULT_TIME_MACHINE_OPTIONS.splitFraction, (value) => value > 0 && value < 1),
     drawdownAlarmInr: numberArgument('--drawdown-alarm', (config.capital.inr * config.capital.maxDailyLossPct) / 100, (value) => value > 0),
-  });
+  };
+  const baseReport = runTimeMachine(dataset, replay, costs, divergences, options);
+  // The verdict must survive every stressed cost model before it can stand (OTA-308).
+  const stresses: CostStressRun[] = stressScenarios(costs).map(({ label, costs: stressed }) => ({
+    label,
+    report: runTimeMachine(dataset, replay, stressed, divergences, options),
+  }));
+  const report = applyCostStress(baseReport, stresses);
   const tradesPath = argument('--trades');
   if (tradesPath !== undefined) {
     const header = 'date,strategy,direction,optionType,strike,entryTime,exitTime,entryPrice,exitPrice,lots,quantity,riskInr,grossPnlInr,chargesInr,netPnlInr,r,exitReason,ambiguousBar,gapThroughStop';
@@ -255,7 +291,14 @@ async function runReplay(): Promise<void> {
     await writeFile(tradesPath, [header, ...rows].join('\n') + '\n');
   }
   const dataSha256 = createHash('sha256').update(dataText).digest('hex');
-  const cells = flag('--cells') ? await cellReport(report, dataset, dataSha256) : undefined;
+  const cellsBase = flag('--cells') ? await cellReport(baseReport, dataset) : undefined;
+  const cells =
+    cellsBase === undefined
+      ? undefined
+      : applyCostStressToCells(
+          cellsBase,
+          await Promise.all(stresses.map(async (stress) => ({ label: stress.label, report: await cellReport(stress.report, dataset) }))),
+        );
   const run = {
     ts: new Date().toISOString(),
     data: dataPath,
@@ -263,6 +306,8 @@ async function runReplay(): Promise<void> {
     dataSha256,
     dataQuality: report.dataQuality,
     config: configPath ?? null,
+    rules: HOLDOUT_RULES,
+    strategy: argument('--strategy') ?? null,
     configFingerprint: configFingerprint(config),
     costs,
     trades: report.overall.trades,
@@ -272,22 +317,100 @@ async function runReplay(): Promise<void> {
       ? {}
       : { cells: { tests: cells.testsCounted, edge: cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').map((cell) => cell.key) } }),
   };
+  // The ledger record is written before the local log line. A refused run (for example, a confirmation without a registration) writes neither.
+  const range = { from: report.fromDate ?? null, to: report.toDate ?? null, label: argument('--label') ?? null };
+  const existing = await readLedgerFile(LEDGER_PATH);
+  const ledgerBody: LedgerBody = {
+    record_kind: 'experiment',
+    hypothesis_id: argument('--hypothesis') ?? null,
+    strategy_id: argument('--strategy') ?? 'configured-set',
+    parameter_fingerprint: configFingerprint(config),
+    dataset_hash: dataSha256,
+    underlying: dataset.underlying,
+    date_range: range,
+    overlap_group: overlapGroupFor(existing, dataset.underlying, range),
+    experiment_type: (argument('--type') ?? 'discovery') as ExperimentType,
+    holdout_status: (argument('--holdout') ?? 'NotHoldout') as HoldoutStatus,
+    cells: cells?.cells.length ?? 0,
+    variants_evaluated: 1,
+    costs_fingerprint: costsFingerprint(costs),
+    provenance: provenanceOf(dataset),
+    result: {
+      verdict: report.verdict,
+      meanR: report.overall.meanR,
+      trades: report.overall.trades,
+      holdoutTrades: report.outOfSample.trades,
+      holdoutInterval95: report.bootstrap?.meanRCi95 ?? null,
+      costStress: stresses.map((stress) => ({ label: stress.label, verdict: stress.report.verdict })),
+      cellsEdge: cells === undefined ? null : cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').length,
+      testsCounted: cells?.testsCounted ?? null,
+      evidence_id: `run:${run.ts}:${dataSha256}`,
+      rules: HOLDOUT_RULES,
+    },
+    source: 'scripts/timemachine.ts run',
+    created_at: run.ts,
+  };
+  await appendToLedgerFile(LEDGER_PATH, ledgerBody);
   await mkdir(dirname(RUN_LOG), { recursive: true });
   await appendFile(RUN_LOG, `${JSON.stringify(run)}\n`);
   console.log(flag('--json') ? JSON.stringify(report, null, 2) : formatReport(report));
+  if (flag('--shadow')) {
+    const tally = createShadowTally();
+    replayDataset(dataset, replay, costs, divergences, shadowObserver(tally));
+    console.log(`\nShadow: ${tally.entryBars} entry bars, ${tally.multiSignalBars} with two or more families signalling`);
+    console.log(`  credited by first-match: ${JSON.stringify(tally.credited)}`);
+    console.log(`  hidden by first-match:   ${JSON.stringify(tally.hidden)}`);
+  }
   if (cells !== undefined) {
     console.log(`\n${formatCells(cells)}`);
   }
 }
 
-/** Earlier logged runs on this exact data. Lines from before the hash was logged cannot be matched and are not counted. */
-async function priorRunsOn(dataSha256: string): Promise<number> {
-  const log = await readFile(RUN_LOG, 'utf8').catch(() => '');
-  return log.split('\n').filter((line) => line.includes(`"dataSha256":"${dataSha256}"`)).length;
+/**
+ * `--strategy <id>` replays one family alone, so the catalogue order cannot decide which family is credited (OTA-307).
+ * The live engine is unaffected: this only changes the research replay.
+ */
+function strategyOverride(replay: ReplayConfig, id: string | undefined): ReplayConfig {
+  if (id === undefined) {
+    return replay;
+  }
+  if (!STRATEGY_CATALOG.some((row) => row.id === id)) {
+    throw new Error(`unknown strategy "${id}"; known: ${STRATEGY_CATALOG.map((row) => row.id).join(', ')}`);
+  }
+  return { ...replay, enabledStrategies: [id as StrategyId] };
+}
+
+/**
+ * The cost stresses a verdict must survive (OTA-308): a 1% half-spread, and twice the stop slippage. Each is at least
+ * the base cost, so a stress can only make the test harder.
+ */
+function stressScenarios(base: CostModel): { label: string; costs: CostModel }[] {
+  return [
+    { label: 'half-spread 1%', costs: { ...base, halfSpreadPct: Math.max(1, base.halfSpreadPct), stopSlippagePct: Math.max(1, base.stopSlippagePct) } },
+    { label: 'stop slippage 2x', costs: { ...base, stopSlippagePct: 2 * base.stopSlippagePct } },
+  ];
+}
+
+/**
+ * Every variant evaluated before this run, read from the committed ledger. The ledger is hash-chained, so a broken or
+ * edited ledger throws here and no divisor is taken from it (docs/research/experiments.jsonl).
+ */
+/** A dataset's recorded provenance, or UNKNOWN for datasets fetched before it was recorded. */
+function provenanceOf(dataset: ResearchDataset): { sdk_version: string; parser_version: string; response_schema_version: string } {
+  const provenance = dataset.source.provenance;
+  return {
+    sdk_version: provenance?.sdkVersion ?? UNKNOWN,
+    parser_version: provenance?.parserVersion ?? UNKNOWN,
+    response_schema_version: provenance?.responseSchemaVersion ?? UNKNOWN,
+  };
+}
+
+async function priorVariants(): Promise<number> {
+  return priorVariantCount(await readLedgerFile(LEDGER_PATH));
 }
 
 /** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
-async function cellReport(report: TimeMachineReport, dataset: ResearchDataset, dataSha256: string): Promise<CellReport> {
+async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): Promise<CellReport> {
   const dates = dataset.sessions.map((session) => session.date);
   const vixPath = argument('--vix');
   const dayTags = vixPath === undefined ? new Map() : vixTerciles(JSON.parse(await readFile(vixPath, 'utf8')) as Candle[], dates);
@@ -296,7 +419,8 @@ async function cellReport(report: TimeMachineReport, dataset: ResearchDataset, d
     seed: DEFAULT_TIME_MACHINE_OPTIONS.seed,
     minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
     splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
-    priorRuns: await priorRunsOn(dataSha256),
+    minHoldoutDays: DEFAULT_TIME_MACHINE_OPTIONS.minHoldoutDays,
+    priorRuns: await priorVariants(),
   });
 }
 
