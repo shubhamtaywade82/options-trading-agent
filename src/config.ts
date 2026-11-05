@@ -58,6 +58,12 @@ export interface PaperExchangeConfig {
   readonly accountId: string;
 }
 
+/** Telegram credentials for operator alerts. Bot token acts as a secret; never logged. */
+export interface TelegramConfig {
+  readonly botToken: string;
+  readonly chatId: string;
+}
+
 export interface AgentConfig {
   readonly mode: TradingMode;
   readonly dhan: {
@@ -161,6 +167,8 @@ export interface AgentConfig {
     readonly orderTimeoutMs: number;
     /** Plain-text POST target for operator alerts (an ntfy.sh topic URL works). Acts as a secret; never logged. */
     readonly alertWebhookUrl: string | undefined;
+    /** Telegram credentials for formatted operator alerts. Token acts as a secret; never logged. */
+    readonly telegram: TelegramConfig | undefined;
   };
   readonly persistence: {
     /** PostgreSQL. Required in every mode: the ledger and lease for live and sandbox, the paper venue for paper. Credentials inside the URL are never logged. */
@@ -543,6 +551,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       reconcileIntervalMs: number(env, 'RECONCILE_INTERVAL_MS', 5_000, { min: 1_000, max: 60_000, integer: true }),
       orderTimeoutMs: number(env, 'ORDER_TIMEOUT_MS', 30_000, { min: 1_000, max: 300_000, integer: true }),
       alertWebhookUrl: parseAlertWebhookUrl(env),
+      telegram: parseTelegramConfig(env),
     },
     persistence: parsePersistence(env, mode),
   };
@@ -660,6 +669,18 @@ function parseAlertWebhookUrl(env: Env): string | undefined {
     throw new Error('ALERT_WEBHOOK_URL must be an https URL');
   }
   return url;
+}
+
+function parseTelegramConfig(env: Env): TelegramConfig | undefined {
+  const botToken = optionalText(env, 'TELEGRAM_BOT_TOKEN');
+  const chatId = optionalText(env, 'TELEGRAM_CHAT_ID');
+  if (botToken === undefined && chatId === undefined) {
+    return undefined;
+  }
+  if (botToken === undefined || chatId === undefined) {
+    throw new Error('Telegram alerts require both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID');
+  }
+  return { botToken, chatId };
 }
 
 /**

@@ -46,7 +46,7 @@ const CONFIG: ReplayConfig = {
     breakevenAtRr: 1,
     runnerMode: false,
   },
-  capital: { inr: 1_000_000, maxRiskPerTradePct: 2, maxDailyLossPct: 50, maxTradesPerDay: 3, maxLotsPerOrder: 15 },
+  capital: { inr: 1_000_000, maxRiskPerTradePct: 2, maxDailyLossPct: 50, maxTradesPerDay: 3, maxLotsPerOrder: 15, allInRiskPolicy: 'off' },
 };
 
 function premiumAt(spot: number, strike: number, call: boolean): number {

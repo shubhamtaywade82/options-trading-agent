@@ -272,3 +272,25 @@ describe('all-in risk budget flag (OTA-311)', () => {
     assert.equal(paper.capital.allInRiskPolicy, 'shadow');
   });
 });
+
+describe('telegram configuration', () => {
+  it('loads Telegram credentials when both bot token and chat ID are provided', () => {
+    const config = loadConfig({ ...BASE, TELEGRAM_BOT_TOKEN: '123456:ABC-DEF', TELEGRAM_CHAT_ID: '-100123456789' });
+    assert.deepEqual(config.ops.telegram, { botToken: '123456:ABC-DEF', chatId: '-100123456789' });
+  });
+
+  it('leaves telegram undefined when neither variable is set', () => {
+    assert.equal(loadConfig(BASE).ops.telegram, undefined);
+  });
+
+  it('throws an actionable error when only one Telegram credential is set', () => {
+    assert.throws(
+      () => loadConfig({ ...BASE, TELEGRAM_BOT_TOKEN: '123456:ABC-DEF' }),
+      /Telegram alerts require both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID/,
+    );
+    assert.throws(
+      () => loadConfig({ ...BASE, TELEGRAM_CHAT_ID: '-100123456789' }),
+      /Telegram alerts require both TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID/,
+    );
+  });
+});

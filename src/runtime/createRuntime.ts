@@ -19,7 +19,7 @@ import type { UnderlyingSpec } from '../domain/types.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EventLog, journalFileName } from '../ops/eventLog.js';
-import { createAlertSink } from '../ops/alerts.js';
+import { buildAlertListener } from '../ops/alerts.js';
 import { ChainRecorder } from '../ops/chainRecorder.js';
 import { restoreDayBook } from '../ops/dayState.js';
 import { adverseCostsFor } from '../risk/allInLoss.js';
@@ -82,13 +82,14 @@ async function compose(
   const mode = config.mode;
   const clientId = config.dhan.clientId;
   const scope = { mode, clientId };
+  const alertListener = buildAlertListener(config.ops, logger);
   const events = new EventLog({
     directory: config.ops.eventLogDir,
     runId: session.runId,
     scope,
     ...(session.ledger === undefined ? {} : { ledger: session.ledger }),
     onError: (error) => logger.error('event log write failed', { error: errorMessage(error, session.secrets) }),
-    ...(config.ops.alertWebhookUrl === undefined ? {} : { onEvent: createAlertSink(config.ops.alertWebhookUrl, logger) }),
+    ...(alertListener === undefined ? {} : { onEvent: alertListener }),
     now,
   });
 
