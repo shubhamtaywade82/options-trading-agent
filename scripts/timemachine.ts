@@ -6,7 +6,7 @@
  *   # 1. Build a dataset (read-only Dhan calls: intraday spot bars + /charts/rollingoption)
  *   npm run timemachine -- fetch --underlying NIFTY --from 2026-04-01 --to 2026-09-30 --lot-size 75
  *        [--expiry-flag WEEK] [--expiry-code 1] [--offsets 10] [--tick-size 0.05] [--spacing-ms 400]
- *        [--timeout-ms 30000] [--out data/research/NIFTY-2026-04-01-2026-09-30.json] [--dump-raw]
+ *        [--timeout-ms 30000] [--out data/research/NIFTY-2026-04-01-2026-09-30.json] [--dump-raw] [--window-days 30]
  *
  *   # 2. Replay it with the current config (no credentials, no network)
  *   npm run timemachine -- run --data data/research/NIFTY-2026-04-01-2026-09-30.json
@@ -42,6 +42,7 @@ import {
 import { simulatePortfolio, type PortfolioTrade } from '../src/research/portfolio.js';
 import { defaultCostModel, replayConfigFrom, replayDataset, type CostModel, type ReplayConfig } from '../src/research/replay.js';
 import { createShadowTally, shadowObserver } from '../src/research/shadow.js';
+import { atBarMinutes } from '../src/research/studyEntries.js';
 import { STRATEGY_CATALOG, type StrategyId } from '../src/strategy/session.js';
 import { summarize } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type CostStressRun, type TimeMachineReport } from '../src/research/timeMachine.js';
@@ -105,11 +106,11 @@ function numberArgument(name: string, fallback: number, check: (value: number) =
   return value;
 }
 
-function windows(fromDate: string, toDate: string): { from: string; to: string }[] {
+function windows(fromDate: string, toDate: string, windowDays: number): { from: string; to: string }[] {
   const out: { from: string; to: string }[] = [];
   let from = fromDate;
   while (from <= toDate) {
-    const end = shiftDateKey(from, WINDOW_DAYS - 1);
+    const end = shiftDateKey(from, windowDays - 1);
     const to = end < toDate ? end : toDate;
     // Windows overlap by one day so an exclusive toDate never drops a session; bars are de-duplicated by time.
     out.push({ from, to: to === toDate ? to : shiftDateKey(to, 1) });
@@ -179,7 +180,10 @@ async function fetchDataset(): Promise<void> {
   const spot: Candle[] = [];
   const rolling: Record<OptionType, RollingBar[][]> = { CE: [], PE: [] };
   const dumped = new Set<OptionType>();
-  for (const window of windows(fromDate, toDate)) {
+  // Dhan began refusing 1-minute rolling-option requests that span more than one session (HTTP 400, seen
+  // 2026-11-03; 30-day windows worked on 2026-10-26). `--window-days 1` fetches one session per request.
+  const windowDays = numberArgument('--window-days', WINDOW_DAYS, (value) => Number.isInteger(value) && value >= 1 && value <= WINDOW_DAYS);
+  for (const window of windows(fromDate, toDate, windowDays)) {
     console.error(`${underlying} ${window.from}..${window.to}: spot bars`);
     spot.push(...(await withRetry(`spot ${window.from}`, () => market.intradayCandles(spotRef, barMinutes, window.from, window.to))));
     for (const optionType of ['CE', 'PE'] as const) {
@@ -263,9 +267,9 @@ async function runReplay(): Promise<void> {
   const configPath = argument('--config');
   const config = offlineConfig(configPath);
   const dataText = await readFile(dataPath, 'utf8');
-  const dataset = parseDataset(JSON.parse(dataText));
   const { replay: configured, divergences } = replayConfigFrom(config);
   const replay = strategyOverride(configured, argument('--strategy'));
+  const dataset = atBarMinutes(parseDataset(JSON.parse(dataText)), replay.barMinutes);
   const costs = costsArgument(config);
   const options = {
     ...DEFAULT_TIME_MACHINE_OPTIONS,
@@ -437,7 +441,7 @@ async function runPortfolio(): Promise<void> {
   const trades: PortfolioTrade[] = [];
   const dates = new Set<string>();
   for (const dataPath of dataPaths) {
-    const dataset = parseDataset(JSON.parse(await readFile(dataPath, 'utf8')));
+    const dataset = atBarMinutes(parseDataset(JSON.parse(await readFile(dataPath, 'utf8'))), replay.barMinutes);
     const result = replayDataset(dataset, unlimited, costs);
     result.dates.forEach((date) => dates.add(date));
     trades.push(...result.trades.filter((trade) => trade.exitReason !== 'DATA_GAP').map((trade) => ({ ...trade, underlying: dataset.underlying })));

@@ -263,12 +263,12 @@ export function defaultBlockLength(days: number): number {
  * neighbours within a block, so intraday dependence and short regime runs survive the resample, which an iid
  * draw of single trades would destroy.
  */
-function resampleDays(days: readonly DayOutcome[], length: number, blockLength: number, rng: SeededRng): DayOutcome[] {
-  const out: DayOutcome[] = [];
+export function resampleDays<T>(days: readonly T[], length: number, blockLength: number, rng: SeededRng): T[] {
+  const out: T[] = [];
   while (out.length < length) {
     const start = rng.int(days.length);
     for (let k = 0; k < blockLength && out.length < length; k += 1) {
-      out.push(days[(start + k) % days.length] as DayOutcome);
+      out.push(days[(start + k) % days.length] as T);
     }
   }
   return out;

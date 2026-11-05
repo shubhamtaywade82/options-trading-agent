@@ -155,6 +155,37 @@ An exit on falling IV (leave once the held strike's IV is 1.5–3 vol points bel
 NIFTY 2025-10..2026-09, SENSEX and BANKNIFTY 2026-04..09 and changed mean net R by under 0.02 either way, so
 it was removed. `fetch --interval 1` pulls 1-minute bars; `run` needs `BAR_MINUTES` to match the dataset.
 
+### Defect: 5-minute rolling bars mix two strikes (found 2026-11-03)
+
+A rolling series is "ATM+k", re-centred every bar. When spot crosses a strike boundary inside a 5-minute bar, that
+bar's high and low come from two different contracts, and `pivotByStrike` files the mixed bar under one strike.
+Closes are unaffected. Measured on NIFTY 2026-04..09, the 5-minute fetch against the 1-minute fetch of the same days
+rebuilt as 5-minute bars:
+
+| | Bars | Bar high or low differs | Close differs |
+| --- | --- | --- | --- |
+| ATM unchanged inside the bar | 287,452 | 0.9% | 0.0% |
+| ATM changed inside the bar | 98,108 | 94.9% | 0.0% |
+
+On those bars the near-ATM call's range is twice what delta implies (31.3 against 0.5 × spot range = 14.5; the
+1-minute rebuild gives 15.1). Every 5-minute file shows it: the ATM call's range over 0.5 × spot range is 1.7–2.2 on
+bars that cross a strike boundary and 1.1 on bars that do not (NIFTY 2025H2, NIFTY 2026H1, BANKNIFTY and SENSEX
+2026H1). The 1-minute file reads 1.07 on both.
+
+The fake highs and lows trigger stops and targets that never traded. On NIFTY 2026H1 with `config.paper.yml`:
+
+| | Trades | Mean net R | Profit factor | Target first | Gap-through stops |
+| --- | --- | --- | --- | --- | --- |
+| 5-minute file | 553 | −0.017 | 0.87 | 12.7% | 25 |
+| 1-minute fetch rebuilt as 5-minute | 549 | −0.058 | 0.65 | 5.8% | 1 |
+
+**Use 1-minute fetches.** `run`, `portfolio` and `trail-study` rebuild 5-minute bars from a 1-minute dataset
+automatically (`atBarMinutes`). Earlier 5-minute verdicts were too generous, and none should be quoted until rerun on
+1-minute data. A 1-minute bar can still mix strikes when spot crosses a boundary within the minute, but far less often
+and over a smaller range.
+
+The NIFTY 2026H1 5-minute file also carries lot size 75 where the 1-minute file of the same months carries 65.
+
 ## Verification required before trusting a dataset
 
 These items cannot be verified from this environment (no broker credentials):

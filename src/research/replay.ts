@@ -1,5 +1,6 @@
 import type { AgentConfig } from '../config.js';
 import type { Candle, Direction, OptionSegment, OptionType, Signal } from '../domain/types.js';
+import { OPEN_TRAIL, type TrailPosition, type TrailSpec, type TrailState } from '../exits/trail.js';
 import { bracketLevels, calculateTrailingStop, roundDownToTick, roundTripChargesInr, roundUpToTick } from '../options/pricing.js';
 import { directionToOptionType, nearestAtmStrike, targetEntryStrike } from '../options/selector.js';
 import { sizePosition } from '../options/sizing.js';
@@ -19,6 +20,7 @@ import {
   type StructureAlignment,
   type VolatilityBucket,
 } from './tradeFeatures.js';
+import { trailBarClose } from './trailStudy.js';
 
 /** The live settings a replay honours. Built from AgentConfig so a replay runs the rules the agent would run. */
 export interface ReplayConfig {
@@ -38,6 +40,10 @@ export interface ReplayConfig {
     AgentConfig['capital'],
     'inr' | 'maxRiskPerTradePct' | 'maxDailyLossPct' | 'maxTradesPerDay' | 'maxLotsPerOrder' | 'allInRiskPolicy'
   >;
+  /** Research only (coupled trailing study): this trail replaces the bracket's trailing jump. */
+  readonly trail?: TrailSpec | undefined;
+  /** Research only: no target leg, so only stops, the trail and forced exits close a position. */
+  readonly noTarget?: boolean | undefined;
 }
 
 /**
@@ -51,7 +57,7 @@ export interface CostModel {
   readonly stopSlippagePct: number;
 }
 
-export type ReplayExitReason = 'STOP_LOSS' | 'TARGET' | 'TIME_STOP' | 'EOD_FLATTEN' | 'DAILY_LOSS' | 'STRUCTURE_BREAK' | 'DATA_GAP';
+export type ReplayExitReason = 'STOP_LOSS' | 'TARGET' | 'TIME_STOP' | 'EOD_FLATTEN' | 'DAILY_LOSS' | 'STRUCTURE_BREAK' | 'DATA_GAP' | 'TRAILING_STOP';
 
 export interface ReplayTrade {
   readonly date: string;
@@ -222,6 +228,20 @@ interface HeldPosition extends PendingEntry {
   lastMark: number;
   /** An exit decided at a bar close (structure, daily loss) executes at the next bar's open. */
   flaggedExit: ReplayExitReason | undefined;
+  /** A flagged trail exit is a stop-market SELL: it fills with stop slippage, not at the plain bid. */
+  flaggedIsStop: boolean;
+  trail: TrailState;
+  readonly trailPosition: TrailPosition;
+  readonly premiumSeries: readonly Candle[];
+}
+
+/** Advances the held position's trail at a bar close; true when it fired and the position exits at the next open. */
+function applyTrail(spec: TrailSpec, held: HeldPosition, history: readonly Candle[], spotBar: Candle, tick: number): boolean {
+  const premium = held.premiumSeries.filter((bar) => bar.time <= spotBar.time);
+  const step = trailBarClose(spec, held.trailPosition, held.trail, { spot: history, premium, spotBar, stop: held.stopLossPrice, tick });
+  held.trail = step.trail;
+  held.stopLossPrice = step.stop;
+  return step.exitNextOpen;
 }
 
 interface DayState {
@@ -316,6 +336,8 @@ function replaySession(
 
   const ask = (price: number): number => roundUpToTick(price * (1 + costs.halfSpreadPct / 100), tick);
   const bid = (price: number): number => Math.max(tick, roundDownToTick(price * (1 - costs.halfSpreadPct / 100), tick));
+  const stopReason = (held: HeldPosition): ReplayExitReason =>
+    config.trail !== undefined && held.stopLossPrice > held.initialStopPrice ? 'TRAILING_STOP' : 'STOP_LOSS';
   const stopFill = (price: number): number => stopExitPrice(price, costs, tick);
 
   const close = (held: HeldPosition, exitTime: number, exitPrice: number, exitReason: ReplayExitReason, flags: { ambiguousBar?: boolean; gapThroughStop?: boolean } = {}): void => {
@@ -379,7 +401,9 @@ function replaySession(
       drop('BRACKET_UNREPRESENTABLE');
       return;
     }
-    const targetPrice = config.exits.runnerMode
+    const targetPrice = config.noTarget === true
+      ? Infinity
+      : config.exits.runnerMode
       ? roundDownToTick(bracket.entryReference + Math.max(10 * bracket.riskPerUnit, bracket.entryReference * 5), tick)
       : bracket.targetPrice;
     const capital = Math.max(0, config.capital.inr + day.realizedInr);
@@ -475,6 +499,18 @@ function replaySession(
       riskInr: Number(sizing.riskInr.toFixed(2)),
       lastMark: bar.open,
       flaggedExit: undefined,
+      flaggedIsStop: false,
+      trail: OPEN_TRAIL,
+      trailPosition: {
+        entryPrice,
+        initialStop: bracket.stopLossPrice,
+        side: entry.optionType === 'CE' ? 1 : -1,
+        entryTime: time,
+        barMs,
+        halfSpreadPct: costs.halfSpreadPct,
+        chargesPerUnit: roundTripChargesInr({ quantity: sizing.quantity, buyPrice: entryPrice, sellPrice: entryPrice, exchangeSegment: optionSegment }) / sizing.quantity,
+      },
+      premiumSeries: legBars(session, entry.optionType, entry.strike) ?? [],
     };
     position = held;
     step(held, time, true);
@@ -490,7 +526,7 @@ function replaySession(
     }
     if (!entryBar) {
       if (bar.open <= held.stopLossPrice) {
-        close(held, time, stopFill(bar.open), 'STOP_LOSS', { gapThroughStop: bar.open < held.stopLossPrice });
+        close(held, time, stopFill(bar.open), stopReason(held), { gapThroughStop: bar.open < held.stopLossPrice });
         return;
       }
       if (bid(bar.open) >= held.targetPrice) {
@@ -506,7 +542,7 @@ function replaySession(
             ? 'TIME_STOP'
             : undefined);
       if (forced !== undefined) {
-        close(held, time, bid(bar.open), forced);
+        close(held, time, held.flaggedIsStop ? stopFill(bar.open) : bid(bar.open), forced);
         return;
       }
     }
@@ -514,7 +550,7 @@ function replaySession(
     const hitTarget = bid(bar.high) >= held.targetPrice;
     if (hitStop) {
       // A 5-minute bar does not say which side traded first. The stop is assumed first.
-      close(held, time, stopFill(held.stopLossPrice), 'STOP_LOSS', { ambiguousBar: hitTarget });
+      close(held, time, stopFill(held.stopLossPrice), stopReason(held), { ambiguousBar: hitTarget });
       return;
     }
     if (hitTarget) {
@@ -523,7 +559,7 @@ function replaySession(
     }
     held.lastMark = bar.close;
     // The trailing stop moves on this bar's high but takes effect from the next bar, never inside this one.
-    if (held.trailingJump !== undefined && held.trailingJump > 0) {
+    if (config.trail === undefined && held.trailingJump !== undefined && held.trailingJump > 0) {
       held.highWaterMark = Math.max(held.highWaterMark, bar.high);
       held.stopLossPrice = calculateTrailingStop({
         entryPrice: held.entryPrice,
@@ -556,6 +592,9 @@ function replaySession(
       const heldDirection: Direction = held.optionType === 'CE' ? 'BULLISH' : 'BEARISH';
       if (day.realizedInr + (held.lastMark - held.entryPrice) * held.quantity <= -dailyLossLimitInr) {
         held.flaggedExit = 'DAILY_LOSS';
+      } else if (config.trail !== undefined && applyTrail(config.trail, held, history, spotBar, tick)) {
+        held.flaggedExit = 'TRAILING_STOP';
+        held.flaggedIsStop = true;
       } else if (config.structureExit && structureTurnedAgainst(marketStructure(history), heldDirection)) {
         held.flaggedExit = 'STRUCTURE_BREAK';
       }
