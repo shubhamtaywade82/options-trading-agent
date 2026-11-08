@@ -19,6 +19,7 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | NIFTY 2025-10..2026-09 | NIFTY | Exit sweeps (stop %, R target, time stop) and the IV-crush exit test. Contains NIFTY 2026H | Spent (confirmation) |
 | SENSEX and BANKNIFTY 2026-04..09 | SENSEX, BANKNIFTY | Exit sweeps and the IV-crush exit test | Spent (confirmation) |
 | 2025H2–2026H1 | NIFTY, BANKNIFTY, SENSEX | The ~550-trades-per-underlying counts and the mean net R range in `ROADMAP.md` fact 1 | Spent (description) |
+| Trail study, `TRAILING_STOPS.md` §12 (2026-11-03): NIFTY 2025H2 and 2026H1, BANKNIFTY 2026H1, SENSEX 2026H1, months before 2026-08 | NIFTY, BANKNIFTY, SENSEX | Selection of trail methods: 68 configurations over 3 study runs (Holm family 204), the coupled-replay and 1-minute checks, and the clean 1-minute NIFTY 2026H1 check. Not entered here when it ran; entered 2026-11-08 | Spent (selection) |
 | 2026-10-01 onward | NIFTY, BANKNIFTY, SENSEX | One raw-response layout check on 2026-10-26, which is not a P&L decision. Otherwise untouched | Not yet Frozen. OTA-314 freezes it |
 
 ## Entries
@@ -29,6 +30,7 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | 2026-11-02 | NIFTY 2026H | Single confirmation of the two best cells | research |
 | 2026-11-03 | all windows above | Recorded in this file. Exit-sweep and IV-crush windows marked as overlapping NIFTY 2026H | research |
 | 2026-11-03 | ledger | The documented evidence written to `docs/research/experiments.jsonl` as backfills, once each, with citations | research |
+| 2026-11-08 | Trail study windows (§12, 2026-11-03) | Entered late. The study's windows are now Spent (selection). Its 204-variant family and two re-checks are backfilled to the ledger as `doc:TRAILING_STOPS.md:*` | research |
 
 ## What must happen before the next confirmatory run
 
@@ -50,3 +52,4 @@ as an untouched holdout.
   committed-ledger tests fail if it is removed, edited, or relabelled `Frozen`.
 - A new confirmation on NIFTY 2026H is not possible. A confirmation needs a Frozen window, and no such window exists in the
   repository's data. The next confirmation runs on a window frozen after the fresh data is fetched (OTA-314).
+- **Trailing study holdout, recorded 2026-11-08.** Gate 6 of `TRAILING_STOPS.md` §7 tests a "locked holdout", and §12 says "the holdout is kept". No window is registered as that holdout in this file, and none is Frozen. The only candidate is the 2026-10-01 onward window, which becomes one when OTA-314 freezes it. Until then gate 6 cannot run, so no trailing method can pass all gates.

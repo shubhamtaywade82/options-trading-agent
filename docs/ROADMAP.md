@@ -1,8 +1,9 @@
 # Roadmap
 
 Where this agent goes next, in order, with the gate each step must pass. Revised 2026-11-03 against `main` at
-`32874ca`. The branch `ccr-e5f824c3-nhd407` carries seven further commits (listed under Phase 1, marked on branch). It
-extends what exists; it is not a rewrite.
+`32874ca`; status checked 2026-11-08 against `main` at `368748f`. The branch `ccr-e5f824c3-nhd407` (seven further commits,
+listed under Phase 1) is not in this repository. Its hashes are mapped to `main` after the PR plan. It extends what
+exists; it is not a rewrite.
 
 ## Where the repository actually stands
 
@@ -245,9 +246,35 @@ operator runs them.
 | 15 | Holdout floors (OTA-308) · done `512b7d4` | 30 sessions, best-session test, five-session block floor, `holdout-v2` | 4 | Tests in OTA-308 |
 | 16 | Rollout policy (OTA-311) · done `841917a` | `off`/`shadow`/`enforce`, paper in shadow, live enforce needs sign-off | 8 | Tests and the paper setting |
 
-PRs 1 to 9 are done on `ccr-e5f824c3-nhd407`, one commit each, and none has been opened as a pull request. PR 8 is on in paper and off in live: live needs operator sign-off. PRs 10 to 12 need Dhan credentials or the frozen window, so they wait for the operator. The earlier note said PRs 1 to 9 need no credentials, which was true when written.
+PRs 1 to 9 and 13 to 16 are on `main`, but not as the separate reviewed pull requests this table describes. They arrived
+in squash commit `1b9de9b` (62 files), with the previous-day signal in `32874ca`. See the commit mapping below. PR 8 is on in paper and off in live: live needs operator sign-off. PRs 10 to 12 need Dhan credentials or the frozen window, so they wait for the operator. The earlier note said PRs 1 to 9 need no credentials, which was true when written.
 PR 12 is the first run that can produce a confirmatory result. If it fails, the hypothesis is recorded as failed in
 `runs.jsonl` and the next pre-registration starts from a new hypothesis, not from a parameter change.
+
+### Commit mapping (checked 2026-11-08)
+
+The hashes named in this document are not in this repository. Each item below is on `main` in the commit shown. The basis
+is the first commit on `main` that adds the file or symbol named, so the mapping can be checked with `git log`.
+
+| Hash in this document | Item | On `main` | Basis |
+| --- | --- | --- | --- |
+| `7596b9b` | OTA-106 (a) | `1b9de9b` | `src/dhan/wireRecorder.ts` first added |
+| `07d0778` | OTA-107 | `1b9de9b` | `src/ops/dayState.ts` changed in the squash |
+| `70c7f57` | OTA-108 | `1b9de9b` | `exitOutcomeUnknown` first appears |
+| `809e7d9` | OTA-109 | not located | `tests/runtime.test.ts` on `main`: `4f2fe53`, `594e1e8`, `1b9de9b`; no single commit matched |
+| `1a157e2` | OTA-309 | `1b9de9b` | `src/research/tradeFeatures.ts` first added |
+| `9b3855e` | OTA-308 a–b | `1b9de9b` | `docs/research/PREREG.md` and `HOLDOUT.md` first added |
+| `a07afd8`, `512b7d4` | OTA-308 c–e and floors | `1b9de9b` | `best-session` first appears |
+| `3cf66f4` | OTA-308 profit-share cap | `1b9de9b` | `profit-share` first appears; the OTA-203 expiry revision is not located |
+| `c0bde8f`, `059d5c9` | OTA-313, OTA-315 | `1b9de9b` | `src/research/experimentLedger.ts` first added |
+| `1e6f417` | OTA-310 | `32874ca`, `1b9de9b` | `src/strategy/levelBreak.ts` in `32874ca`; `src/time/sessionCoverage.ts` in `1b9de9b` |
+| `f0f98b5` | OTA-307 | `1b9de9b` | `src/research/shadow.ts` and `tests/isolation.test.ts` first added |
+| `2e3c6c8`, `841917a` | OTA-311 | `1b9de9b` | `src/risk/allInLoss.ts` first added; `ALL_IN_RISK_POLICY` first appears |
+| `8a2b56a` | OTA-312 | `1b9de9b` | `tests/docs.test.ts` first added |
+| `a18a18c` | OTA-316 | `1b9de9b` | `parser_version` first appears |
+
+OTA-101 to OTA-105 carry no hash in this document. On `main` they are `16d3a5c` (bracket legs), `d4b3b89` (unconfirmed
+entries), `4f2fe53` (kill switch), `e7ef663` (tick freshness) and `b12c54a` (opening range), matched by subject.
 
 ---
 

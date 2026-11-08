@@ -10,6 +10,8 @@ import { UNKNOWN, type LedgerBody } from './experimentLedger.js';
  */
 
 const BACKFILLED_ON = '2026-11-03T00:00:00Z';
+// Trailing-study evidence was documented on 2026-11-03 but entered in the ledger on this date, so its created_at says so.
+const RECORDED_ON = '2026-11-08T00:00:00Z';
 const NO_PROVENANCE = { sdk_version: UNKNOWN, parser_version: UNKNOWN, response_schema_version: UNKNOWN };
 
 export interface DocumentedEvidence {
@@ -113,6 +115,90 @@ export const DOCUMENTED_EVIDENCE: readonly DocumentedEvidence[] = [
         note: 'IV-crush exit (leave when the held strike IV is 1.5 to 3 vol points below entry), tested on NIFTY 2025-10..2026-09 and on SENSEX and BANKNIFTY 2026-04..09. Changed mean net R by under 0.02 either way, and was removed. Floor: variants and their count were never recorded.',
       },
       source: 'docs/TIME_MACHINE.md, section Implied volatility and open interest; seeded floor previously in docs/research/variants-seed.json',
+    } as LedgerBody,
+  },
+  {
+    evidence_id: 'doc:TRAILING_STOPS.md:primary-study-2026-11-03',
+    body: {
+      ...base,
+      created_at: RECORDED_ON,
+      strategy_id: 'exit-trail-vs-B1',
+      underlying: 'NIFTY+BANKNIFTY+SENSEX',
+      date_range: {
+        from: null,
+        to: null,
+        label: 'NIFTY 2025H2, NIFTY 2026H1, BANKNIFTY 2026H1, SENSEX 2026H1 (months before 2026-08)',
+      },
+      overlap_group: 'DOC-NIFTY-2025-10-2026-09',
+      experiment_type: 'discovery',
+      holdout_status: 'Spent',
+      cells: 0,
+      variants_evaluated: 204,
+      result: {
+        documented_on: '2026-11-03',
+        recorded_on: '2026-11-08',
+        family: '68 trail configurations over 3 study runs; the document gives the Holm family as 68 x 3 = 204',
+        best_method: 'HMA 9 cross, underlying',
+        best_holm_p: 0.01,
+        gates: 'gates 1 to 4 pass (gate 3 at 1% half-spread); gate 5 fails; gate 6 not run',
+        verdict: 'keep B1',
+        note: 'Selection on windows already Spent. Runs 1 and 2 are inside the stated family and are not recorded separately. The "holdout kept" in the document is not a registered window.',
+      },
+      source: 'docs/TRAILING_STOPS.md, section 12',
+    } as LedgerBody,
+  },
+  {
+    evidence_id: 'doc:TRAILING_STOPS.md:coupled-replay-and-1m-check-2026-11-03',
+    body: {
+      ...base,
+      created_at: RECORDED_ON,
+      strategy_id: 'exit-trail-vs-B1',
+      underlying: 'NIFTY+BANKNIFTY+SENSEX',
+      date_range: {
+        from: null,
+        to: null,
+        label: 'NIFTY 2025H2 and 2026H1 (coupled replay), and the same NIFTY days on 1-minute data',
+      },
+      overlap_group: 'DOC-NIFTY-2025-10-2026-09',
+      experiment_type: 'validation',
+      holdout_status: 'Spent',
+      cells: 0,
+      variants_evaluated: 1,
+      result: {
+        documented_on: '2026-11-03',
+        recorded_on: '2026-11-08',
+        outcome:
+          'HMA 9 fails gate 5: the coupled replay loses significance, the result does not survive the second data source, and it sits on a narrow peak',
+        note: 'Floor: the document does not count the variants in these checks.',
+      },
+      source: 'docs/TRAILING_STOPS.md, section 12.1',
+    } as LedgerBody,
+  },
+  {
+    evidence_id: 'doc:TRAILING_STOPS.md:clean-1m-nifty-2026H1-2026-11-03',
+    body: {
+      ...base,
+      created_at: RECORDED_ON,
+      strategy_id: 'exit-trail-vs-B1',
+      underlying: 'NIFTY',
+      date_range: {
+        from: null,
+        to: null,
+        label: 'NIFTY 2026H1, 1-minute data rebuilt as 5-minute bars, months before 2026-08',
+      },
+      overlap_group: 'DOC-NIFTY-2025-10-2026-09',
+      experiment_type: 'validation',
+      holdout_status: 'Spent',
+      cells: 0,
+      variants_evaluated: 1,
+      result: {
+        documented_on: '2026-11-03',
+        recorded_on: '2026-11-08',
+        b1_capture_pct: -27.3,
+        best_holm_p: 0.46,
+        note: 'No configuration came close to passing. The document does not count the variants: floor. Overlaps the NIFTY 2025-10..2026-09 exit sweep.',
+      },
+      source: 'docs/TRAILING_STOPS.md, section 12.2',
     } as LedgerBody,
   },
 ];

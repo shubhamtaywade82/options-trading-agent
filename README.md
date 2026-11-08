@@ -251,7 +251,7 @@ Operator test trades are journalled as strategy `test`, so they never count as a
 npm run check   # typecheck + build + tests
 ```
 
-The suite has 464 tests, all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
+The suite has 1515 tests (`npm test`, the node:test count including nested cases), all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
 
 - the state machine's full transition table and illegal-transition rejection
 - indicators, bar aggregation, and the ORB+SuperTrend signal, including session-boundary

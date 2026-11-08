@@ -822,6 +822,8 @@ started.
 
 **Verdict: keep B1.** No method is promoted. HMA 9 stays a lead for later work on entries, not an exit to wire live.
 
+*Correction, 2026-11-08:* no window was registered as a holdout for this study. Its windows are now recorded as Spent in `docs/research/HOLDOUT.md`, and its 204-variant family is in the ledger as backfill records. Gate 6 needs a Frozen window, which does not yet exist (OTA-314).
+
 ### 12.2 Clean data (2026-11-03)
 
 The disagreement found in §12.1 is a defect in the 5-minute fetches: their bars mix two strikes whenever spot crosses
