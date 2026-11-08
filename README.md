@@ -251,7 +251,11 @@ Operator test trades are journalled as strategy `test`, so they never count as a
 npm run check   # typecheck + build + tests
 ```
 
-The suite has 1515 tests (`npm test`, the node:test count including nested cases), all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
+The suite has 1515 tests (`npm test`, the node:test count including nested cases), with 0 failures. Ten top-level groups
+skip when their external services are not configured: the PostgreSQL and Redis groups in
+`tests/persistence.integration.test.ts` need `TEST_DATABASE_URL` and `TEST_REDIS_URL`, and `paper_exchange end to end`
+is also skipped by default. Everything else runs offline (the advisor is also exercised over HTTP against a local Ollama
+stub). They cover:
 
 - the state machine's full transition table and illegal-transition rejection
 - indicators, bar aggregation, and the ORB+SuperTrend signal, including session-boundary

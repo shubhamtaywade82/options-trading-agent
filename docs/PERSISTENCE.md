@@ -150,6 +150,7 @@ Without a `DATABASE_URL`, restore reads the journal directly through `scopeJourn
 - Migrate: `npm run db:migrate`. Status: `npm run db:status`.
 - Local services: `docker compose up -d` (PostgreSQL 16 and Redis 7 on `127.0.0.1`; Redis runs with `appendonly yes` and `noeviction`).
 - Tests: `npm test` runs every suite. The integration tests in `tests/persistence.integration.test.ts` run only when `TEST_DATABASE_URL` and `TEST_REDIS_URL` are set, and are skipped otherwise. `npm run test:integration` runs that file alone. With `CI=true` and either URL unset, the module throws instead of skipping.
+- Last run, 2026-11-08: all 21 tests passed against PostgreSQL 16.15 and Redis 7.0.15, started locally on non-default ports (`5433`, `6380`), not in CI. The restart drills in OTA-502 were not run: they need the live process and the operator's environment.
 
 ## Open items
 
