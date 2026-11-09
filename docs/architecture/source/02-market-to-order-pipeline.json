@@ -5,7 +5,7 @@
     "title": "L2 Market data to order: the live pipeline",
     "output": "docs/architecture/02-market-to-order-pipeline.html",
     "quality_profile": "showcase",
-    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266" }
+    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a" }
   },
   "stages": [
     { "label": "Ingest" },

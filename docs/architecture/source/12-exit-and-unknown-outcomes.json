@@ -6,7 +6,7 @@
     "output": "docs/architecture/12-exit-and-unknown-outcomes.html",
     "quality_profile": "showcase",
     "column_fit": "spread",
-    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266" }
+    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a" }
   },
   "participants": [
     { "id": "agent", "type": "backend", "label": "Agent", "sublabel": "UnderlyingAgent", "sources": [{ "path": "src/runtime/underlyingAgent.ts", "line": 113, "label": "UnderlyingAgent" }] },

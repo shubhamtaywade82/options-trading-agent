@@ -1,7 +1,7 @@
 {
   "schema_version": 1, "diagram_type": "architecture",
   "meta": { "title": "L2 Execution venues: one port, four destinations", "output": "docs/architecture/06-execution-venues.html", "quality_profile": "showcase",
-    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266" } },
+    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a" } },
   "layout": { "mode": "grid", "cols": 4, "gapX": 110, "gapY": 110, "cellW": 120, "cellH": 84 },
   "components": [
     { "id": "port", "type": "backend", "label": "ExecutionPort", "sublabel": "submit, events only", "row": 0, "col": 1, "sources": [{ "path": "src/execution/ports.ts", "line": 94, "label": "ExecutionPort" }] },
