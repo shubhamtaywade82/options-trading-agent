@@ -7,3 +7,5 @@ tmp/
 npm-debug.log*
 *.tgz
 .claude/settings.local.json
+.archify/
+docs/architecture/*.delivery.json
