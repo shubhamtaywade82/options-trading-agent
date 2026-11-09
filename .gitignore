@@ -6,3 +6,4 @@ logs/
 tmp/
 npm-debug.log*
 *.tgz
+.claude/settings.local.json
