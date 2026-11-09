@@ -55,8 +55,26 @@ describe('development tooling (ADR-012)', () => {
     }
   });
 
-  it('keeps personal Claude settings out of git', () => {
-    assert.match(read('.gitignore'), /^\.claude\/settings\.local\.json$/m);
+  it('keeps personal Claude settings and the codebase graph out of git', () => {
+    const ignore = read('.gitignore');
+    assert.match(ignore, /^\.claude\/settings\.local\.json$/m);
+    assert.match(ignore, /^graphify-out\/$/m);
+  });
+
+  it('pins the codebase graph to one release and runs it offline (ADR-013)', () => {
+    const script = read('scripts/graphify.sh');
+    assert.match(script, /^GRAPHIFY_VERSION="\d+\.\d+\.\d+"$/m, 'the wrapper pins an exact graphifyy version');
+    assert.match(script, /--from "graphifyy==\$\{GRAPHIFY_VERSION\}"/);
+    assert.match(script, /^export GRAPHIFY_BACKEND=none$/m);
+    assert.doesNotMatch(script, /@latest/);
+  });
+
+  it('allows only the offline graphify commands, and extract only with --code-only', () => {
+    const script = read('scripts/graphify.sh');
+    const allowed = (/^ALLOWED="([^"]+)"$/m.exec(script)?.[1] ?? '').split(' ');
+    const offline = ['extract', 'update', 'cluster-only', 'query', 'path', 'explain', 'god-nodes', 'affected'];
+    assert.deepEqual([...allowed].sort(), [...offline].sort());
+    assert.match(script, /extract must pass --code-only/);
   });
 
   it('gives every repository skill a name that matches its folder, and a description', () => {

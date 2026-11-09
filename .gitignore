@@ -9,3 +9,4 @@ npm-debug.log*
 .claude/settings.local.json
 .archify/
 docs/architecture/*.delivery.json
+graphify-out/
