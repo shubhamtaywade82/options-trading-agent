@@ -3,7 +3,7 @@
 Six levels, from the system context down to the code. Each diagram is a standalone HTML page. Open it in a browser; no
 server is needed. The typed JSON under [`source/`](source/) is the editable source for each page.
 
-Every diagram is pinned to commit `27e3e0a` of this repository. Components and states cite `file:line` at that commit
+Every diagram is pinned to commit `e99b924` of this repository. Components and states cite `file:line` at that commit
 (evidence is `local-only`: the pages show the file and line, with no web links). When the code changes, regenerate the
 affected page rather than editing its HTML.
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1, "diagram_type": "architecture",
   "meta": { "title": "L2 Risk and advice: what must pass before an order", "output": "docs/architecture/05-risk-and-advice.html", "quality_profile": "showcase",
-    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266" } },
+    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a" } },
   "layout": { "mode": "grid", "cols": 3, "gapX": 170, "gapY": 110, "cellW": 120, "cellH": 84 },
   "components": [
     { "id": "gatel", "type": "security", "label": "Trading gate", "sublabel": "ledger, lease holds", "row": 0, "col": 0, "sources": [{ "path": "src/runtime/tradingGate.ts", "line": 24, "label": "ledgerAndLeaseGate" }] },

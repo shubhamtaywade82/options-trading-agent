@@ -1,7 +1,7 @@
 {
   "schema_version": 1, "diagram_type": "architecture",
   "meta": { "title": "L2 Market data and time: from login to closed bars", "output": "docs/architecture/03-market-data-and-time.html", "quality_profile": "showcase",
-    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266" } },
+    "repository": { "url": "https://github.com/shubhamtaywade82/options-trading-agent", "provider": "github", "link_mode": "local-only", "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a" } },
   "layout": { "mode": "grid", "cols": 3, "gapX": 170, "gapY": 110, "cellW": 120, "cellH": 84 },
   "components": [
     { "id": "env", "type": "backend", "label": "Config", "sublabel": "env, YAML, live ack", "row": 0, "col": 0, "sources": [{ "path": "src/config.ts", "line": 438, "label": "loadConfig" }] },

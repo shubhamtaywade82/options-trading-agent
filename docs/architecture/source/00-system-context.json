@@ -9,7 +9,7 @@
       "url": "https://github.com/shubhamtaywade82/options-trading-agent",
       "provider": "github",
       "link_mode": "local-only",
-      "revision": "27e3e0a63ee0d07238f0e9f547bf425920999266"
+      "revision": "e99b924b65964a0e1f3f461aef525c77d9e50d9a"
     }
   },
   "layout": { "mode": "grid", "cols": 3, "gapX": 170, "gapY": 110, "cellW": 120, "cellH": 84 },
