@@ -288,6 +288,11 @@ code-intelligence server.
   `apply: true`. Keep them out of allow rules, so each use is prompted. The rest are read-only.
 - It is a development dependency only. `npm ci --omit=dev` installs none of it, and nothing in `src/` or `scripts/` imports it.
 
+- **Codebase graph** (`scripts/graphify.sh`, pinned `graphifyy` 0.9.104 through `uvx`, [ADR-013](docs/DECISIONS.md)). It builds
+  `graphify-out/` (gitignored) from the code, offline: `scripts/graphify.sh extract . --code-only`, then `query`, `path`,
+  `explain`, `god-nodes` or `affected`. It needs `uv`. The wrapper refuses LLM, global-graph, git-hook and assistant-install
+  commands.
+
 ## Verification required before live
 
 These are assumptions the code depends on that the SDK docs do not settle:

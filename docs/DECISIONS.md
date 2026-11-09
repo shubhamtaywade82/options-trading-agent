@@ -165,6 +165,23 @@ policy, then update the pin and the docs together.
 from `node_modules`, no import in `src` or `scripts`, per-folder tsconfigs, personal settings gitignored, skill names and
 descriptions). review: the writer policy. No test sees it until a project settings file exists.
 
+## ADR-013 Graphify is an offline, dev-only codebase map
+
+**Context.** A knowledge graph of the code (definitions, call and import edges, communities, rationale nodes) gives an assistant
+structure that text search does not. Graphify also ships an assistant installer that writes Claude settings, CLAUDE.md sections
+and git hooks, and an extraction path that can send documents to a model or write to a global graph. ADR-012 governs this
+repository's permission and hook configuration, and research records must not leave the machine unreviewed.
+
+**Decision.** `scripts/graphify.sh` runs the pinned `graphifyy` 0.9.104 through `uvx`, sets `GRAPHIFY_BACKEND=none`, and allows
+only `extract --code-only`, `update`, `cluster-only`, `query`, `path`, `explain`, `god-nodes` and `affected`. Code is parsed
+locally with tree-sitter. The output is `graphify-out/`, which is gitignored. The repository never runs `graphify install`,
+`graphify <platform> install` or `graphify hook install`, because those write `.claude/settings.json`, CLAUDE.md sections and git
+hooks. Those choices belong to the operator. The graph is a navigation aid. Compiler-accurate definitions and references still
+come from `ts-language-mcp`, and an inferred edge is checked at its cited `file:line` before anyone relies on it.
+
+**Enforced by.** test: `tests/devTooling.test.ts` (exact pin in the wrapper, allow-list limited to the offline commands,
+`--code-only` required for extract, `graphify-out/` ignored). review: any change to the allow-list or to the installed integrations.
+
 ## Deliberately not decided yet
 
 Each waits for a concrete need, as `docs/ROADMAP.md` states: a strategy registry service, a Zod schema for every domain

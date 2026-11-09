@@ -68,3 +68,13 @@ From `docs/ROADMAP.md` ("Standing rules") and `docs/research/`.
 - `tests/tsconfig.json` and `scripts/tsconfig.json` extend the typecheck config so the server analyses those folders.
   Do not delete them.
 - Repository skills live in `.claude/skills/`. Personal overrides go in `.claude/settings.local.json`, which is gitignored.
+
+## Codebase graph (ADR-013)
+
+- Build: `scripts/graphify.sh extract . --code-only`, then `scripts/graphify.sh cluster-only .`. After code changes, run
+  `scripts/graphify.sh update .`. Requires `uv`. No LLM and no network source is used.
+- Read: `scripts/graphify.sh query "<question>"`, `path A B`, `explain X`, `god-nodes`, `affected X`. An edge is `EXTRACTED`
+  (stated in the source) or `INFERRED`. Check an inferred edge at its `file:line` before relying on it.
+- The graph lives in `graphify-out/`, which is gitignored. `GRAPH_REPORT.md` records the commit it was built from.
+- Do not run `graphify install`, `graphify <platform> install` or `graphify hook install` in this repository. They write
+  `.claude/settings.json`, CLAUDE.md sections and git hooks (ADR-013). Those need the operator's explicit decision.
