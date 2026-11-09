@@ -146,6 +146,25 @@ refused the entry, and paper runs in this mode. `enforce` decides on all-in risk
 **Enforced by.** tests: `tests/riskEngine.test.ts` (basis and policy), `tests/riskShadow.test.ts`, `tests/config.test.ts` (the
 policy names, the paper setting and the live guard).
 
+## ADR-012 Development tooling is dev-only, exactly pinned and read-first
+
+**Context.** A coding assistant works faster from the compiler's own answers than from text search. A server that floats to
+the newest version, enters the runtime dependency tree, or writes files without a prompt would change what the repository
+builds and what an assistant can do to it.
+
+**Decision.** The TypeScript code-intelligence server is a `devDependency` pinned exactly (`ts-language-mcp` 2.3.1). `.mcp.json`
+starts it from `node_modules`, never from an unpinned `npx` download. It has no runtime dependency, and no file in `src/` or
+`scripts/` imports it or the MCP SDK. Its four tools that write files (`rename_symbol`, `format_document`,
+`apply_code_fix`, `organize_imports`) are never pre-allowed, so each use is prompted. Its read-only tools may be pre-allowed in
+a project settings file. `tests/tsconfig.json` and `scripts/tsconfig.json` extend the typecheck config, so the server analyses
+those folders. Repository skills in `.claude/skills/` are instructions that point at existing docs and scripts. They add no
+code path to the trading or research planes. Upgrading the server is a deliberate change: compare its tool list with this
+policy, then update the pin and the docs together.
+
+**Enforced by.** test: `tests/devTooling.test.ts` (exact pin equal to the installed version, not a runtime dependency, started
+from `node_modules`, no import in `src` or `scripts`, per-folder tsconfigs, personal settings gitignored, skill names and
+descriptions). review: the writer policy. No test sees it until a project settings file exists.
+
 ## Deliberately not decided yet
 
 Each waits for a concrete need, as `docs/ROADMAP.md` states: a strategy registry service, a Zod schema for every domain

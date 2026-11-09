@@ -251,7 +251,9 @@ Operator test trades are journalled as strategy `test`, so they never count as a
 npm run check   # typecheck + build + tests
 ```
 
-The suite has 464 tests, all offline (the advisor is also exercised over HTTP against a local Ollama stub). They cover:
+The suite needs no network and no broker credentials. The advisor is also exercised over HTTP against a local Ollama
+stub. The PostgreSQL and Redis suite runs only when `TEST_DATABASE_URL` and `TEST_REDIS_URL` are set, and the
+paper-exchange suite only when `PAPER_EXCHANGE_E2E_URL` is set. `npm test` prints the test count. It covers:
 
 - the state machine's full transition table and illegal-transition rejection
 - indicators, bar aggregation, and the ORB+SuperTrend signal, including session-boundary
@@ -272,6 +274,19 @@ The suite has 464 tests, all offline (the advisor is also exercised over HTTP ag
 **Not covered by tests:** the live DhanHQ wire behaviour. There are no broker credentials
 in this environment. The items under [Verification required](#verification-required-before-live) must be
 exercised against a Dhan sandbox or with a minimal-size live run.
+
+## Developer tooling
+
+Coding assistants work from [`CLAUDE.md`](CLAUDE.md), the repository skills in `.claude/skills/`, and a TypeScript
+code-intelligence server.
+
+- **`ts-language-mcp` 2.3.1** (`.mcp.json`, exact pin in `devDependencies`, [ADR-012](docs/DECISIONS.md)). It answers
+  definition, reference, type, diagnostic and call-hierarchy questions from the TypeScript compiler, for `src`, `tests`
+  and `scripts`. It runs from the installed package, so run `npm ci` first. Claude Code asks you to approve the project
+  server on first use.
+- Four of its tools write files: `rename_symbol`, `format_document`, `apply_code_fix`, and `organize_imports` with
+  `apply: true`. Keep them out of allow rules, so each use is prompted. The rest are read-only.
+- It is a development dependency only. `npm ci --omit=dev` installs none of it, and nothing in `src/` or `scripts/` imports it.
 
 ## Verification required before live
 
@@ -357,9 +372,15 @@ src/
   execution/           ExecutionPort contract, paper venue
   llm/                 Ollama advisor
   ops/                 event log, console logger
+  persistence/         PostgreSQL and Redis access, rate gate, trading lease, migrations
+  paper/               paper exchange client and gateway (PAPER_BACKEND=exchange)
+  exits/               trailing-stop engine (see docs/TRAILING_STOPS.md)
   runtime/             orchestrator, per-underlying agent, serial queue, clock guard, wiring, read-only views
   research/            Time Machine: dataset and rolling-option pivot, historical replay, bootstrap and paths (offline)
   ui/                  operator cockpit: pure renderer (cockpit.ts) and Ink app (App.tsx)
   index.tsx            entry point: cockpit on a terminal, plain logs otherwise
-tests/                 offline suite (node:test via tsx)
+tests/                 offline suite (node:test via tsx), one tsconfig.json per folder for tooling
+scripts/               operator and research CLIs (run with tsx)
+docs/                  architecture, ADRs, roadmap, research pre-registration and ledger
+.claude/               repository skills for coding assistants (.claude/skills/)
 ```
