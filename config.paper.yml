@@ -58,7 +58,7 @@ strategy:
 # Contract selection & expiry constraints
 contract:
   min_days_to_expiry: 0
-  max_days_to_expiry: 6        # 6 keeps every weekly expiry in reach (NIFTY Wed/Thu, SENSEX Fri sat out at 4) and still excludes 8+ DTE
+  max_days_to_expiry: 6        # 6 keeps every weekly expiry in reach (NIFTY Tuesday, SENSEX Thursday) and still excludes 8+ DTE
 
 # Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
 chain_analysis:
@@ -97,7 +97,7 @@ exits:
   runner_mode: false           # false = realistic achievable TP; true = uncapped runner
   max_hold_minutes: 30         # 50%/1R/30min was the only exit set >= 0R on all four replay datasets; 30%/1.5R/90min was the worst
   trailing_jump_pct: 8         # Step up stop loss by 8% as price advances (locks in profit tighter)
-  breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+24% gain)
+  breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+40% on premium with the 50% stop)
 
 # Paper Trading Venue Settings
 paper:

@@ -153,7 +153,7 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Mandatory stop loss | `bracketLevels`, `evaluatePreTrade`, SDK super-order schema | Every entry carries a stop and target. An entry cannot be built without them, and the SDK rejects a super order that lacks either. |
 | Max risk per trade | `sizePosition`, re-checked in `evaluatePreTrade` | Lots floored to budget. Zero lots means skip. |
 | Max daily loss | `DayBook`, `Orchestrator.enforceDailyLoss` | Realised + unrealised day P&L ≤ −limit: entries blocked, all positions flattened, then broker kill switch. Realised P&L is net of estimated charges (`roundTripChargesInr`: ₹20/order brokerage, STT 0.15% on the sell premium, exchange and SEBI fees, stamp duty, GST); the journal records gross, charges and net. The contract note is authoritative. |
-| Max daily loss at risk | `DayBook.openRiskInr`, `evaluatePreTrade` | Realised P&L − every open or pending stop − this trade's stop must stay above −limit, across all underlyings and both sides. Otherwise `DAILY_LOSS_AT_RISK`. |
+| Max daily loss at risk | `DayBook.openRiskInr`, `evaluatePreTrade` | Realised P&L − every open or pending stop − this trade's stop must stay above −limit, across all underlyings and both sides. Otherwise `DAILY_LOSS_AT_RISK`. A trailed stop lowers open risk only on the paper and sandbox venues, which enforce the agent's own model. On the live venue open risk stays at the initial stop. |
 | Trades per day, open positions, one per underlying | `evaluatePreTrade` | Hard limits. Defaults: 3 trades, 1 open position. |
 | Opposing sides | `evaluatePreTrade` (`OPPOSING_SIDE_OPEN`) | With `ALLOW_OPPOSING_SIDES=false`, no CE is opened while any PE is open or pending, and the reverse, across all underlyings. The indices move together, so the pair pays decay and spread twice. Default `true`; the paper profile sets `false`. |
 | Cooldown per underlying | `DayBook` | `COOLDOWN_SECONDS` after each exit. |
@@ -162,8 +162,9 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Time stop, EOD flatten | `UnderlyingAgent.exitReason` | `MAX_HOLD_MINUTES`, and every position flattened at `FLATTEN_BY` IST. |
 | Kill switch | `DayBook`, `engageBrokerKillSwitch` | Local block on entries at once. Broker kill switch on halts and on daily-loss breach once no position is open (Dhan refuses it otherwise), tried again if a late fill reopens and closes one. |
 | Clock alignment | `assertWarmupClock` | Startup refuses if bar timestamps are inconsistent with the wall clock (wrong epoch convention). |
-| Broker positions at start | `Orchestrator.start` | Refuses to start while the broker holds option positions. Reconcile manually first. Until then only the position's bracket legs and Dhan's own intraday square-off (from about 15:18 IST, with a charge) protect it: no agent exit runs. |
+| Broker positions at start | `Orchestrator.start` | Adopts open option positions only when every one of them matches a position the agent can manage. Otherwise it refuses to start. Reconcile manually first. Until then only the position's bracket legs and Dhan's own intraday square-off (from about 15:18 IST, with a charge) protect it: no agent exit runs. |
 | Flatten before the broker does | `loadConfig` | `FLATTEN_BY` must be 15:15 IST or earlier, before Dhan auto-squares intraday positions. |
+| Unknown YAML keys | `loadConfig` | A key in the YAML file that sets nothing the agent reads refuses startup and is named in the error. A misspelt limit cannot fall back to its default. |
 | Live risk ceilings | `loadConfig` | `MODE=live` refuses `MAX_RISK_PER_TRADE_PCT` above 2 and `MAX_DAILY_LOSS_PCT` above 6, whatever `.env` or the YAML says. Not configurable. |
 | Day state across restarts | `restoreDayBook` | Day P&L, trade count, cooldown, and breach state are rebuilt from today's journal file (`data/journal/events-YYYY-MM-DD.jsonl`). A malformed line in that file refuses startup. |
 
@@ -308,8 +309,10 @@ These are assumptions the code depends on that the SDK docs do not settle:
 3. **Chain and scrip-master fields.** Verified 2026-10-27 by `smoke:live` on NIFTY, BANKNIFTY and
    SENSEX: no chain leg lacks ltp, bid, ask, OI, volume or security id. The scrip master's
    `TICK_SIZE` is in paise and is converted to rupees (₹0.05).
-4. **Freeze limits.** `MAX_LOTS_PER_ORDER` is user-set. Dhan's per-order freeze quantity for
-   index options is not hardcoded here and must be set to the current exchange value.
+4. **Freeze limits.** The exchange's per-order freeze quantity is not hardcoded, because the
+   exchanges revise it. Set `FREEZE_QTY_<SYMBOL>` (YAML: `limits.freeze_quantity.<SYMBOL>`) to the
+   current exchange value for each underlying. An entry is then sized in whole lots at or below it.
+   Without it only `MAX_LOTS_PER_ORDER` caps an order. Orders are not sliced.
 5. **Broker kill-switch semantics.** Whether an activated kill switch also squares off open
    positions, and whether it blocks exit orders, is not documented in the SDK. The daily-loss
    path engages it only after flat for that reason.

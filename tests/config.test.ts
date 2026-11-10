@@ -1,5 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LIVE_ACK_PHRASE, loadConfig } from '../src/config.js';
 
 const SANDBOX = {
@@ -258,6 +261,45 @@ describe('loadConfig posture and YAML loading', () => {
     assert.equal(config.contract.maxDaysToExpiry, 6);
     assert.equal(config.chainAnalysis.enabled, true);
     assert.equal(config.chainAnalysis.minHeadroomPts, 15);
+  });
+});
+
+describe('YAML keys the agent does not read', () => {
+  function yamlFile(body: string): string {
+    const path = join(mkdtempSync(join(tmpdir(), 'agent-config-')), 'config.yml');
+    writeFileSync(path, body);
+    return path;
+  }
+
+  it('should refuse a misspelt risk key instead of falling back to the default', () => {
+    const path = yamlFile('capital:\n  max_risk_per_trade_pc: 0.5\n');
+    assert.throws(() => loadConfig(BASE, path), /capital\.max_risk_per_trade_pc/);
+  });
+
+  it('should refuse a key under an unknown section', () => {
+    assert.throws(() => loadConfig(BASE, yamlFile('risk:\n  stop_loss_pct: 20\n')), /risk\.stop_loss_pct/);
+  });
+
+  it('should accept a key that maps onto an environment name the agent reads', () => {
+    const config = loadConfig(BASE, yamlFile('paper:\n  slippage_bps: 40\ncapital:\n  max_risk_per_trade_pct: 0.5\n'));
+    assert.equal(config.paper.slippageBps, 40);
+    assert.equal(config.capital.maxRiskPerTradePct, 0.5);
+  });
+});
+
+describe('exchange freeze quantity', () => {
+  it('should be unset unless the operator gives one for the underlying', () => {
+    assert.equal(loadConfig(BASE).underlyings[0]?.freezeQuantity, undefined);
+  });
+
+  it('should read FREEZE_QTY_<SYMBOL> for each configured underlying', () => {
+    const config = loadConfig({ ...BASE, UNDERLYINGS: 'NIFTY,SENSEX', FREEZE_QTY_NIFTY: '1800' });
+    assert.deepEqual(config.underlyings.map((u) => u.freezeQuantity), [1800, undefined]);
+  });
+
+  it('should refuse a freeze quantity that is not a positive whole number', () => {
+    assert.throws(() => loadConfig({ ...BASE, FREEZE_QTY_NIFTY: '0' }), /FREEZE_QTY_NIFTY/);
+    assert.throws(() => loadConfig({ ...BASE, FREEZE_QTY_NIFTY: '12.5' }), /FREEZE_QTY_NIFTY/);
   });
 });
 
