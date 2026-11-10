@@ -18,6 +18,8 @@ interface FakeOptions {
   /** Replaces the default super order book, in which a leg reads CANCELLED once its cancel was accepted. */
   superOrderBook?: () => unknown[];
   killSwitchReadBack?: string;
+  /** The order id a SELL placement returns. Without one the adapter cannot cancel a resting SELL. */
+  sellOrderId?: string;
 }
 
 function fakeBroker(options: FakeOptions = {}) {
@@ -27,6 +29,7 @@ function fakeBroker(options: FakeOptions = {}) {
     superCancel: [] as Array<Record<string, unknown>>,
     place: [] as Array<Record<string, unknown>>,
     kill: [] as string[],
+    cancel: [] as string[],
     superList: 0,
   };
   const cancelledLegs = new Set<unknown>();
@@ -77,7 +80,11 @@ function fakeBroker(options: FakeOptions = {}) {
         if (options.sellError !== undefined) {
           throw options.sellError;
         }
-        return { correlationId: request['correlationId'], data: {} };
+        return { correlationId: request['correlationId'], data: options.sellOrderId === undefined ? {} : { orderId: options.sellOrderId } };
+      },
+      cancel: async (orderId: string) => {
+        calls.cancel.push(orderId);
+        return {};
       },
     },
     positions: {
@@ -635,6 +642,98 @@ describe('LiveExecutionPort reconciliation', () => {
     assert.equal(fills.length, 1);
     assert.equal(fills[0]?.kind === 'ENTRY_FILLED' && fills[0].averagePrice, 101.2);
     assert.equal(events[0]?.kind, 'ENTRY_UNCONFIRMED');
+    await live.close();
+  });
+});
+
+describe('LiveExecutionPort exit resilience (review 2026-11-10)', () => {
+  const FILLED_ENTRY = { orderId: 'SUPER-1', correlationId: 'ENT-1', status: 'TRADED', tradedQty: 75, averageTradedPrice: 101, securityId: '48001', raw: {} };
+
+  /** Positions reads that fail `failures` times, then return `rows`. */
+  function flakyPositions(broker: ReturnType<typeof fakeBroker>, failures: number, rows: Array<Record<string, unknown>>): void {
+    let remaining = failures;
+    (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => {
+      if (remaining > 0) {
+        remaining -= 1;
+        throw new Error('read timeout');
+      }
+      return rows;
+    };
+  }
+
+  it('should still exit when one positions read fails and the next succeeds', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    flakyPositions(broker, 1, [brokerRow(75)]);
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 1, 'a single failed read must not strand the position');
+    assert.notEqual(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await live.close();
+  });
+
+  it('should not treat a tracked position missing from the broker list as flat on the exit path', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    setPositions(broker, []);
+    await live.submitExit(exit());
+    assert.equal(broker.calls.place.length, 0);
+    assert.equal(broker.calls.superCancel.length, 0, 'the legs keep protecting a position that cannot be read');
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    assert.equal(events.some((event) => event.kind === 'PROTECTIVE_EXIT_FILLED'), false);
+    await live.close();
+  });
+
+  it('should not book a close when the position row is missing from one reconciliation read', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker, 200, 10);
+    live.start();
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    let reads = 0;
+    (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => {
+      reads += 1;
+      return reads === 1 ? [] : [brokerRow(75)];
+    };
+    await new Promise<void>((resolve) => setTimeout(resolve, 80));
+    assert.ok(reads >= 3);
+    assert.equal(events.some((event) => event.kind === 'PROTECTIVE_EXIT_FILLED'), false, 'one partial response is not a close');
+    await live.close();
+  });
+
+  it('should book a close once the position row stays missing over consecutive reconciliation reads', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker, 200, 10);
+    live.start();
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    setPositions(broker, []);
+    await new Promise<void>((resolve) => setTimeout(resolve, 80));
+    assert.equal(events.filter((event) => event.kind === 'PROTECTIVE_EXIT_FILLED').length, 1);
+    await live.close();
+  });
+
+  it('should cancel a SELL that rests unfilled at the timeout and report it rejected, so the exit is retried', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)], sellOrderId: 'SELL-1' });
+    const { live, events } = port(broker, 50);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepEqual(broker.calls.cancel, ['SELL-1'], 'the resting SELL is cancelled at the timeout');
+    broker.emitOrder({ orderId: 'SELL-1', correlationId: 'EXT-1', status: 'CANCELLED', tradedQty: 0, securityId: '48001', raw: {} });
+    await settle();
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
+    await live.submitExit({ ...exit(), correlationId: 'EXT-2' });
+    assert.equal(broker.calls.place.length, 2, 'a cancelled SELL with no fill is definitive, so the retry is sent');
     await live.close();
   });
 });

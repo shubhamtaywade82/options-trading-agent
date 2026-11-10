@@ -318,6 +318,11 @@ These are assumptions the code depends on that the SDK docs do not settle:
    holidays too; with no ticks there are no bars or signals, and the 15:45 stop ends it.
 7. **Intraday warmup depth.** `WARMUP_DAYS` determines how many days of 5-minute bars are
    seeded. Confirm the Dhan response length for your chosen bar size.
+8. **Static IP.** Dhan accepts order API calls only from a registered static IP. Register the
+   host's IP in the Dhan console before a sandbox or live run; otherwise every order is rejected.
+9. **Market exits are protected limits.** Dhan converts an API `MARKET` order to a LIMIT with market
+   price protection. A SELL that rests unfilled is cancelled at `ORDER_TIMEOUT_MS` and the exit is
+   retried. The bracket legs are already cancelled by then, so watch this path on sandbox.
 
 ### Staged rollout to real money
 

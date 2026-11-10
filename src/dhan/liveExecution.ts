@@ -97,6 +97,8 @@ interface TrackedPosition {
    */
   exitOutcomeUnknown: boolean;
   mismatchReported: boolean;
+  /** Consecutive reconciliation reads in which the broker list had no row for this position. */
+  missingRowReads: number;
   /** Legs whose cancel request the broker accepted. A retry requests only the rest; the order book confirms them. */
   cancelledLegs: Set<BracketLeg>;
 }
@@ -106,6 +108,14 @@ const LEG_CANCEL_BACKOFF_MS = 250;
 /** An accepted cancel is not a cancelled leg. The super order book is polled this many times for a terminal status. */
 const LEG_STATUS_POLLS = 8;
 const LEG_STATUS_POLL_MS = 250;
+/** One failed or partial positions read must not strand an exit: the read is tried this many times before it counts as unknown. */
+const POSITION_READ_ATTEMPTS = 3;
+const POSITION_READ_BACKOFF_MS = 100;
+/**
+ * A tracked position whose row is absent from the broker list is unknown, not flat: one partial response would otherwise
+ * book a close that never happened. Reconciliation accepts the absence only after this many consecutive reads.
+ */
+const MISSING_ROW_CONFIRMATIONS = 3;
 /**
  * Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live.
  * Shared with the restart guard in createRuntime, so the adapter and the guard cannot disagree about what is live.
@@ -386,7 +396,7 @@ export class LiveExecutionPort implements ExecutionPort {
       waiter.catch(() => undefined);
       // Set before the write. From here until a definitive outcome, the SELL may be live at the broker.
       tracked.exitOutcomeUnknown = true;
-      await this.client.orders.place({
+      const placed = await this.client.orders.place({
         correlationId: order.correlationId,
         transactionType: 'SELL',
         exchangeSegment: order.contract.exchangeSegment,
@@ -397,7 +407,8 @@ export class LiveExecutionPort implements ExecutionPort {
         securityId: order.contract.securityId,
       });
       handedOff = true;
-      void this.awaitExit(order, tracked, quantity, waiter);
+      const sellOrderId = (placed as { data?: { orderId?: unknown } } | undefined)?.data?.orderId;
+      void this.awaitExit(order, tracked, quantity, this.settleUnfilledExit(order, typeof sellOrderId === 'string' ? sellOrderId : undefined, waiter));
     } catch (error) {
       const verdict = classifyPlacementError(error);
       this.options.logger.error('exit placement failed', { cid: order.correlationId, verdict, reason: describeError(error) });
@@ -472,6 +483,7 @@ export class LiveExecutionPort implements ExecutionPort {
       confirmed: false,
       exitInFlight: false,
       exitOutcomeUnknown: false,
+      missingRowReads: 0,
       mismatchReported: false,
       cancelledLegs: new Set(),
     });
@@ -511,6 +523,31 @@ export class LiveExecutionPort implements ExecutionPort {
         underlying: order.underlying,
         reason: describeError(error),
       });
+    }
+  }
+
+  /**
+   * Dhan converts an API MARKET order into a protected LIMIT, so a SELL can rest unfilled in a fast move. One that has
+   * not reached a terminal status in time is cancelled, and its final status is awaited: a cancel with no fill is
+   * definitive, so the exit may be sent again at the new price. The second waiter is registered before the cancel.
+   * If the order id is unknown or the cancel fails, the outcome stays unknown and the timeout is rethrown.
+   */
+  private async settleUnfilledExit(order: ExitOrder, orderId: string | undefined, waiter: Promise<OrderOutcome>): Promise<OrderOutcome> {
+    try {
+      return await waiter;
+    } catch (timeout) {
+      if (orderId === undefined) {
+        throw timeout;
+      }
+      const settled = this.tracker.waitFor(order.correlationId, { timeoutMs: this.options.orderTimeoutMs });
+      settled.catch(() => undefined);
+      try {
+        await this.client.orders.cancel(orderId);
+      } catch (error) {
+        this.options.logger.error('unfilled exit cancel failed', { cid: order.correlationId, error: describeError(error) });
+        throw timeout;
+      }
+      return settled;
     }
   }
 
@@ -647,23 +684,27 @@ export class LiveExecutionPort implements ExecutionPort {
     });
   }
 
-  /** Broker's view of one instrument. Undefined when the read fails or the row is incomplete. */
+  /**
+   * Broker's view of one instrument on the exit path. Undefined when it cannot be established: the read failed, the row
+   * is incomplete, or the list has no row for a position the agent holds. An absent row is not read as flat here, because
+   * a partial response would then cancel nothing and report a close that never happened. The read is retried first.
+   */
   private async brokerPosition(ref: InstrumentRef): Promise<{ netQty: number; row: PositionRow | undefined } | undefined> {
-    let rows: PositionRow[];
-    try {
-      rows = await this.client.positions.list();
-    } catch (error) {
-      this.options.logger.error('positions read failed', { error: describeError(error) });
-      return undefined;
+    for (let attempt = 1; attempt <= POSITION_READ_ATTEMPTS; attempt += 1) {
+      try {
+        const row = ownRow(await this.client.positions.list(), ref);
+        if (row?.netQty !== undefined) {
+          return { netQty: row.netQty, row };
+        }
+        this.options.logger.warn('position row missing or incomplete in the broker list', { attempt });
+      } catch (error) {
+        this.options.logger.error('positions read failed', { attempt, error: describeError(error) });
+      }
+      if (attempt < POSITION_READ_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, POSITION_READ_BACKOFF_MS));
+      }
     }
-    const row = ownRow(rows, ref);
-    if (row === undefined) {
-      return { netQty: 0, row };
-    }
-    if (row.netQty === undefined) {
-      return undefined;
-    }
-    return { netQty: row.netQty, row };
+    return undefined;
   }
 
   private async reconcile(): Promise<void> {
@@ -683,6 +724,17 @@ export class LiveExecutionPort implements ExecutionPort {
         continue;
       }
       const row = ownRow(rows, tracked.ref);
+      if (tracked.confirmed) {
+        // A held position needs a row that says so. An incomplete row is unknown; an absent one is flat only once it stays absent.
+        if (row !== undefined && row.netQty === undefined) {
+          continue;
+        }
+        tracked.missingRowReads = row === undefined ? tracked.missingRowReads + 1 : 0;
+        if (row === undefined && tracked.missingRowReads < MISSING_ROW_CONFIRMATIONS) {
+          this.options.logger.warn('tracked position missing from the broker list; not treated as flat yet', { positionId: tracked.positionId, reads: tracked.missingRowReads });
+          continue;
+        }
+      }
       const netQty = row?.netQty ?? 0;
 
       if (netQty < 0) {
