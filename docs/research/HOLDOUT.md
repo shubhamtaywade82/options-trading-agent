@@ -19,7 +19,8 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | NIFTY 2025-10..2026-09 | NIFTY | Exit sweeps (stop %, R target, time stop) and the IV-crush exit test. Contains NIFTY 2026H | Spent (confirmation) |
 | SENSEX and BANKNIFTY 2026-04..09 | SENSEX, BANKNIFTY | Exit sweeps and the IV-crush exit test | Spent (confirmation) |
 | 2025H2–2026H1 | NIFTY, BANKNIFTY, SENSEX | The ~550-trades-per-underlying counts and the mean net R range in `ROADMAP.md` fact 1 | Spent (description) |
-| 2026-10-01 onward | NIFTY, BANKNIFTY, SENSEX | One raw-response layout check on 2026-10-26, which is not a P&L decision. Otherwise untouched | Not yet Frozen. OTA-314 freezes it |
+| 2026-10-01..2026-12-31 | NIFTY, BANKNIFTY, SENSEX | One raw-response layout check on 2026-10-26, which is not a P&L decision. Otherwise untouched. Reserved on 2026-11-10 for the NIFTY and SENSEX hypotheses under "Reserved window" below; BANKNIFTY has none | Not yet Frozen. OTA-314 freezes it after the window closes |
+| 2027-01-01 onward | NIFTY, BANKNIFTY, SENSEX | Untouched | Not yet Frozen |
 
 ## Entries
 
@@ -28,11 +29,28 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | 2026-11-02 | NIFTY 2025H | Discovery pass, 60 cells | research |
 | 2026-11-02 | NIFTY 2026H | Single confirmation of the two best cells | research |
 | 2026-11-03 | all windows above | Recorded in this file. Exit-sweep and IV-crush windows marked as overlapping NIFTY 2026H | research |
+| 2026-11-10 | 2026-10-01..2026-12-31 | End date fixed and the window reserved for two pooled paper-profile hypotheses. Nothing was fetched or run | operator |
 | 2026-11-03 | ledger | The documented evidence written to `docs/research/experiments.jsonl` as backfills, once each, with citations | research |
+
+## Reserved window
+
+Decided by the operator on 2026-11-10, before any data in the window was fetched.
+
+- **Window.** 2026-10-01 to 2026-12-31. The end date is fixed now so that it cannot be chosen after seeing results. On
+  2026-11-10 the window held fewer than the 30 sessions the holdout floor needs, so no run on it was possible.
+- **Hypotheses.** The strategy set of `config.paper.yml`, pooled, has a holdout block-bootstrap 95% lower bound of mean
+  net R above zero after costs, under the OTA-308 rules. One hypothesis for NIFTY and one for SENSEX. The profile is the
+  one at the commit named in the `PREREG.md` entry, and it is not changed between now and the run.
+- **Not a registration.** `PREREG.md` rule 2 needs a Frozen window first. This section records the choice and its date.
+  The entries are committed to `PREREG.md` after the freeze, with the same hypotheses.
+- **Fetch date.** The fetch reads expired contracts only, so it runs after the last weekly expiry that the window's final
+  sessions traded has passed.
+- **No look before the freeze.** No replay, cell pass or description is run on any part of this window before the run in
+  step 3 below. A look of any kind makes the window `Spent`.
 
 ## What must happen before the next confirmatory run
 
-1. OTA-314: fetch the window from 2026-10-01 to the latest session, check its layout against SDK 2.0.1, record its
+1. OTA-314: after the reserved window closes, fetch it from 2026-10-01 to 2026-12-31, check its layout against SDK 2.0.1, record its
    `sha256` and `sdkVersion` in its manifest, and change its status to `Frozen` here, with the date.
 2. Register the hypothesis in `PREREG.md`, commit it, and register it in the ledger with `npm run ledger -- register`, before the run.
 3. Run once. The run appends its record to the ledger. Record the result in `PREREG.md` with its ledger sequence number.
