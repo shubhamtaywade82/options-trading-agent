@@ -209,4 +209,16 @@ describe('feedStatusText', () => {
   it('returns CLOSED when marketOpen is false regardless of tick latency', () => {
     assert.match(plain(feedStatusText(50, 5000, false)), /■ CLOSED/);
   });
+
+  it('returns WS DOWN when feed status is disconnected', () => {
+    assert.match(plain(feedStatusText(undefined, 5000, true, 'disconnected')), /✖ WS DOWN/);
+  });
+
+  it('returns RECONNECTING when feed status is reconnecting', () => {
+    assert.match(plain(feedStatusText(undefined, 5000, true, 'reconnecting')), /◐ RECONNECTING/);
+  });
+
+  it('returns CONNECTING when feed status is connecting', () => {
+    assert.match(plain(feedStatusText(undefined, 5000, true, 'connecting')), /◐ CONNECTING/);
+  });
 });

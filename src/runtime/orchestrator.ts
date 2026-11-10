@@ -11,7 +11,7 @@ import { assertWarmupClock } from './clockGuard.js';
 import type { DiscoveredOpenPosition, FeedPort, MarketPort } from './ports.js';
 import { CockpitChainWatch } from './cockpitChainWatch.js';
 import { UnderlyingAgent } from './underlyingAgent.js';
-import type { CockpitSnapshot } from './views.js';
+import type { CockpitSnapshot, FeedStatusView } from './views.js';
 import type { TradingGate } from './tradingGate.js';
 import { withDeadline } from './deadline.js';
 import { StrategySession, type StrategyId } from '../strategy/session.js';
@@ -21,6 +21,7 @@ export interface OrchestratorFeed extends FeedPort {
   start(): Promise<void>;
   stop(): void;
   onTick(listener: (tick: Tick) => void): () => void;
+  status?(): FeedStatusView;
 }
 
 export interface OrchestratorServices {
@@ -380,6 +381,7 @@ export class Orchestrator {
       }),
       chainWatch: this.chainWatch.view(nowMs),
       strategy: this.strategySession.view(),
+      feed: this.services.feed.status?.(),
     };
   }
 

@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import stringWidth from 'string-width';
 import type { LogRecord } from '../ops/logger.js';
-import type { AgentView, CockpitSnapshot, PositionView } from '../runtime/views.js';
+import type { AgentView, CockpitSnapshot, FeedStatusView, PositionView } from '../runtime/views.js';
 import { formatMinuteOfDay, isMarketSessionOpen, IST_OFFSET_MS, istParts } from '../time/ist.js';
 import { CHAIN_PANEL_ROWS, chainWatchLines } from './chainWatchPanel.js';
 import { bad, callSide, emphasis, freshness, info, infoBold, label, muted, ok, putSide, range, selectedName, warn } from './palette.js';
@@ -122,9 +122,23 @@ function price(value: number | undefined): string {
   return value === undefined ? '—' : value.toFixed(2);
 }
 
-export function feedStatusText(ms: number | undefined, staleMs: number, marketOpen = true): string {
+export function feedStatusText(
+  ms: number | undefined,
+  staleMs: number,
+  marketOpen = true,
+  feedStatus?: FeedStatusView['status'],
+): string {
   if (!marketOpen) {
     return dim('■ CLOSED');
+  }
+  if (feedStatus === 'disconnected') {
+    return bad('✖ WS DOWN');
+  }
+  if (feedStatus === 'reconnecting') {
+    return warn('◐ RECONNECTING');
+  }
+  if (feedStatus === 'connecting') {
+    return warn('◐ CONNECTING');
   }
   if (ms === undefined) {
     return bad('○ NO TICK');
@@ -136,6 +150,26 @@ export function feedStatusText(ms: number | undefined, staleMs: number, marketOp
     return warn('◐ DELAYED');
   }
   return ok('● LIVE');
+}
+
+function feedHeaderTag(feed: FeedStatusView | undefined): string {
+  if (feed === undefined) {
+    return '';
+  }
+  switch (feed.status) {
+    case 'connected':
+      return ok(`● FEED (${feed.subscribedCount} subs, ${feed.totalTicks} ticks)`);
+    case 'connecting':
+      return warn('◐ FEED CONNECTING');
+    case 'reconnecting': {
+      const reason = feed.disconnectReason !== undefined ? ` [${feed.disconnectReason}]` : '';
+      return warn(`◐ FEED RECONNECTING${reason}`);
+    }
+    case 'disconnected': {
+      const reason = feed.disconnectReason !== undefined ? ` [${feed.disconnectReason}]` : '';
+      return bad(`✖ FEED DOWN${reason}`);
+    }
+  }
 }
 
 function stateText(state: AgentView['state']): string {
@@ -186,7 +220,8 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
         ? chalk.cyan.bold('◎ SANDBOX')
         : chalk.green.bold('● LIVE');
   const strat = snapshot.strategy === undefined ? '' : `  ${chalk.magenta.bold(snapshot.strategy.posture.toUpperCase())} ${dim(snapshot.strategy.strategies.filter((s) => s.on).map((s) => s.label).join('+') || 'none')}`;
-  const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}${strat}`;
+  const feedTag = feedHeaderTag(snapshot.feed);
+  const left = ` ${chalk.green.bold('⬡ NSE INDEX OPTIONS')}${dim(' v0.1.0 ')}${tag}  ${chalk.cyan.bold('◆ DHAN')}  ${phaseTag(snapshot)}${feedTag ? `  ${feedTag}` : ''}${strat}`;
   const sessionOpen = isMarketSessionOpen(snapshot.at);
   const minute = istParts(snapshot.at).minuteOfDay;
   const inWindow =
@@ -209,13 +244,19 @@ function header(snapshot: CockpitSnapshot, width: number): string[] {
   ];
 }
 
+interface UnderlyingBlockOpts {
+  readonly staleMs: number;
+  readonly marketOpen?: boolean | undefined;
+  readonly feedStatus?: FeedStatusView['status'] | undefined;
+}
+
 function underlyingBlock(
   agent: AgentView,
   selected: boolean,
   width: number,
-  staleMs: number,
-  marketOpen = true,
+  opts: UnderlyingBlockOpts,
 ): string[] {
+  const { staleMs, marketOpen = true, feedStatus } = opts;
   const marker = selected ? info('▸') : ' ';
   const name = selected ? selectedName(agent.symbol) : emphasis(agent.symbol);
   const halt = agent.halted === undefined ? '' : ` ${bad('HALT')}`;
@@ -233,7 +274,7 @@ function underlyingBlock(
   const spot = freshness(price(agent.spot), agent.spotAgeMs, staleMs);
   return [
     fit(`${marker} ${name} ${stateText(agent.state)}${halt}`, width),
-    fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs, marketOpen)}`, width),
+    fit(`  ${muted('spot')} ${spot}  ${feedStatusText(agent.spotAgeMs, staleMs, marketOpen, feedStatus)}`, width),
     fit(`  ${trend}  ${alignment}`, width),
     fit(`  ${orb}`, width),
     fit(`  ${contextText(agent.context)}`, width),
@@ -262,10 +303,15 @@ function underlyingColumn(snapshot: CockpitSnapshot, selected: number, width: nu
   const visibleBlocks = Math.max(1, Math.floor(rows / BLOCK_ROWS));
   const shown = blocks > visibleBlocks ? visibleBlocks - 1 : blocks;
   const marketOpen = isMarketSessionOpen(snapshot.at);
+  const opts: UnderlyingBlockOpts = {
+    staleMs: snapshot.staleMs,
+    marketOpen,
+    feedStatus: snapshot.feed?.status,
+  };
   for (let index = 0; index < shown; index += 1) {
     const agent = snapshot.underlyings[index];
     if (agent !== undefined) {
-      lines.push(...underlyingBlock(agent, index === selected, width, snapshot.staleMs, marketOpen));
+      lines.push(...underlyingBlock(agent, index === selected, width, opts));
     }
   }
   if (shown < blocks) {
