@@ -61,7 +61,7 @@ Decided by the operator on 2026-11-10, before any data in the window was fetched
 
 ## What must happen before the next confirmatory run
 
-1. OTA-314: after the reserved window closes, fetch it from 2026-10-01 to 2026-12-31, check its layout against SDK 2.0.1, record its
+1. OTA-314: after the reserved window closes, fetch it from 2026-10-01 to 2026-12-31, check its layout against the pinned SDK (2.0.1 until the bump to 2.1.0 is published, then 2.1.0), record its
    `sha256` and `sdkVersion` in its manifest, and change its status to `Frozen` here, with the date.
 2. Register the hypothesis in `PREREG.md`, commit it, and register it in the ledger with `npm run ledger -- register`, before the run.
 3. Run once. The run appends its record to the ledger. Record the result in `PREREG.md` with its ledger sequence number.

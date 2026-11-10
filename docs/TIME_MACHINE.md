@@ -94,7 +94,8 @@ What is **not** replayed. The report prints this list with every run:
 - The chain-bias vote in the context gate. It is replayed as `NEUTRAL`, which makes the gate stricter, not looser.
 - `MAX_SPREAD_PCT`, `MIN_OPEN_INTEREST` and `MIN_VOLUME`. Bars carry no quotes. The default half-spread is
   `MAX_SPREAD_PCT / 2`, the widest spread the live gate accepts, so the default cost model is the worst accepted case.
-- Expiry choice. The dataset holds one contract per session (`--expiry-flag`, `--expiry-code`). A session whose contract is
+- Request blocks. Dhan's `toDate` is non-inclusive. Each block of at most 30 sessions is requested with the day after its last session as `toDate`, and `autoAdjustDates` is off. Before 2026-11-10 the final session of each range was not requested, so datasets fetched earlier may lack it. Their windows are Spent, so they describe the market and cannot confirm anything.
+- Expiry codes are 0, 1 and 2 (SDK 2.1.0 refuses 3). Expiry choice. The dataset holds one contract per session (`--expiry-flag`, `--expiry-code`). A session whose contract is
   outside `MIN_DAYS_TO_EXPIRY`/`MAX_DAYS_TO_EXPIRY` takes no entry (`EXPIRY_OUT_OF_RANGE`). Where live would pick a later
   expiry instead, the replay cannot. A session with no expiry on record is not limited, and the report says so. BANKNIFTY is
   monthly: fetch it with `--expiry-flag MONTH`, or its sessions get no expiry.
@@ -134,7 +135,9 @@ above) can be counted.
 ## Data source: Dhan `/charts/rollingoption`
 
 `client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 2.0.1 posts to `/charts/rollingoption`. The response
-layout below was written against the 1.3.0-era SDK. It is re-verified on 2.0.1 by OTA-314, and no recording exists yet.
+layout below was written against the 1.3.0-era SDK. SDK 2.1.0 documents the same `data.ce` / `data.pe` parallel arrays with
+numeric timestamps, which the parser accepts, but 2.1.0 is not on npm yet, so that is read from its source, not run. The
+layout is re-verified on the pinned SDK by OTA-314, and no recording exists yet.
 Facts verified from the SDK source:
 
 - Strikes are **relative to ATM at each bar** (`ATM`, `ATM+1`, `ATM-2`, …). The request takes the underlying's
