@@ -327,7 +327,11 @@ export class UnderlyingAgent {
       const moved = newStop > position.stopLossPrice;
       slot.position = { ...position, highWaterMark: hwm, stopLossPrice: newStop };
       if (moved) {
-        this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(position.contract, position.quantity, position.averagePrice, newStop), slot.optionType);
+        // On the live venue the broker holds the stop and trails it by its own rule (BROKER_CONTRACT 1.7), which is not
+        // this model. The stop here is then an estimate, and risk is released only on a stop the venue enforces.
+        if (this.deps.execution.mode !== 'live') {
+          this.deps.book.setOpenRisk(this.symbol, this.budgetRiskAtStop(position.contract, position.quantity, position.averagePrice, newStop), slot.optionType);
+        }
         this.record('trailing_stop_updated', { positionId: position.positionId, stopLossPrice: newStop, highWaterMark: hwm });
         this.deps.logger.info('trailing stop updated', { underlying: this.symbol, positionId: position.positionId, stopLossPrice: newStop });
       }
@@ -834,6 +838,13 @@ export class UnderlyingAgent {
     return undefined;
   }
 
+  /** The lot cap for one order: the configured cap, lowered to the exchange freeze quantity when the operator set one. */
+  private maxLotsFor(contract: OptionContract): number {
+    const { capital, underlyings } = this.deps.config;
+    const freezeQuantity = underlyings.find((underlying) => underlying.symbol === this.symbol)?.freezeQuantity;
+    return freezeQuantity === undefined ? capital.maxLotsPerOrder : Math.min(capital.maxLotsPerOrder, Math.floor(freezeQuantity / contract.lotSize));
+  }
+
   private sizeEntry(bracket: BracketLevels, contract: OptionContract, funds: number): SizingResult {
     // Compounds: risk is a share of the day's opening capital plus what the day has realised. Premium already
     // paid for open positions stays in that base; the funds check decides only what is affordable.
@@ -845,7 +856,7 @@ export class UnderlyingAgent {
       entryReference: bracket.entryReference,
       stopLossPrice: bracket.stopLossPrice,
       lotSize: contract.lotSize,
-      maxLotsPerOrder: this.deps.config.capital.maxLotsPerOrder,
+      maxLotsPerOrder: this.maxLotsFor(contract),
       // Sized on the all-in loss when that budget is on, so the budget bounds what the account can lose (OTA-311).
       ...(this.deps.config.capital.allInRiskPolicy === 'enforce'
         ? {
@@ -933,6 +944,8 @@ export class UnderlyingAgent {
       sideOpen: book.isSideOpen(this.symbol, input.slot.optionType) || input.slot.position !== undefined,
       sideOpenPositions: book.sideOpenPositions(input.slot.optionType),
       maxPositionsPerSide: config.capital.maxPositionsPerSide,
+      opposingSideOpenPositions: book.sideOpenPositions(input.slot.optionType === 'CE' ? 'PE' : 'CE'),
+      allowOpposingSides: config.capital.allowOpposingSides,
       underlyingOpenPositions: book.underlyingOpenPositions(this.symbol),
       maxPositionsPerUnderlying: config.capital.maxPositionsPerUnderlying,
       cooldownUntilMs: book.cooldownUntilFor(this.symbol),

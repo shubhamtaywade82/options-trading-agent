@@ -133,6 +133,16 @@ function tag(signal: Signal, label: string): Signal {
   return { ...signal, reasons: [`${label} (${signal.reasons[0] ?? 'signal'})`, ...signal.reasons.slice(1)] };
 }
 
+/**
+ * True when every bar belongs to the same IST session as `last`. The scout families compare the last bar with the bars
+ * just before it. Without this, the first bar of a day is compared with yesterday's close, and an overnight gap alone
+ * reads as a momentum break, an EMA cross or a continuation.
+ */
+function sameSession(last: Candle, ...others: readonly Candle[]): boolean {
+  const day = istParts(last.time).date;
+  return others.every((other) => istParts(other.time).date === day);
+}
+
 function inWindow(bar: Candle, params: OrbSupertrendParams): boolean {
   const minute = istParts(bar.time).minuteOfDay;
   return minute >= params.entryStartMinute && minute < params.entryEndMinute;
@@ -257,7 +267,9 @@ function trendSignalOf(
 
 function emaCrossSignal(bars: readonly Candle[], params: OrbSupertrendParams, posture: StrategyPosture): Signal | undefined {
   const last = bars[bars.length - 1];
-  if (last === undefined || !inWindow(last, params) || bars.length < params.emaSlow + 2) return undefined;
+  const prev = bars[bars.length - 2];
+  if (last === undefined || prev === undefined || !inWindow(last, params) || bars.length < params.emaSlow + 2) return undefined;
+  if (!sameSession(last, prev)) return undefined;
   const closes = bars.map((b) => b.close);
   const fast = ema(closes, params.emaFast);
   const slow = ema(closes, params.emaSlow);
@@ -281,6 +293,7 @@ function momentumSignal(bars: readonly Candle[], params: OrbSupertrendParams, po
   const prev = bars[bars.length - 2];
   if (last === undefined || prev === undefined || !inWindow(last, params) || bars.length < 5) return undefined;
   const lookback = bars.slice(-4, -1);
+  if (!sameSession(last, ...lookback)) return undefined;
   const high = Math.max(...lookback.map((b) => b.high));
   const low = Math.min(...lookback.map((b) => b.low));
   const bullish = last.close > high && prev.close <= high;
@@ -302,7 +315,7 @@ function continuationSignal(bars: readonly Candle[], params: OrbSupertrendParams
   const trend = posture === 'scout'
     ? adaptiveSuperTrend(bars, params.supertrendPeriod, params.supertrendMultiplier)
     : superTrend(bars, params.supertrendPeriod, params.supertrendMultiplier);
-  if (trend === undefined || trend.barsSinceFlip < 1) return undefined;
+  if (trend === undefined || trend.barsSinceFlip < 1 || !sameSession(last, prev)) return undefined;
   const bullish = trend.trend === 'UP' && prev.close < last.close && last.close > prev.high;
   const bearish = trend.trend === 'DOWN' && prev.close > last.close && last.close < prev.low;
   if (!bullish && !bearish) return undefined;

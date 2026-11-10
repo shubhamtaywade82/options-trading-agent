@@ -75,7 +75,11 @@ export interface AgentConfig {
   };
   /** Present only in sandbox mode. */
   readonly sandbox: SandboxConfig | undefined;
-  readonly underlyings: readonly { readonly symbol: string; readonly optionSegment: OptionSegment }[];
+  /**
+   * `freezeQuantity` is the exchange's per-order quantity limit for the underlying's options, set by the operator
+   * (FREEZE_QTY_<SYMBOL>). It is not hardcoded: the exchanges revise it. When set, an entry is sized at or below it.
+   */
+  readonly underlyings: readonly { readonly symbol: string; readonly optionSegment: OptionSegment; readonly freezeQuantity?: number | undefined }[];
   readonly capital: {
     readonly inr: number;
     readonly maxRiskPerTradePct: number;
@@ -83,6 +87,8 @@ export interface AgentConfig {
     readonly maxOpenPositions: number;
     readonly maxPositionsPerUnderlying: number;
     readonly maxPositionsPerSide: number;
+    /** Whether a CE and a PE may be open together, on one index or across indices. */
+    readonly allowOpposingSides: boolean;
     readonly maxTradesPerDay: number;
     readonly maxLotsPerOrder: number;
     readonly enforceDailyLoss: boolean;
@@ -301,7 +307,9 @@ function parseUnderlyings(env: Env): AgentConfig['underlyings'] {
         `UNDERLYINGS: "${symbol}" is not a supported index (supported: ${Object.keys(KNOWN_UNDERLYINGS).join(', ')})`,
       );
     }
-    return { symbol, optionSegment };
+    const freezeKey = `FREEZE_QTY_${symbol}`;
+    const freezeQuantity = optionalText(env, freezeKey) === undefined ? undefined : number(env, freezeKey, 0, { min: 1, max: 1e7, integer: true });
+    return { symbol, optionSegment, ...(freezeQuantity === undefined ? {} : { freezeQuantity }) };
   });
 }
 
@@ -345,6 +353,7 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_open_positions': 'MAX_OPEN_POSITIONS',
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
+  'limits.allow_opposing_sides': 'ALLOW_OPPOSING_SIDES',
   'limits.enforce_daily_loss': 'ENFORCE_DAILY_LOSS',
   'limits.all_in_risk_policy': 'ALL_IN_RISK_POLICY',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
@@ -377,9 +386,31 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'context.structure_exit': 'CONTEXT_STRUCTURE_EXIT',
 };
 
+/** One leaf of the YAML file: where it was written, the environment name it sets, and its value. */
+interface YamlEntry {
+  readonly path: string;
+  readonly envKey: string;
+  readonly value: string;
+}
+
+function envKeyForYamlPath(path: string): string {
+  const mapped = YAML_ENV_MAP[path];
+  if (mapped !== undefined) {
+    return mapped;
+  }
+  if (path.startsWith('limits.freeze_quantity.')) {
+    return `FREEZE_QTY_${path.slice('limits.freeze_quantity.'.length).toUpperCase()}`;
+  }
+  return path.toUpperCase().replace(/\./g, '_');
+}
+
 export function parseYamlToEnv(content: string): Record<string, string> {
+  return Object.fromEntries(parseYamlEntries(content).map((entry) => [entry.envKey, entry.value]));
+}
+
+function parseYamlEntries(content: string): YamlEntry[] {
   const parsed = parseYaml(content);
-  const result: Record<string, string> = {};
+  const result: YamlEntry[] = [];
   if (parsed === null || typeof parsed !== 'object') {
     return result;
   }
@@ -398,8 +429,7 @@ export function parseYamlToEnv(content: string): Record<string, string> {
       }
       return;
     }
-    const envKey = YAML_ENV_MAP[path] ?? path.toUpperCase().replace(/\./g, '_');
-    result[envKey] = Array.isArray(node) ? node.map(String).join(',') : String(node);
+    result.push({ path, envKey: envKeyForYamlPath(path), value: Array.isArray(node) ? node.map(String).join(',') : String(node) });
   };
 
   walk(parsed, '');
@@ -407,10 +437,14 @@ export function parseYamlToEnv(content: string): Record<string, string> {
 }
 
 export function loadYamlConfig(filePath: string): Record<string, string> {
+  return Object.fromEntries(readYamlEntries(filePath).map((entry) => [entry.envKey, entry.value]));
+}
+
+function readYamlEntries(filePath: string): YamlEntry[] {
   if (!existsSync(filePath)) {
     throw new Error(`Config file not found: ${filePath}`);
   }
-  return parseYamlToEnv(readFileSync(filePath, 'utf-8'));
+  return parseYamlEntries(readFileSync(filePath, 'utf-8'));
 }
 
 function resolveConfigPath(env: Env, explicitPath?: string): string | undefined {
@@ -437,9 +471,18 @@ function resolveConfigPath(env: Env, explicitPath?: string): string | undefined 
  */
 export function loadConfig(env: Env = process.env, configPath?: string): AgentConfig {
   const resolvedPath = resolveConfigPath(env, configPath);
-  if (resolvedPath !== undefined) {
-    env = { ...env, ...loadYamlConfig(resolvedPath) };
-  }
+  const yamlEntries = resolvedPath === undefined ? [] : readYamlEntries(resolvedPath);
+  // Every name the parse below asks for is noted, so a YAML key that sets a name nothing asked for can be refused.
+  const namesRead = new Set<string>();
+  const merged: Env = { ...env, ...Object.fromEntries(yamlEntries.map((entry) => [entry.envKey, entry.value])) };
+  env = new Proxy(merged, {
+    get(target, name) {
+      if (typeof name === 'string') {
+        namesRead.add(name);
+      }
+      return Reflect.get(target, name) as string | undefined;
+    },
+  });
   if (optionalText(env, 'EVENT_LOG_PATH') !== undefined) {
     // A single file grew without bound and was read in full at every start. Refuse rather than ignore it.
     throw new Error('EVENT_LOG_PATH was replaced by EVENT_LOG_DIR (daily journal files); unset EVENT_LOG_PATH');
@@ -476,6 +519,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       maxOpenPositions: number(env, 'MAX_OPEN_POSITIONS', 1, { min: 1, max: 20, integer: true }),
       maxPositionsPerUnderlying: number(env, 'MAX_POSITIONS_PER_UNDERLYING', 2, { min: 1, max: 10, integer: true }),
       maxPositionsPerSide: number(env, 'MAX_POSITIONS_PER_SIDE', 1, { min: 1, max: 5, integer: true }),
+      allowOpposingSides: flag(env, 'ALLOW_OPPOSING_SIDES', true),
       maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
       enforceDailyLoss: flag(env, 'ENFORCE_DAILY_LOSS', true),
@@ -557,6 +601,13 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
   };
 
   validateCrossFields(config);
+  // A misspelt key (max_risk_per_trade_pc) used to set a name nothing reads, and the limit silently kept its default.
+  const unread = yamlEntries.filter((entry) => !namesRead.has(entry.envKey));
+  if (unread.length > 0) {
+    throw new Error(
+      `${resolvedPath}: ${unread.map((entry) => `"${entry.path}"`).join(', ')} ${unread.length === 1 ? 'is' : 'are'} not read in this configuration. Check the spelling, or remove ${unread.length === 1 ? 'it' : 'them'}`,
+    );
+  }
   return config;
 }
 

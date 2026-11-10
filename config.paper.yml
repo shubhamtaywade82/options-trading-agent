@@ -58,7 +58,7 @@ strategy:
 # Contract selection & expiry constraints
 contract:
   min_days_to_expiry: 0
-  max_days_to_expiry: 6        # 6 keeps every weekly expiry in reach (NIFTY Wed/Thu, SENSEX Fri sat out at 4) and still excludes 8+ DTE
+  max_days_to_expiry: 6        # 6 keeps every weekly expiry in reach (NIFTY Tuesday, SENSEX Thursday) and still excludes 8+ DTE
 
 # Option Chain Analysis: PCR, Support/Resistance OI walls, and pre-trade confluence
 chain_analysis:
@@ -84,7 +84,8 @@ limits:
   cooldown_seconds: 900        # 15 min per underlying after an exit: stops re-buying the same strike right after a stop-out
   max_open_positions: 6        # Max 6 concurrent positions so all underlyings can take positions
   max_positions_per_underlying: 2 # Up to 2 positions per underlying (1 CE + 1 PE)
-  max_positions_per_side: 1    # Limits correlated risk: at most 1 CE and 1 PE open across all indices
+  max_positions_per_side: 1    # Limits correlated risk: at most 1 CE or 1 PE open across all indices
+  allow_opposing_sides: false  # NIFTY, BANKNIFTY and SENSEX move together: a CE on one and a PE on another pays decay and spread twice for no net view
   enforce_daily_loss: true     # Set false to bypass daily loss brake completely, or press 'd' in cockpit
   all_in_risk_policy: "shadow" # OTA-311: planned risk decides; all-in is journalled beside it. 'enforce' only after the shadow comparison and sign-off
   broker_kill_switch_on_breach: false # Avoids tripping broker kill switch during paper runs
@@ -96,7 +97,7 @@ exits:
   runner_mode: false           # false = realistic achievable TP; true = uncapped runner
   max_hold_minutes: 30         # 50%/1R/30min was the only exit set >= 0R on all four replay datasets; 30%/1.5R/90min was the worst
   trailing_jump_pct: 8         # Step up stop loss by 8% as price advances (locks in profit tighter)
-  breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+24% gain)
+  breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+40% on premium with the 50% stop)
 
 # Paper Trading Venue Settings
 paper:

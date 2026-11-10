@@ -128,7 +128,7 @@ Out of scope here: a new order-manager or recovery module. The fixes live in the
 | --- | --- | --- | --- |
 | OTA-201 | **Done.** `dataQuality` in every report and `runs.jsonl` line | `research/timeMachine.ts` | Fixture test |
 | OTA-202 | **Done.** SHA-256 of the dataset file in every `runs.jsonl` line (`dataSha256`) | `scripts/timemachine.ts` | Same file and config give identical lines except `ts` |
-| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu), revised (`3cf66f4`).** Each session takes its nominal expiry, the next expiry weekday on or after its date. The earlier holiday shift read later sessions and was removed. BANKNIFTY monthly still has no rule | `time/calendar.ts` (`nominalWeeklyExpiry`), `research/replay.ts` (`rollingWeeklyExpiry`) | `tests/timeMachine.test.ts` |
+| OTA-203 | **Done for NIFTY (Tue) and SENSEX (Thu), revised (`3cf66f4`).** Each session takes its nominal expiry, the next expiry weekday on or after its date. The earlier holiday shift read later sessions and was removed. BANKNIFTY monthly takes the last Tuesday of the month (`nominalMonthlyExpiry`), from broker notices and not yet checked on Dhan data. The replay applies `MIN_DAYS_TO_EXPIRY` and `MAX_DAYS_TO_EXPIRY` to every session with a known expiry | `time/calendar.ts` (`nominalWeeklyExpiry`, `nominalMonthlyExpiry`), `research/replay.ts` (`rollingExpiry`) | `tests/timeMachine.test.ts` |
 | OTA-204 | **Revised: fresh holdout data, see OTA-314.** Chain snapshots start 2026-10-27; every stored dataset ends 2026-09-30 | — | — |
 | OTA-205 | **Done.** `run --cells --vix <file>` tags days by opening-VIX tercile | `research/contextCells.ts` | In cell report |
 

@@ -653,6 +653,76 @@ function scriptedVenue(script: { exit: 'FILL' | 'UNCONFIRMED' }) {
   return { port, killSwitch, exits, lateFill };
 }
 
+describe('runtime: open risk under a broker-held trailing stop', () => {
+  function fillingVenue(mode: 'live' | 'paper'): ExecutionPort {
+    let listener: ((event: ExecutionEvent) => void) | undefined;
+    return {
+      mode,
+      submitEntry: async (order) => {
+        queueMicrotask(() =>
+          listener?.({ kind: 'ENTRY_FILLED', correlationId: order.correlationId, underlying: 'NIFTY', quantity: order.quantity, averagePrice: order.entryReference, at: 0 }),
+        );
+      },
+      submitExit: async () => undefined,
+      onOptionTick: () => undefined,
+      onEvent: (fn) => {
+        listener = fn;
+        return () => undefined;
+      },
+      engageBrokerKillSwitch: async () => undefined,
+      close: async () => undefined,
+    };
+  }
+
+  it('should keep day-book open risk at the initial stop when the live broker holds the stop', async () => {
+    const harness = build({ TRAILING_JUMP_PCT: '15', BREAKEVEN_AT_RR: '1' }, { execution: fillingVenue('live') });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const agent = harness.orchestrator.agent('NIFTY');
+    assert.equal(agent?.state, 'RISK_MANAGEMENT_ACTIVE');
+    const before = harness.orchestrator.dayBook.snapshot().openRiskInr;
+    assert.ok(before > 0);
+
+    optionTick(harness, '48001', 132);
+    await settle(harness.orchestrator);
+    assert.equal(agent?.openPosition?.stopLossPrice, 101, 'the local estimate still trails, for the cockpit');
+    assert.equal(harness.orchestrator.dayBook.snapshot().openRiskInr, before, "the broker's trailing stop is not the agent's model, so risk is not released on it");
+  });
+
+  it('should lower open risk with the stop on a venue that enforces the agent model', async () => {
+    const harness = build({ TRAILING_JUMP_PCT: '15', BREAKEVEN_AT_RR: '1', RUNNER_MODE: 'true' });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    const before = harness.orchestrator.dayBook.snapshot().openRiskInr;
+    optionTick(harness, '48001', 132);
+    await settle(harness.orchestrator);
+    assert.ok(harness.orchestrator.dayBook.snapshot().openRiskInr < before);
+  });
+});
+
+describe('runtime: exchange freeze quantity', () => {
+  const MULTI_LOT = { MAX_RISK_PER_TRADE_PCT: '3', MAX_DAILY_LOSS_PCT: '3', MAX_LOTS_PER_ORDER: '10' };
+
+  async function enteredQuantity(env: Record<string, string>): Promise<number | undefined> {
+    const harness = build({ ...MULTI_LOT, ...env });
+    await harness.orchestrator.start();
+    await triggerBreakout(harness);
+    return harness.orchestrator.agent('NIFTY')?.openPosition?.quantity;
+  }
+
+  it('should size an entry at or below the freeze quantity, in whole lots', async () => {
+    const lotSize = CE.lotSize;
+    const uncapped = await enteredQuantity({});
+    assert.ok(uncapped !== undefined && uncapped >= 3 * lotSize, 'the fixture sizes three lots or more without a freeze quantity');
+    // One unit short of three lots: two whole lots fit.
+    assert.equal(await enteredQuantity({ FREEZE_QTY_NIFTY: String(3 * lotSize - 1) }), 2 * lotSize);
+  });
+
+  it('should take no entry when the freeze quantity is below one lot', async () => {
+    assert.equal(await enteredQuantity({ FREEZE_QTY_NIFTY: String(CE.lotSize - 1) }), undefined);
+  });
+});
+
 describe('runtime: halts', () => {
   it('halts the underlying on an unconfirmed entry and engages the broker kill switch at once when nothing is open', async () => {
     const killSwitch: string[] = [];

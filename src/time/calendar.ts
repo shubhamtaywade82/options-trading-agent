@@ -33,6 +33,38 @@ export function nominalWeeklyExpiry(underlying: string, dateKey: string): string
   return daysAhead === 0 ? dateKey : shiftDays(dateKey, daysAhead);
 }
 
+/**
+ * Weekday (0 = Sunday) of each index's monthly expiry. BANKNIFTY has monthly contracts only, expiring on the last Tuesday
+ * of the month. The source is broker notices of the NSE 2025 expiry-day revision. It is not yet checked against Dhan
+ * rolling data, as the weekly rule was (docs/TIME_MACHINE.md).
+ */
+const MONTHLY_EXPIRY_WEEKDAY: Readonly<Record<string, number>> = { BANKNIFTY: 2 };
+
+/** The last `weekday` of the month that holds `dateKey`. */
+function lastWeekdayOfMonth(year: number, monthIndex: number, weekday: number): string {
+  const lastDay = new Date(Date.UTC(year, monthIndex + 1, 0));
+  const back = (lastDay.getUTCDay() - weekday + 7) % 7;
+  return new Date(lastDay.getTime() - back * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * The monthly expiry a session trades against, from its calendar date alone: the last expiry weekday of its month, or of
+ * the next month once that day has passed. Look-ahead free, with the same known limit as the weekly rule: a holiday on the
+ * expiry weekday moves the real expiry one session earlier, and that shift is not modelled.
+ */
+export function nominalMonthlyExpiry(underlying: string, dateKey: string): string | undefined {
+  const weekday = MONTHLY_EXPIRY_WEEKDAY[underlying];
+  if (weekday === undefined) {
+    return undefined;
+  }
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`invalid date key: ${dateKey}`);
+  }
+  const thisMonth = lastWeekdayOfMonth(date.getUTCFullYear(), date.getUTCMonth(), weekday);
+  return dateKey <= thisMonth ? thisMonth : lastWeekdayOfMonth(date.getUTCFullYear(), date.getUTCMonth() + 1, weekday);
+}
+
 function shiftDays(dateKey: string, days: number): string {
   return new Date(Date.parse(`${dateKey}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
 }

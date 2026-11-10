@@ -156,6 +156,13 @@ describe('evaluatePreTrade', () => {
     assert.ok(!codes(approvedInput({ underlyingOpenPositions: 1, maxPositionsPerUnderlying: 2 })).includes('UNDERLYING_POSITION_LIMIT'));
   });
 
+  it('rejects an entry while the opposite side is open anywhere in the book, when opposing sides are turned off', () => {
+    assert.ok(codes(approvedInput({ opposingSideOpenPositions: 1, allowOpposingSides: false })).includes('OPPOSING_SIDE_OPEN'));
+    assert.ok(!codes(approvedInput({ opposingSideOpenPositions: 0, allowOpposingSides: false })).includes('OPPOSING_SIDE_OPEN'));
+    assert.ok(!codes(approvedInput({ opposingSideOpenPositions: 1, allowOpposingSides: true })).includes('OPPOSING_SIDE_OPEN'));
+    assert.ok(!codes(approvedInput({ opposingSideOpenPositions: 1 })).includes('OPPOSING_SIDE_OPEN'), 'allowed unless turned off, as before');
+  });
+
   it('rejects when side positions across all indices reach maxPositionsPerSide', () => {
     assert.ok(codes(approvedInput({ sideOpenPositions: 1, maxPositionsPerSide: 1 })).includes('SIDE_POSITION_LIMIT'));
     assert.ok(!codes(approvedInput({ sideOpenPositions: 0, maxPositionsPerSide: 1 })).includes('SIDE_POSITION_LIMIT'));

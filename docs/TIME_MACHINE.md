@@ -94,7 +94,10 @@ What is **not** replayed. The report prints this list with every run:
 - The chain-bias vote in the context gate. It is replayed as `NEUTRAL`, which makes the gate stricter, not looser.
 - `MAX_SPREAD_PCT`, `MIN_OPEN_INTEREST` and `MIN_VOLUME`. Bars carry no quotes. The default half-spread is
   `MAX_SPREAD_PCT / 2`, the widest spread the live gate accepts, so the default cost model is the worst accepted case.
-- Expiry choice. Expiry follows the dataset's `--expiry-code`, not `MIN_DAYS_TO_EXPIRY`/`MAX_DAYS_TO_EXPIRY`.
+- Expiry choice. The dataset holds one contract per session (`--expiry-flag`, `--expiry-code`). A session whose contract is
+  outside `MIN_DAYS_TO_EXPIRY`/`MAX_DAYS_TO_EXPIRY` takes no entry (`EXPIRY_OUT_OF_RANGE`). Where live would pick a later
+  expiry instead, the replay cannot. A session with no expiry on record is not limited, and the report says so. BANKNIFTY is
+  monthly: fetch it with `--expiry-flag MONTH`, or its sessions get no expiry.
 - Concurrent CE and PE positions. The replay holds one position at a time.
 
 ## Portfolio replay
@@ -200,7 +203,8 @@ These items cannot be verified from this environment (no broker credentials):
    straddle at 15:20 was ₹3–13 against ₹120–365 on other days, so `expiryCode 1` on expiry day is that day's
    expiry and expiry-day theta is in the sample. BSE agrees: on SENSEX 2026-04..09 5-minute data the median
    15:20 ATM straddle was ₹60 on Thursdays (expiry) against ₹510–970 on other weekdays; the few high Thursdays
-   pair with low Wednesdays, consistent with holiday-shifted expiries. BANKNIFTY (monthly) not yet checked.
+   pair with low Wednesdays, consistent with holiday-shifted expiries. BANKNIFTY (monthly) not yet checked: its rule, the last Tuesday of the month, comes from broker notices of the NSE
+   2025 revision, not from Dhan data.
 5. **Expiry dates.** The rolling source does not return them. Each session takes its nominal expiry, the next expiry weekday on or after its date, from its own date alone. An exchange holiday on the expiry weekday is not modelled, so the session before it is NEAR rather than EXPIRY. The earlier holiday-shift rule read later sessions, which is look-ahead, and was removed.
 6. **Lot size.** It is given per fetch (`--lot-size`). Split a fetch at every exchange lot-size revision.
 
