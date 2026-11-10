@@ -9,7 +9,7 @@ import { evaluatePreTrade } from '../risk/riskEngine.js';
 import { contextVerdict, marketContext, marketStructure, structureTurnedAgainst, type MarketContext } from '../strategy/marketContext.js';
 import type { OrbSupertrendParams } from '../strategy/orbSupertrend.js';
 import { StrategySession, type StrategyId, type StrategyPosture } from '../strategy/session.js';
-import { nominalWeeklyExpiry } from '../time/calendar.js';
+import { dayDifference, nominalMonthlyExpiry, nominalWeeklyExpiry } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
 import {
@@ -35,6 +35,12 @@ export interface ReplayConfig {
   readonly strikeOffsetSteps: number;
   readonly entryLimitBufferPct: number;
   readonly expiryDayEntryCutoffMinute: number;
+  /**
+   * The live contract limits, in calendar days to expiry. A session whose contract is outside them takes no entry.
+   * Undefined applies no limit. A maximum of zero is no upper limit, as in the live selector (`pickExpiry`).
+   */
+  readonly minDaysToExpiry?: number | undefined;
+  readonly maxDaysToExpiry?: number | undefined;
   readonly exits: AgentConfig['exits'];
   readonly capital: Pick<
     AgentConfig['capital'],
@@ -155,7 +161,7 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
     divergences.push('context gate is replayed with chain bias NEUTRAL (no historical option chain)');
   }
   divergences.push('MAX_SPREAD_PCT, MIN_OPEN_INTEREST and MIN_VOLUME are not replayed (bars carry no quotes); the spread is the cost model');
-  divergences.push('expiry follows the dataset expiry code, not MIN_DAYS_TO_EXPIRY / MAX_DAYS_TO_EXPIRY');
+  divergences.push('a session outside MIN_DAYS_TO_EXPIRY / MAX_DAYS_TO_EXPIRY takes no entry; where live would pick a later expiry instead, the replay cannot (the dataset holds one expiry code)');
   if (config.capital.maxOpenPositions > 1 || config.capital.maxPositionsPerSide > 1) {
     divergences.push('one position at a time per replay; concurrent CE and PE positions are not modelled');
   }
@@ -184,6 +190,8 @@ export function replayConfigFrom(config: AgentConfig): { replay: ReplayConfig; d
       strikeOffsetSteps: contract.strikeOffsetSteps,
       entryLimitBufferPct: contract.entryLimitBufferPct,
       expiryDayEntryCutoffMinute: contract.expiryDayEntryCutoffMinute,
+      minDaysToExpiry: contract.minDaysToExpiry,
+      maxDaysToExpiry: contract.maxDaysToExpiry,
       exits,
       capital: {
         inr: capital.inr,
@@ -256,19 +264,31 @@ interface DayState {
  * same functions. Fills are priced pessimistically wherever a 5-minute bar cannot say what happened inside it.
  */
 /**
- * Expiry days for a rolling-option dataset, which records no expiry. Only the nearest weekly contract
- * (expiry code 1) expires on the calendar's expiry day; other codes and monthly series get none.
+ * The expiry each session trades against, for a rolling-option dataset, which records no expiry. Only the nearest contract
+ * (expiry code 1) has a rule: the weekly calendar for a weekly series and the monthly calendar for a monthly one. Look-ahead
+ * free: it depends on the session's own date only. Undefined for a later expiry code, and each session gets undefined where
+ * the index has no recorded rule.
  */
-/**
- * The expiry each session trades against, for a rolling dataset of the current weekly contract. Look-ahead free: it depends
- * on the session's own date only. Undefined where no rule is verified, or for a monthly or next-week contract.
- */
-export function rollingWeeklyExpiry(dataset: ResearchDataset): ((date: string) => string | undefined) | undefined {
+export function rollingExpiry(dataset: ResearchDataset): ((date: string) => string | undefined) | undefined {
   const { kind, expiryFlag, expiryCode } = dataset.source;
-  if (kind !== 'dhan_rollingoption' || expiryFlag === 'MONTH' || (expiryCode ?? 1) !== 1) {
+  if (kind !== 'dhan_rollingoption' || (expiryCode ?? 1) !== 1) {
     return undefined;
   }
-  return (date) => nominalWeeklyExpiry(dataset.underlying, date);
+  const rule = expiryFlag === 'MONTH' ? nominalMonthlyExpiry : nominalWeeklyExpiry;
+  return (date) => rule(dataset.underlying, date);
+}
+
+/** True when the contract's calendar days to expiry are inside the configured limits. An unknown expiry is not limited. */
+function expiryWithinLimits(session: ResearchSession, config: ReplayConfig): boolean {
+  if (session.expiry === undefined) {
+    return true;
+  }
+  const days = dayDifference(session.date, session.expiry);
+  const { minDaysToExpiry, maxDaysToExpiry } = config;
+  if (minDaysToExpiry !== undefined && days < minDaysToExpiry) {
+    return false;
+  }
+  return maxDaysToExpiry === undefined || maxDaysToExpiry <= 0 || days <= maxDaysToExpiry;
 }
 
 /**
@@ -301,16 +321,23 @@ export function replayDataset(
     drops[code] = (drops[code] ?? 0) + 1;
   };
 
-  const expiryOf = rollingWeeklyExpiry(dataset);
+  const expiryOf = rollingExpiry(dataset);
+  let undatedSessions = 0;
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
     const expiry = session.expiry ?? expiryOf?.(session.date);
     const dated = expiry === undefined ? session : { ...session, expiry };
+    undatedSessions += expiry === undefined ? 1 : 0;
     const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, observer);
     signals += outcome.signals;
     trades.push(...outcome.trades);
   });
-  return { trades, dates: dataset.sessions.map((session) => session.date), signals, drops, divergences };
+  const limited = config.minDaysToExpiry !== undefined || config.maxDaysToExpiry !== undefined;
+  const reported =
+    limited && undatedSessions > 0
+      ? [...divergences, `expiry limits are not applied to ${undatedSessions} session(s) with no expiry on record`]
+      : divergences;
+  return { trades, dates: dataset.sessions.map((session) => session.date), signals, drops, divergences: reported };
 }
 
 function replaySession(
@@ -611,6 +638,10 @@ function replaySession(
       continue;
     }
     signals += 1;
+    if (!expiryWithinLimits(session, config)) {
+      drop('EXPIRY_OUT_OF_RANGE');
+      continue;
+    }
     const context = marketContext(history);
     if (config.contextGate && !contextVerdict(context, signal.direction, 'NEUTRAL').ok) {
       drop('CONTEXT_REJECTED');

@@ -42,11 +42,16 @@ Decided by the operator on 2026-11-10, before any data in the window was fetched
   net R above zero after costs, under the OTA-308 rules. One hypothesis each for NIFTY, SENSEX and BANKNIFTY (the third
   added on 2026-11-10, the same day, before any fetch). The profile is the
   one at the commit named in the `PREREG.md` entry, and it is not changed between now and the run.
-- **BANKNIFTY limits, known before the run.** BANKNIFTY options are monthly, and the replay has no expiry rule for a monthly
-  series (OTA-203). The replay also follows the dataset's expiry code, not `MIN_DAYS_TO_EXPIRY` and `MAX_DAYS_TO_EXPIRY`,
-  so it prices the monthly contract on every session, while the paper profile only trades contracts within its expiry
-  limit. The BANKNIFTY result therefore describes the replay's rule, not exactly what the paper agent trades. It still
-  counts as one variant in the divisor.
+- **BANKNIFTY limits, known before the run.** BANKNIFTY options are monthly. On 2026-11-10, before any fetch, the replay
+  gained a monthly expiry rule (the last Tuesday of the month) and began to apply `MIN_DAYS_TO_EXPIRY` and
+  `MAX_DAYS_TO_EXPIRY`, so it now trades only the sessions the paper profile can trade. Two limits remain. The rule comes
+  from broker notices and is not checked against Dhan data, and a holiday on the expiry Tuesday is not modelled. With the
+  profile's six-day limit, BANKNIFTY can enter on about five sessions a month, so this window may fall short of the
+  30-trade floor. A short sample is reported as insufficient evidence, not as a pass or a fail, and it still counts as
+  one variant in the divisor. The dataset must be fetched with `--expiry-flag MONTH`.
+- **Split fraction, open.** The Time Machine judges only the later part of a dataset: at its default `--split 0.6`, the
+  last 40% of sessions. A window of about 60 sessions then has about 24 holdout sessions, below the floor of 30. The
+  split fraction must be written in the `PREREG.md` entries before the run, and it is not decided yet.
 - **Not a registration.** `PREREG.md` rule 2 needs a Frozen window first. This section records the choice and its date.
   The entries are committed to `PREREG.md` after the freeze, with the same hypotheses.
 - **Fetch date.** The fetch reads expired contracts only, so it runs after the last weekly expiry that the window's final

@@ -1,7 +1,7 @@
 import { MIN_TRADES_TO_JUDGE } from '../ops/performanceReport.js';
 import { NSE_SESSION_CLOSE_MINUTE, NSE_SESSION_OPEN_MINUTE, shiftDateKey } from '../time/ist.js';
 import type { ResearchDataset } from './dataset.js';
-import { rollingWeeklyExpiry, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from './replay.js';
+import { rollingExpiry, replayDataset, type CostModel, type ReplayConfig, type ReplayTrade } from './replay.js';
 import {
   bootstrapMeanR,
   chronologicalSplit,
@@ -178,8 +178,8 @@ export function runTimeMachine(
   if (priced.length > 0 && ambiguousBarTrades / priced.length > 0.2) {
     warnings.push(`${ambiguousBarTrades} of ${priced.length} trades had a bar touching both stop and target, all counted as stops: 5-minute bars are too coarse for this bracket`);
   }
-  if (dataset.sessions.some((session) => session.expiry === undefined) && rollingWeeklyExpiry(dataset) === undefined) {
-    warnings.push('sessions without an expiry date skip the expiry-day entry cutoff');
+  if (dataset.sessions.some((session) => session.expiry === undefined && rollingExpiry(dataset)?.(session.date) === undefined)) {
+    warnings.push('sessions without an expiry date skip the expiry-day entry cutoff and the expiry limits');
   }
 
   let verdict: TimeMachineVerdict;

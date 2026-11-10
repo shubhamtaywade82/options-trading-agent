@@ -24,7 +24,7 @@ import {
 import { bestSessionShare, dominanceCap, dominanceTest, holdoutBlockLength, meanWithoutBestSession, simulatedDominanceCap } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine } from '../src/research/timeMachine.js';
 import { applyCostStressToCells, contextCells, formatCells, vixTerciles } from '../src/research/contextCells.js';
-import { nominalWeeklyExpiry } from '../src/time/calendar.js';
+import { nominalMonthlyExpiry, nominalWeeklyExpiry } from '../src/time/calendar.js';
 import { shiftDateKey } from '../src/time/ist.js';
 import { bar, istEpoch } from './support/fixtures.js';
 
@@ -469,6 +469,68 @@ describe('weekly expiry calendar (look-ahead free)', () => {
 
   it('has no rule for an index whose expiry convention is unverified', () => {
     assert.equal(nominalWeeklyExpiry('BANKNIFTY', '2026-10-13'), undefined);
+  });
+});
+
+describe('monthly expiry calendar (look-ahead free)', () => {
+  it('gives each session the last expiry weekday of its month, or of the next month once that has passed', () => {
+    // October 2026: Tuesdays fall on 6, 13, 20 and 27.
+    assert.equal(nominalMonthlyExpiry('BANKNIFTY', '2026-10-01'), '2026-10-27');
+    assert.equal(nominalMonthlyExpiry('BANKNIFTY', '2026-10-27'), '2026-10-27', 'the expiry day is its own expiry');
+    assert.equal(nominalMonthlyExpiry('BANKNIFTY', '2026-10-28'), '2026-11-24', 'the day after rolls to the next month');
+    assert.equal(nominalMonthlyExpiry('BANKNIFTY', '2026-12-30'), '2027-01-26', 'the roll crosses a year end');
+    // March 2026 has five Tuesdays; the last is the 31st.
+    assert.equal(nominalMonthlyExpiry('BANKNIFTY', '2026-03-25'), '2026-03-31');
+  });
+
+  it('has no rule for an index whose monthly convention is not recorded', () => {
+    assert.equal(nominalMonthlyExpiry('SENSEX', '2026-10-13'), undefined);
+  });
+});
+
+describe('replay: expiry limits', () => {
+  const monthly = (dates: string[]): ResearchDataset => ({
+    ...dataset(dates.map((date) => session(date))),
+    underlying: 'BANKNIFTY',
+    source: { kind: 'dhan_rollingoption' as const, expiryFlag: 'MONTH', expiryCode: 1 },
+  });
+
+  it('should apply the expiry-day cutoff to a monthly rolling dataset on its last Tuesday', () => {
+    const result = replayDataset(monthly(['2026-10-26', '2026-10-27']), { ...CONFIG, expiryDayEntryCutoffMinute: 9 * 60 + 30 }, NO_COSTS);
+    assert.equal(result.drops['EXPIRY_DAY_CUTOFF'], 1);
+    assert.equal(result.trades.length, 1);
+  });
+
+  it('should take no entry on a session whose contract is further from expiry than MAX_DAYS_TO_EXPIRY', () => {
+    // 2026-10-12 is 15 days from the 27 October expiry; 2026-10-21 is 6 days from it.
+    const result = replayDataset(monthly(['2026-10-12', '2026-10-21']), { ...CONFIG, minDaysToExpiry: 0, maxDaysToExpiry: 6 }, NO_COSTS);
+    assert.deepEqual(result.trades.map((trade) => trade.date), ['2026-10-21']);
+    assert.equal(result.drops['EXPIRY_OUT_OF_RANGE'], 1);
+  });
+
+  it('should take no entry on a session closer to expiry than MIN_DAYS_TO_EXPIRY', () => {
+    const result = replayDataset(monthly(['2026-10-26', '2026-10-27']), { ...CONFIG, minDaysToExpiry: 1, maxDaysToExpiry: 6 }, NO_COSTS);
+    assert.deepEqual(result.trades.map((trade) => trade.date), ['2026-10-26']);
+    assert.equal(result.drops['EXPIRY_OUT_OF_RANGE'], 1);
+  });
+
+  it('should treat a MAX_DAYS_TO_EXPIRY of zero as no upper limit, as the live selector does', () => {
+    const result = replayDataset(monthly(['2026-10-12']), { ...CONFIG, minDaysToExpiry: 0, maxDaysToExpiry: 0 }, NO_COSTS);
+    assert.equal(result.trades.length, 1);
+  });
+
+  it('should not filter a session whose expiry is unknown, and say so', () => {
+    const result = replayDataset(dataset([session(DAY)]), { ...CONFIG, minDaysToExpiry: 0, maxDaysToExpiry: 1 }, NO_COSTS);
+    assert.equal(result.trades.length, 1);
+    assert.ok(result.divergences.some((line) => /expiry limits are not applied/.test(line)));
+  });
+
+  it('should leave a weekly dataset unchanged under the paper profile limits of 0 to 6 days', () => {
+    const week = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16'];
+    const weekly = { ...dataset(week.map((date) => session(date))), source: { kind: 'dhan_rollingoption' as const, expiryFlag: 'WEEK', expiryCode: 1 } };
+    const limited = replayDataset(weekly, { ...CONFIG, minDaysToExpiry: 0, maxDaysToExpiry: 6 }, NO_COSTS);
+    assert.deepEqual(limited.trades, replayDataset(weekly, CONFIG, NO_COSTS).trades);
+    assert.equal(limited.drops['EXPIRY_OUT_OF_RANGE'], undefined);
   });
 });
 
