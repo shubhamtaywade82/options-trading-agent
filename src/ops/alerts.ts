@@ -7,6 +7,7 @@ export const ALERT_EVENT_TYPES: ReadonlySet<string> = new Set([
   'book_kill_switch',
   'broker_kill_switch_failed',
   'halted',
+  'feed_terminal',
   'entry_rejected',
   'exit_rejected',
   'late_entry_fill',

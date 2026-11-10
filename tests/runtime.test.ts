@@ -50,6 +50,11 @@ interface Harness {
 class FakeFeed implements OrchestratorFeed {
   readonly subscribed = new Set<string>();
   age: number | undefined = 100;
+  /** Set to a terminal disconnect code to simulate the server ending the market feed. */
+  terminal: number | undefined = undefined;
+  terminalDisconnectCode(): number | undefined {
+    return this.terminal;
+  }
   startCalled = false;
   private readonly listeners = new Set<(tick: Tick) => void>();
   constructor(private readonly startGate?: Promise<void>) {}
@@ -720,6 +725,19 @@ describe('runtime: exchange freeze quantity', () => {
 
   it('should take no entry when the freeze quantity is below one lot', async () => {
     assert.equal(await enteredQuantity({ FREEZE_QTY_NIFTY: String(CE.lotSize - 1) }), undefined);
+  });
+});
+
+describe('runtime: market feed ended by the server', () => {
+  it('refuses a new entry after a terminal feed disconnect, and names the code in the signal drop', async () => {
+    const harness = build();
+    await harness.orchestrator.start();
+    harness.feed.terminal = 806;
+    await triggerBreakout(harness);
+    assert.ok(!types(harness).includes('entry_submitted'), 'no order may follow a dead feed');
+    const dropped = harness.events.find((event) => event.type === 'signal_dropped');
+    assert.equal(dropped?.payload['code'], 'ENTRY_BLOCKED');
+    assert.match(String(dropped?.payload['detail']), /market feed ended by the server with code 806/);
   });
 });
 

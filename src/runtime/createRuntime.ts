@@ -108,6 +108,9 @@ async function compose(
     now,
     logger,
     connectOrderUpdates: config.mode === 'live',
+    onTerminalDisconnect: (code) => {
+      events.record('feed_terminal', { code });
+    },
   });
 
   const paperExchange = config.mode === 'paper' && config.paper.backend === 'exchange' ? buildPaperExchangeClient(config) : undefined;

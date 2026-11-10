@@ -20,7 +20,16 @@ export interface DhanFeedOptions {
    * never use it, and the Dhan sandbox serves no WebSocket, so it stays closed there. Defaults to false.
    */
   readonly connectOrderUpdates?: boolean;
+  /** Called once, with the reason code, when the server ends the market feed for good. */
+  readonly onTerminalDisconnect?: ((code: number) => void) | undefined;
 }
+
+/**
+ * Server disconnect reasons that reconnecting cannot clear: no Data API plan, bad token or client id, the instrument or
+ * connection cap, an expired token (SDK 2.1.0 `FEED_TERMINAL_DISCONNECT_CODES`). The SDK stops the market socket for these
+ * and emits no error, so the feed must record the stop itself or it goes silent.
+ */
+export const TERMINAL_FEED_DISCONNECT_CODES: readonly number[] = [804, 805, 806, 807, 808, 809, 810];
 
 interface PriceEvent {
   readonly type: 'ticker' | 'quote' | 'full';
@@ -69,6 +78,7 @@ export class DhanFeed {
   private started = false;
   private warnedFutureLtt = false;
   private warnedLateLtt = false;
+  private terminalCode: number | undefined;
 
   constructor(
     private readonly client: FeedClient,
@@ -92,12 +102,28 @@ export class DhanFeed {
     // The SDK re-emits a socket's connection errors as `error` events. With no listener, Node throws and the process
     // dies, so every socket this feed opens gets one before it connects.
     market.on('error', (error: unknown) => this.reportSocketError('market feed', error));
+    market.on('disconnect', (event: unknown) => this.handleDisconnect(event));
     if (this.options.connectOrderUpdates === true) {
       orders.on('error', (error: unknown) => this.reportSocketError('order update', error));
       await this.client.ws.connect();
       return;
     }
     await market.connect();
+  }
+
+  /** The reason code that ended the market feed for good, or undefined while the feed is recoverable. */
+  terminalDisconnectCode(): number | undefined {
+    return this.terminalCode;
+  }
+
+  private handleDisconnect(event: unknown): void {
+    const code = (event as { reasonCode?: unknown } | null | undefined)?.reasonCode;
+    if (typeof code !== 'number' || !TERMINAL_FEED_DISCONNECT_CODES.includes(code) || this.terminalCode !== undefined) {
+      return;
+    }
+    this.terminalCode = code;
+    this.options.logger?.error(`market feed ended by the server with code ${code}; entries stay refused until the feed is restarted`, { code });
+    this.options.onTerminalDisconnect?.(code);
   }
 
   /**
