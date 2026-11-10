@@ -128,7 +128,9 @@ async function withRetry<T>(label: string, run: () => Promise<T>): Promise<T> {
       return await run();
     } catch (error) {
       lastError = error;
-      const message = error instanceof Error ? error.message : String(error);
+      const err = error as { message?: string; payload?: unknown; details?: unknown };
+      const extra = err.details ? ` (${JSON.stringify(err.details)})` : err.payload ? ` (${JSON.stringify(err.payload)})` : '';
+      const message = `${err.message ?? String(error)}${extra}`;
       console.error(`${label}: attempt ${attempt}/${MAX_ATTEMPTS} failed: ${message}`);
       if (attempt < MAX_ATTEMPTS) {
         await sleep(1_000 * 2 ** attempt);
@@ -182,7 +184,8 @@ async function fetchDataset(): Promise<void> {
   const dumped = new Set<OptionType>();
   // Dhan began refusing 1-minute rolling-option requests that span more than one session (HTTP 400, seen
   // 2026-11-03; 30-day windows worked on 2026-10-26). `--window-days 1` fetches one session per request.
-  const windowDays = numberArgument('--window-days', WINDOW_DAYS, (value) => Number.isInteger(value) && value >= 1 && value <= WINDOW_DAYS);
+  const defaultWindowDays = barMinutes === 1 ? 1 : WINDOW_DAYS;
+  const windowDays = numberArgument('--window-days', defaultWindowDays, (value) => Number.isInteger(value) && value >= 1 && value <= WINDOW_DAYS);
   for (const window of windows(fromDate, toDate, windowDays)) {
     console.error(`${underlying} ${window.from}..${window.to}: spot bars`);
     spot.push(...(await withRetry(`spot ${window.from}`, () => market.intradayCandles(spotRef, barMinutes, window.from, window.to))));
