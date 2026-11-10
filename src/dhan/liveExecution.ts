@@ -96,6 +96,10 @@ interface TrackedPosition {
    * settles the position from the broker.
    */
   exitOutcomeUnknown: boolean;
+  /** The SELL behind `exitOutcomeUnknown`. Reconciliation reads it from the order book to settle the outcome. */
+  unknownExit: { readonly correlationId: string } | undefined;
+  /** True once the order book showed both bracket legs terminal. From then on the position has no stop at the broker. */
+  legsTerminal: boolean;
   mismatchReported: boolean;
   /** Consecutive reconciliation reads in which the broker list had no row for this position. */
   missingRowReads: number;
@@ -116,6 +120,8 @@ const POSITION_READ_BACKOFF_MS = 100;
  * book a close that never happened. Reconciliation accepts the absence only after this many consecutive reads.
  */
 const MISSING_ROW_CONFIRMATIONS = 3;
+/** Order statuses that end an order without proving a fill. With a filled quantity of zero, nothing traded and nothing is live. */
+const DEAD_ORDER_STATUSES: ReadonlySet<string> = new Set(['CANCELLED', 'REJECTED', 'EXPIRED']);
 /**
  * Statuses the broker reports for a settled order. Anything else, including a missing status, counts as live.
  * Shared with the restart guard in createRuntime, so the adapter and the guard cannot disagree about what is live.
@@ -326,6 +332,10 @@ export class LiveExecutionPort implements ExecutionPort {
       // Order matters. Read first: if the position cannot be read, nothing is cancelled and the stop keeps protecting it.
       const first = await this.brokerPosition(tracked.ref);
       if (first === undefined) {
+        if (tracked.legsTerminal && !tracked.exitOutcomeUnknown) {
+          this.rejectUnsentExit(order, 'broker positions unavailable; no SELL sent. The protective legs are already cancelled, so the exit is retried');
+          return;
+        }
         this.emit({
           kind: 'EXIT_UNCONFIRMED',
           correlationId: order.correlationId,
@@ -369,17 +379,13 @@ export class LiveExecutionPort implements ExecutionPort {
         });
         return;
       }
+      tracked.legsTerminal = true;
 
       // A leg may have filled while it was being cancelled. The position is read again, and the SELL is sized to what is still held.
       const broker = await this.brokerPosition(tracked.ref);
       if (broker === undefined) {
-        this.emit({
-          kind: 'EXIT_UNCONFIRMED',
-          correlationId: order.correlationId,
-          underlying: order.underlying,
-          positionId: order.positionId,
-          reason: 'broker positions unavailable after cancelling the legs; exit not sent',
-        });
+        // No write was made, so this is not an unknown outcome. A halt here would leave a long position with no stop.
+        this.rejectUnsentExit(order, 'broker positions unavailable after cancelling the legs; no SELL sent, the exit is retried');
         return;
       }
       if (broker.netQty < 0) {
@@ -396,6 +402,7 @@ export class LiveExecutionPort implements ExecutionPort {
       waiter.catch(() => undefined);
       // Set before the write. From here until a definitive outcome, the SELL may be live at the broker.
       tracked.exitOutcomeUnknown = true;
+      tracked.unknownExit = { correlationId: order.correlationId };
       const placed = await this.client.orders.place({
         correlationId: order.correlationId,
         transactionType: 'SELL',
@@ -415,6 +422,7 @@ export class LiveExecutionPort implements ExecutionPort {
       // A definitive rejection means the SELL never reached the matching engine, so nothing is outstanding.
       if (verdict === 'REJECTED') {
         tracked.exitOutcomeUnknown = false;
+        tracked.unknownExit = undefined;
       }
       this.emit({
         kind: verdict === 'REJECTED' ? 'EXIT_REJECTED' : 'EXIT_UNCONFIRMED',
@@ -483,6 +491,8 @@ export class LiveExecutionPort implements ExecutionPort {
       confirmed: false,
       exitInFlight: false,
       exitOutcomeUnknown: false,
+      unknownExit: undefined,
+      legsTerminal: false,
       missingRowReads: 0,
       mismatchReported: false,
       cancelledLegs: new Set(),
@@ -587,6 +597,7 @@ export class LiveExecutionPort implements ExecutionPort {
       }
       // A terminal status with no fill is definitive: the SELL is no longer live, so a retry is safe.
       tracked.exitOutcomeUnknown = false;
+      tracked.unknownExit = undefined;
       this.emitTerminal(`exit:${cid}`, {
         kind: 'EXIT_REJECTED',
         correlationId: cid,
@@ -758,6 +769,10 @@ export class LiveExecutionPort implements ExecutionPort {
         this.reportFlatAtBroker(tracked, row);
         continue;
       }
+      if (tracked.confirmed && tracked.exitOutcomeUnknown) {
+        await this.settleUnknownExit(tracked);
+        continue;
+      }
       if (!tracked.confirmed && this.now() - tracked.createdAt > UNCONFIRMED_ENTRY_RETENTION_MS) {
         book ??= await this.superOrderBook();
         if (book !== undefined && entrySettledInBook(book, tracked.orderId, tracked.positionId)) {
@@ -766,6 +781,63 @@ export class LiveExecutionPort implements ExecutionPort {
         }
       }
     }
+  }
+
+  /**
+   * A SELL with no known outcome, on a position the broker still shows long. The order book decides: a dead order with
+   * no fill is definitive, so the exit is released for a retry. An order still resting is cancelled again, which only
+   * removes a SELL and is safe to repeat. An unreadable book, a fill, or any other status leaves the outcome unknown:
+   * a SELL is never sent again on a guess (ADR-005).
+   */
+  private async settleUnknownExit(tracked: TrackedPosition): Promise<void> {
+    const pending = tracked.unknownExit;
+    if (pending === undefined) {
+      return;
+    }
+    let row: { orderId?: unknown; orderStatus?: unknown; filledQty?: unknown };
+    try {
+      row = await this.client.orders.getByCorrelationId(pending.correlationId);
+    } catch (error) {
+      this.options.logger.warn('unknown exit not readable in the order book; outcome stays unknown', { cid: pending.correlationId, error: describeError(error) });
+      return;
+    }
+    const status = typeof row?.orderStatus === 'string' ? row.orderStatus : undefined;
+    if (status === undefined || row.filledQty !== 0) {
+      return;
+    }
+    if (DEAD_ORDER_STATUSES.has(status)) {
+      tracked.exitOutcomeUnknown = false;
+      tracked.unknownExit = undefined;
+      this.options.logger.warn('unknown exit settled with no fill; the exit may be retried', { cid: pending.correlationId, status });
+      this.emitTerminal(`exit-settled:${pending.correlationId}`, {
+        kind: 'EXIT_REJECTED',
+        correlationId: pending.correlationId,
+        underlying: tracked.underlying,
+        positionId: tracked.positionId,
+        reason: `exit order ${status} with no fill, read from the order book`,
+      });
+      return;
+    }
+    if (TERMINAL_ORDER_STATUSES.has(status) || typeof row.orderId !== 'string') {
+      return;
+    }
+    try {
+      await this.client.orders.cancel(row.orderId);
+    } catch (error) {
+      this.options.logger.error('resting exit cancel failed; will retry', { cid: pending.correlationId, error: describeError(error) });
+    }
+  }
+
+  /** An exit that made no write. It is definitive, so the agent may send the exit again after its backoff. */
+  private rejectUnsentExit(order: ExitOrder, reason: string): void {
+    this.options.logger.error('exit not sent', { cid: order.correlationId, positionId: order.positionId, reason });
+    this.emit({
+      kind: 'EXIT_REJECTED',
+      correlationId: order.correlationId,
+      underlying: order.underlying,
+      positionId: order.positionId,
+      reason,
+    });
   }
 
   /** The super order book, or undefined when it cannot be read. */

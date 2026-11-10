@@ -20,6 +20,10 @@ interface FakeOptions {
   killSwitchReadBack?: string;
   /** The order id a SELL placement returns. Without one the adapter cannot cancel a resting SELL. */
   sellOrderId?: string;
+  /** Fails every cancel of a plain order while set. */
+  orderCancelError?: unknown;
+  /** What the order book returns for a correlation id. Without it the read fails. */
+  orderByCorrelationId?: (correlationId: string) => Record<string, unknown>;
 }
 
 function fakeBroker(options: FakeOptions = {}) {
@@ -30,6 +34,7 @@ function fakeBroker(options: FakeOptions = {}) {
     place: [] as Array<Record<string, unknown>>,
     kill: [] as string[],
     cancel: [] as string[],
+    orderReads: [] as string[],
     superList: 0,
   };
   const cancelledLegs = new Set<unknown>();
@@ -84,7 +89,17 @@ function fakeBroker(options: FakeOptions = {}) {
       },
       cancel: async (orderId: string) => {
         calls.cancel.push(orderId);
+        if (options.orderCancelError !== undefined) {
+          throw options.orderCancelError;
+        }
         return {};
+      },
+      getByCorrelationId: async (correlationId: string) => {
+        calls.orderReads.push(correlationId);
+        if (options.orderByCorrelationId === undefined) {
+          throw new Error('order book unavailable');
+        }
+        return options.orderByCorrelationId(correlationId);
       },
     },
     positions: {
@@ -734,6 +749,103 @@ describe('LiveExecutionPort exit resilience (review 2026-11-10)', () => {
     assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
     await live.submitExit({ ...exit(), correlationId: 'EXT-2' });
     assert.equal(broker.calls.place.length, 2, 'a cancelled SELL with no fill is definitive, so the retry is sent');
+    await live.close();
+  });
+
+  it('should report a retryable rejection, not a halt, when the read after cancelling the legs fails', async () => {
+    const broker = fakeBroker({ positions: [brokerRow(75)] });
+    const { live, events } = port(broker);
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    // The first read succeeds, then every read fails: the legs are cancelled and no SELL was sent.
+    let reads = 0;
+    (broker.client as unknown as { positions: { list: () => Promise<unknown[]> } }).positions.list = async () => {
+      reads += 1;
+      if (reads === 1) {
+        return [brokerRow(75)];
+      }
+      throw new Error('read timeout');
+    };
+    await live.submitExit(exit());
+    assert.equal(broker.calls.superCancel.length, 2);
+    assert.equal(broker.calls.place.length, 0);
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED', 'nothing was sent, and the position has no stop: the exit must be retried');
+
+    // The retry also cannot read the position. It still must not halt, because the legs are gone.
+    await live.submitExit({ ...exit(), correlationId: 'EXT-2' });
+    assert.equal(events.at(-1)?.kind, 'EXIT_REJECTED');
+
+    setPositions(broker, [brokerRow(75)]);
+    await live.submitExit({ ...exit(), correlationId: 'EXT-3' });
+    assert.equal(broker.calls.place.length, 1, 'the SELL goes out once the position can be read');
+    assert.equal(broker.calls.place[0]?.['correlationId'], 'EXT-3');
+    await live.close();
+  });
+
+  it('should keep cancelling a resting SELL from reconciliation and release the exit once the order book shows it cancelled', async () => {
+    let status = 'PENDING';
+    const options: Parameters<typeof fakeBroker>[0] = {
+      positions: [brokerRow(75)],
+      sellOrderId: 'SELL-1',
+      orderCancelError: new Error('cancel timeout'),
+      orderByCorrelationId: () => ({ orderId: 'SELL-1', correlationId: 'EXT-1', orderStatus: status, filledQty: 0 }),
+    };
+    const broker = fakeBroker(options);
+    const { live, events } = port(broker, 40, 10);
+    live.start();
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED', 'a failed cancel leaves the SELL outcome unknown');
+
+    // A second SELL is refused while the first may be live.
+    await live.submitExit({ ...exit(), correlationId: 'EXT-2' });
+    assert.equal(broker.calls.place.length, 1);
+
+    // The broker recovers: reconciliation cancels the resting SELL, then reads it CANCELLED with no fill.
+    delete options.orderCancelError;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(broker.calls.cancel.length >= 2, 'reconciliation retries the cancel');
+    status = 'CANCELLED';
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const released = events.filter((event) => event.kind === 'EXIT_REJECTED');
+    assert.equal(released.length, 1, 'a cancelled SELL with no fill is definitive');
+    assert.equal(released[0]?.kind === 'EXIT_REJECTED' && released[0].correlationId, 'EXT-1');
+
+    await live.submitExit({ ...exit(), correlationId: 'EXT-3' });
+    assert.equal(broker.calls.place.length, 2, 'the exit is sent again');
+    await live.close();
+  });
+
+  it('should keep a SELL unknown when the order book cannot be read or shows a fill', async () => {
+    let row: Record<string, unknown> | undefined;
+    const broker = fakeBroker({
+      positions: [brokerRow(75)],
+      sellError: new Error('socket hang up'),
+      orderByCorrelationId: () => {
+        if (row === undefined) {
+          throw new Error('order book unavailable');
+        }
+        return row;
+      },
+    });
+    const { live, events } = port(broker, 40, 10);
+    live.start();
+    await live.submitEntry(entry());
+    broker.emitOrder(FILLED_ENTRY);
+    await settle();
+    await live.submitExit(exit());
+    assert.equal(events.at(-1)?.kind, 'EXIT_UNCONFIRMED');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.ok(broker.calls.orderReads.length >= 1);
+    row = { orderId: 'SELL-9', correlationId: 'EXT-1', orderStatus: 'CANCELLED', filledQty: 25 };
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(events.some((event) => event.kind === 'EXIT_REJECTED'), false, 'a partial fill is never released for a resend');
+    await live.submitExit({ ...exit(), correlationId: 'EXT-2' });
+    assert.equal(broker.calls.place.length, 1, 'no second SELL while the first is unresolved');
     await live.close();
   });
 });
