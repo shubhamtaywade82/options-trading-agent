@@ -9,6 +9,7 @@ export type RiskCode =
   | 'UNDERLYING_SIDE_ALREADY_OPEN'
   | 'UNDERLYING_POSITION_LIMIT'
   | 'SIDE_POSITION_LIMIT'
+  | 'OPPOSING_SIDE_OPEN'
   | 'COOLDOWN_ACTIVE'
   | 'OUTSIDE_ENTRY_WINDOW'
   | 'EXPIRY_DAY_CUTOFF'
@@ -65,6 +66,10 @@ export interface PreTradeInput {
   readonly maxPositionsPerUnderlying?: number;
   readonly sideOpenPositions?: number;
   readonly maxPositionsPerSide?: number;
+  /** Open or pending positions on the other option type, across all underlyings. */
+  readonly opposingSideOpenPositions?: number;
+  /** Whether a CE and a PE may be open together. True when omitted. Set false to treat correlated indices as one risk unit. */
+  readonly allowOpposingSides?: boolean;
   readonly cooldownUntilMs: number | undefined;
 
   /** Age of the latest spot tick; undefined when no tick has ever arrived. */
@@ -116,6 +121,9 @@ function checkPositionLimits(input: PreTradeInput, add: AddViolation): void {
   }
   if (input.maxPositionsPerSide !== undefined && (input.sideOpenPositions ?? 0) >= input.maxPositionsPerSide) {
     add('SIDE_POSITION_LIMIT', `${input.sideOpenPositions ?? 0} open for side, limit ${input.maxPositionsPerSide}`);
+  }
+  if (input.allowOpposingSides === false && (input.opposingSideOpenPositions ?? 0) > 0) {
+    add('OPPOSING_SIDE_OPEN', `${input.opposingSideOpenPositions} open on the opposite side; correlated indices are one risk unit`);
   }
 }
 

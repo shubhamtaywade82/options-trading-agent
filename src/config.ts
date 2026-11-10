@@ -83,6 +83,8 @@ export interface AgentConfig {
     readonly maxOpenPositions: number;
     readonly maxPositionsPerUnderlying: number;
     readonly maxPositionsPerSide: number;
+    /** Whether a CE and a PE may be open together, on one index or across indices. */
+    readonly allowOpposingSides: boolean;
     readonly maxTradesPerDay: number;
     readonly maxLotsPerOrder: number;
     readonly enforceDailyLoss: boolean;
@@ -345,6 +347,7 @@ const YAML_ENV_MAP: Readonly<Record<string, string>> = {
   'limits.max_open_positions': 'MAX_OPEN_POSITIONS',
   'limits.max_positions_per_underlying': 'MAX_POSITIONS_PER_UNDERLYING',
   'limits.max_positions_per_side': 'MAX_POSITIONS_PER_SIDE',
+  'limits.allow_opposing_sides': 'ALLOW_OPPOSING_SIDES',
   'limits.enforce_daily_loss': 'ENFORCE_DAILY_LOSS',
   'limits.all_in_risk_policy': 'ALL_IN_RISK_POLICY',
   'limits.broker_kill_switch_on_breach': 'BROKER_KILL_SWITCH_ON_BREACH',
@@ -476,6 +479,7 @@ export function loadConfig(env: Env = process.env, configPath?: string): AgentCo
       maxOpenPositions: number(env, 'MAX_OPEN_POSITIONS', 1, { min: 1, max: 20, integer: true }),
       maxPositionsPerUnderlying: number(env, 'MAX_POSITIONS_PER_UNDERLYING', 2, { min: 1, max: 10, integer: true }),
       maxPositionsPerSide: number(env, 'MAX_POSITIONS_PER_SIDE', 1, { min: 1, max: 5, integer: true }),
+      allowOpposingSides: flag(env, 'ALLOW_OPPOSING_SIDES', true),
       maxTradesPerDay: number(env, 'MAX_TRADES_PER_DAY', 3, { min: 0, max: 1000, integer: true }),
       maxLotsPerOrder: number(env, 'MAX_LOTS_PER_ORDER', 1, { min: 1, max: 1000, integer: true }),
       enforceDailyLoss: flag(env, 'ENFORCE_DAILY_LOSS', true),

@@ -216,6 +216,34 @@ describe('StrategySession', () => {
     assert.match(signal?.reasons[0] ?? '', /Momentum break/);
   });
 
+  describe('scout families on the first bar after an overnight gap', () => {
+    const OPEN_AT_START = { ...PARAMS, entryStartMinute: 9 * 60 + 15 };
+
+    it('should not read a gap over yesterday\'s last bars as a momentum break', () => {
+      const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, () => 100));
+      const today = dayBars(SESSION_DAY, 9 * 60 + 15, [105]);
+      assert.equal(new StrategySession('scout', ['momentum']).evaluate([...warmup, ...today], OPEN_AT_START), undefined);
+    });
+
+    it('should not read a gap as an EMA cross', () => {
+      const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 110 - (i * 10) / 59));
+      const today = dayBars(SESSION_DAY, 9 * 60 + 15, [130]);
+      assert.equal(new StrategySession('scout', ['ema_cross']).evaluate([...warmup, ...today], OPEN_AT_START), undefined);
+    });
+
+    it('should not read a gap as a trend continuation', () => {
+      const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 100 + (i * 10) / 59));
+      const today = dayBars(SESSION_DAY, 9 * 60 + 15, [115]);
+      assert.equal(new StrategySession('scout', ['continuation']).evaluate([...warmup, ...today], OPEN_AT_START), undefined);
+    });
+
+    it('should still fire a momentum break once three bars of today exist', () => {
+      const warmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, () => 100));
+      const today = dayBars(SESSION_DAY, 9 * 60 + 15, [100, 100, 100, 105]);
+      assert.equal(new StrategySession('scout', ['momentum']).evaluate([...warmup, ...today], OPEN_AT_START)?.strategy, 'momentum');
+    });
+  });
+
   it('in scout posture, fires on trend continuation pullback bounce', () => {
     const session = new StrategySession('scout', ['continuation']);
     const risingWarmup = dayBars(PREVIOUS_DAY, 9 * 60 + 15, Array.from({ length: 60 }, (_, i) => 90 + (i * 20) / 59));

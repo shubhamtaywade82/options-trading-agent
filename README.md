@@ -155,6 +155,7 @@ If one lot does not fit the budget, the trade is skipped. The agent never rounds
 | Max daily loss | `DayBook`, `Orchestrator.enforceDailyLoss` | Realised + unrealised day P&L ≤ −limit: entries blocked, all positions flattened, then broker kill switch. Realised P&L is net of estimated charges (`roundTripChargesInr`: ₹20/order brokerage, STT 0.15% on the sell premium, exchange and SEBI fees, stamp duty, GST); the journal records gross, charges and net. The contract note is authoritative. |
 | Max daily loss at risk | `DayBook.openRiskInr`, `evaluatePreTrade` | Realised P&L − every open or pending stop − this trade's stop must stay above −limit, across all underlyings and both sides. Otherwise `DAILY_LOSS_AT_RISK`. |
 | Trades per day, open positions, one per underlying | `evaluatePreTrade` | Hard limits. Defaults: 3 trades, 1 open position. |
+| Opposing sides | `evaluatePreTrade` (`OPPOSING_SIDE_OPEN`) | With `ALLOW_OPPOSING_SIDES=false`, no CE is opened while any PE is open or pending, and the reverse, across all underlyings. The indices move together, so the pair pays decay and spread twice. Default `true`; the paper profile sets `false`. |
 | Cooldown per underlying | `DayBook` | `COOLDOWN_SECONDS` after each exit. |
 | Entry window and expiry-day cutoff | `evaluatePreTrade` | Outside the window, or after `EXPIRY_DAY_ENTRY_CUTOFF` on expiry day: no entry. |
 | Stale data | `evaluatePreTrade`, `DhanFeed.ageMs` | Spot tick older than `FEED_STALE_MS` (or never received) on local receipt time, or a chain snapshot older than `FEED_STALE_MS`: no entry. |
