@@ -214,7 +214,9 @@ These items cannot be verified from this environment (no broker credentials):
 ## Context cells (`run --cells`)
 
 `run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
-at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
+at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX, ranked against the trailing 252 sessions and tagged only after 60 of them).
+`--vix` was ranked against every date in the dataset until 2026-11-13, which used later days. Cell reports printed before that change are
+not valid evidence. No ledger record cites a `--vix` run (checked 2026-11-13).
 
 `--iv` adds the entry's implied-volatility bucket. The ATM IV at the signal bar is ranked, mid-rank with ties at half weight,
 against the ATM IV of the 20 prior sessions at the same minute: `LOW` below a third, `HIGH` from two thirds, `MID` between.

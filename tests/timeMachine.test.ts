@@ -594,10 +594,36 @@ describe('context cells', () => {
     assert.equal(reused.testsCounted, fresh.testsCounted * 10);
   });
 
-  it('splits days into VIX terciles from each day\'s opening VIX', () => {
-    const vix = ['2026-10-12', '2026-10-13', '2026-10-14'].map((date, index) => bar(istEpoch(date, '09:15'), 10 + index * 5, 10 + index * 5, 10 + index * 5, 10 + index * 5));
-    const terciles = vixTerciles(vix, ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15']);
-    assert.deepEqual(Object.fromEntries(terciles), { '2026-10-12': { vix: 'LOW' }, '2026-10-13': { vix: 'MID' }, '2026-10-14': { vix: 'HIGH' } });
+});
+
+describe('VIX terciles (look-ahead free)', () => {
+  const day = (index: number) => shiftDateKey('2025-01-02', index);
+  /** One VIX bar per calendar day, opening at the given value. */
+  const vixSeries = (values: readonly number[]): Candle[] => values.map((open, index) => bar(istEpoch(day(index), '09:15'), open, open, open, open));
+
+  it('tags a day from earlier sessions only: later days cannot move its tag', () => {
+    // Earlier days: 66 below the tested value of 50, 14 above it. The tested day sits on the 67th-percentile boundary of
+    // a full-sample rank, so whichever way the later days fall, a full-sample rank would move it.
+    const earlier = Array.from({ length: 80 }, (_, index) => (index < 66 ? 10 + index * 0.1 : 60 + index * 0.1));
+    const everyDay = Array.from({ length: 100 }, (_, index) => day(index));
+    const laterHigh = vixTerciles(vixSeries([...earlier, 50, ...Array(19).fill(1000)]), everyDay).get(day(80));
+    const laterLow = vixTerciles(vixSeries([...earlier, 50, ...Array(19).fill(1)]), everyDay).get(day(80));
+    assert.deepEqual(laterHigh, laterLow, 'the later days changed the tag');
+    assert.equal(laterHigh?.vix, 'HIGH', '66 of 80 earlier sessions are below it');
+  });
+
+  it('tags nothing below the minimum history, and nothing on a day without VIX', () => {
+    const tags = vixTerciles(vixSeries(Array.from({ length: 80 }, (_, index) => 10 + index)), [day(59), day(60), day(200)]);
+    assert.equal(tags.has(day(59)), false, '59 earlier sessions is below the minimum');
+    assert.equal(tags.has(day(60)), true, '60 earlier sessions is the minimum');
+    assert.equal(tags.has(day(200)), false, 'no VIX on that day');
+  });
+
+  it('ranks a rising VIX HIGH and a falling VIX LOW once there is history', () => {
+    const rising = vixTerciles(vixSeries(Array.from({ length: 100 }, (_, index) => 10 + index)), [day(99)]);
+    assert.equal(rising.get(day(99))?.vix, 'HIGH');
+    const falling = vixTerciles(vixSeries(Array.from({ length: 100 }, (_, index) => 200 - index)), [day(99)]);
+    assert.equal(falling.get(day(99))?.vix, 'LOW');
   });
 });
 
