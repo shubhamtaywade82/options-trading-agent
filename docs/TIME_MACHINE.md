@@ -221,7 +221,7 @@ against the ATM IV of the 20 prior sessions at the same minute: `LOW` below a th
 `UNKNOWN` when fewer than 10 prior observations exist or the bars carry no IV. The constants are in
 `src/research/ivContext.ts` and pinned by `tests/ivContext.test.ts`. The bucket never changes a trade. The cut is discovery
 only: a pattern suggests a hypothesis, which then needs a pre-registration and a frozen window nobody has looked at.
-Accounting: a run records one variant in the ledger, with its cell count in `cells`. The divisor for a run is its cells times
+Each run's ledger record also carries the signal count and the rejections by reason (`signals`, `rejections`). Accounting: a run records one variant in the ledger, with its cell count in `cells`. The divisor for a run is its cells times
 the records so far, so the cells of earlier runs are not in it. Changing that is a rule change, reviewed on its own.
 A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0), on its holdout days, is below 0.025 ÷ (cells × variants evaluated
 across the research program), its holdout mean is positive, and it holds under both cost stresses. Fewer than 30 holdout

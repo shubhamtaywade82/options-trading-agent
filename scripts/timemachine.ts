@@ -306,6 +306,9 @@ async function runReplay(): Promise<void> {
     trades: report.overall.trades,
     meanR: report.overall.meanR,
     verdict: report.verdict,
+    // Rejected signals are part of the record, not only the printed report: a run that drops most of its signals is different evidence.
+    signals: report.signals,
+    drops: report.drops,
     ...(cells === undefined
       ? {}
       : { cells: { tests: cells.testsCounted, edge: cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').map((cell) => cell.key) } }),
@@ -332,6 +335,8 @@ async function runReplay(): Promise<void> {
       verdict: report.verdict,
       meanR: report.overall.meanR,
       trades: report.overall.trades,
+      signals: report.signals,
+      rejections: report.drops,
       holdoutTrades: report.outOfSample.trades,
       holdoutInterval95: report.bootstrap?.meanRCi95 ?? null,
       costStress: stresses.map((stress) => ({ label: stress.label, verdict: stress.report.verdict })),
