@@ -36,4 +36,4 @@ An entry is committed to git before the run it describes, so the commit date is 
 
 ## Registered hypotheses
 
-None yet. The first entry is registered once OTA-314 freezes a fresh window (`docs/research/HOLDOUT.md`).
+None registered. Preserved and candidate hypotheses are described in `docs/research/HOLDOUT.md`, section "Holdout disposition (2026-11-13)". A candidate becomes an entry here only after its window is frozen.
