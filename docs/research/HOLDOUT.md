@@ -19,7 +19,8 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | NIFTY 2025-10..2026-09 | NIFTY | Exit sweeps (stop %, R target, time stop) and the IV-crush exit test. Contains NIFTY 2026H | Spent (confirmation) |
 | SENSEX and BANKNIFTY 2026-04..09 | SENSEX, BANKNIFTY | Exit sweeps and the IV-crush exit test | Spent (confirmation) |
 | 2025H2–2026H1 | NIFTY, BANKNIFTY, SENSEX | The ~550-trades-per-underlying counts and the mean net R range in `ROADMAP.md` fact 1 | Spent (description) |
-| 2026-10-01..2026-12-31 | NIFTY, BANKNIFTY, SENSEX | One raw-response layout check on 2026-10-26, which is not a P&L decision. Otherwise untouched. Reserved on 2026-11-10 for the three hypotheses under "Reserved window" below | Not yet Frozen. OTA-314 freezes it after the window closes |
+| 2026-10-01..2026-12-31 | NIFTY, BANKNIFTY, SENSEX | One raw-response layout check on 2026-10-26, which is not a P&L decision. Otherwise untouched. Reserved on 2026-11-10 for the three hypotheses under "Reserved window" below. NIFTY 2026-10-01..11-12 was looked at by the workbench VIX lab (entry 2026-11-13) | Not yet Frozen. NIFTY 2026-10-01..11-12 is Spent. OTA-314 freezes the rest after the window closes |
+| 2026-04-01..2026-11-12 | NIFTY | Workbench lab, outside this repository: a VIX-percentile band split of a buy-at-09:30 ATM CE/PE replay (153 days), and the choice of the next experiments (ORB, then VWAP) | Spent (discovery, and the choice of next step). Overlaps the reserved window for 2026-10-01..11-12 |
 | 2027-01-01 onward | NIFTY, BANKNIFTY, SENSEX | Untouched | Not yet Frozen |
 
 ## Entries
@@ -31,6 +32,7 @@ manifest before it is used for anything. Until then, every label here is `Spent`
 | 2026-11-03 | all windows above | Recorded in this file. Exit-sweep and IV-crush windows marked as overlapping NIFTY 2026H | research |
 | 2026-11-10 | 2026-10-01..2026-12-31 | End date fixed and the window reserved for three pooled paper-profile hypotheses (NIFTY, SENSEX, BANKNIFTY). Nothing was fetched or run | operator |
 | 2026-11-03 | ledger | The documented evidence written to `docs/research/experiments.jsonl` as backfills, once each, with citations | research |
+| 2026-11-13 | NIFTY 2026-04-01..2026-11-12 | Workbench VIX-percentile lab run, reported 2026-11-13. Its result chose the next experiment. It looked at 2026-10-01..11-12 of the reserved window before the freeze, which the reserved-window rule forbids. The lab's runs are not in `experiments.jsonl`; they must be imported before they count toward the divisor | operator, outside this repository |
 
 ## Reserved window
 
@@ -59,6 +61,11 @@ Decided by the operator on 2026-11-10, before any data in the window was fetched
   sessions traded has passed.
 - **No look before the freeze.** No replay, cell pass or description is run on any part of this window before the run in
   step 3 below. A look of any kind makes the window `Spent`.
+- **Breach recorded 2026-11-13.** The workbench VIX-percentile lab was run on NIFTY from 2026-04-01 to 2026-11-12, which includes
+  2026-10-01 to 2026-11-12 of this window. NIFTY is Spent for that part, so a NIFTY hypothesis cannot be confirmed on this window.
+  The pooled hypothesis includes NIFTY, so as registered it cannot be confirmed here either. Re-scoping is the operator's decision,
+  and it must be written in `PREREG.md` before anything is registered. BANKNIFTY and SENSEX appear in no entry of this register.
+  The operator must state whether anything else has looked at October and November, including the paper journal, before the freeze.
 
 ## What must happen before the next confirmatory run
 
