@@ -82,6 +82,7 @@ NIFTY history is spent for confirmation but stays useful for discovery, debuggin
 - Hypothesis: to be written and committed to `PREREG.md` before the window is viewed. Not yet written.
 - Monitoring: operational monitoring (halts, kill switch, feed health, errors) is allowed. Reviewing P&L or results to choose or change a strategy, parameter, limit, selection or capital decision is a look. It spends the window and must be logged.
 - Freeze: at the end, the manifest records the dataset `sha256` and `sdkVersion`, as OTA-314 requires.
+- Draft specification: `docs/research/PREREG.md`, "Candidate specification (not registered)", CAND-2026-11-13-1. Its OPEN items are the operator's to settle before freeze.
 
 **Instrument-specific candidate (BANKNIFTY and SENSEX).** It has no clean period of its own. Its only clean period is the candidate window above, so it is a subset of the pooled candidate. It uses the same observations, so it is not an independent confirmation, and both are counted in the divisor. It can start earlier only if the operator clears the exposures above.
 
