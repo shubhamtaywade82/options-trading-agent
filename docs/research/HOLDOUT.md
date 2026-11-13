@@ -49,6 +49,7 @@ Decided by the operator on 2026-11-10, before any data in the window was fetched
   profile's six-day limit, BANKNIFTY can enter on about five sessions a month, so this window may fall short of the
   30-trade floor. A short sample is reported as insufficient evidence, not as a pass or a fail, and it still counts as
   one variant in the divisor. The dataset must be fetched with `--expiry-flag MONTH`.
+- **Implied-volatility cut.** `run --cells --iv` is also a look at this window. Do not run it on this window before the freeze.
 - **Split fraction, open.** The Time Machine judges only the later part of a dataset: at its default `--split 0.6`, the
   last 40% of sessions. A window of about 60 sessions then has about 24 holdout sessions, below the floor of 30. The
   split fraction must be written in the `PREREG.md` entries before the run, and it is not decided yet.

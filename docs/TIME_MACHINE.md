@@ -215,6 +215,14 @@ These items cannot be verified from this environment (no broker credentials):
 
 `run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
 at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
+
+`--iv` adds the entry's implied-volatility bucket. The ATM IV at the signal bar is ranked, mid-rank with ties at half weight,
+against the ATM IV of the 20 prior sessions at the same minute: `LOW` below a third, `HIGH` from two thirds, `MID` between.
+`UNKNOWN` when fewer than 10 prior observations exist or the bars carry no IV. The constants are in
+`src/research/ivContext.ts` and pinned by `tests/ivContext.test.ts`. The bucket never changes a trade. The cut is discovery
+only: a pattern suggests a hypothesis, which then needs a pre-registration and a frozen window nobody has looked at.
+Accounting: a run records one variant in the ledger, with its cell count in `cells`. The divisor for a run is its cells times
+the records so far, so the cells of earlier runs are not in it. Changing that is a rule change, reviewed on its own.
 A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0), on its holdout days, is below 0.025 ÷ (cells × variants evaluated
 across the research program), its holdout mean is positive, and it holds under both cost stresses. Fewer than 30 holdout
 trades or fewer than 30 holdout sessions is `INSUFFICIENT_EVIDENCE`. The variant count is every record in the research ledger, `docs/research/experiments.jsonl` (OTA-313, OTA-315).

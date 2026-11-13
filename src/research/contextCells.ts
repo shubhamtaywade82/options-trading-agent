@@ -18,6 +18,8 @@ export interface CellOptions {
   readonly priorRuns: number;
   /** Independent sessions the holdout must span before a cell can be EDGE_SUPPORTED. */
   readonly minHoldoutDays: number;
+  /** Adds the entry's implied-volatility bucket as a dimension. Off by default, so existing cell runs are unchanged. */
+  readonly includeIv?: boolean;
 }
 
 export interface Cell {
@@ -58,7 +60,7 @@ export function applyCostStressToCells(base: CellReport, stresses: readonly { re
   return { ...base, cells };
 }
 
-function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string> {
+function cellValues(trade: ReplayTrade, dayTags: DayTags, includeIv: boolean): Record<string, string> {
   const { regime, trendAlignment, timeBucket, expiryDay, volatility, structureAlignment, expiryBucket } = trade.context;
   // chainBias is not a dimension: it is UNKNOWN on every trade, so a cell on it would only add to the divisor.
   return {
@@ -69,14 +71,15 @@ function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string
     volatility,
     structureAlignment,
     expiryBucket,
+    ...(includeIv ? { ivBucket: trade.context.ivBucket } : {}),
     ...dayTags.get(trade.date),
   };
 }
 
-function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags): Map<string, ReplayTrade[]> {
+function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags, includeIv: boolean): Map<string, ReplayTrade[]> {
   const groups = new Map<string, ReplayTrade[]>();
   for (const trade of trades) {
-    for (const [dimension, value] of Object.entries(cellValues(trade, dayTags))) {
+    for (const [dimension, value] of Object.entries(cellValues(trade, dayTags, includeIv))) {
       const key = `${trade.strategy} | ${dimension}=${value}`;
       groups.set(key, [...(groups.get(key) ?? []), trade]);
     }
@@ -122,7 +125,7 @@ function judgeCell(key: string, trades: readonly ReplayTrade[], dates: readonly 
  */
 export function contextCells(result: Pick<ReplayResult, 'trades' | 'dates'>, dayTags: DayTags, options: CellOptions): CellReport {
   const priced = result.trades.filter((trade) => trade.exitReason !== 'DATA_GAP');
-  const groups = [...groupCells(priced, dayTags)].sort(([a], [b]) => a.localeCompare(b));
+  const groups = [...groupCells(priced, dayTags, options.includeIv === true)].sort(([a], [b]) => a.localeCompare(b));
   const testsCounted = Math.max(1, groups.length) * (options.priorRuns + 1);
   const threshold = FAMILY_ALPHA / testsCounted;
   const cells = groups.map(([key, trades]) => judgeCell(key, trades, result.dates, options, threshold));

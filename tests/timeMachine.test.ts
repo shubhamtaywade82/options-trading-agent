@@ -677,3 +677,61 @@ describe('time machine verdict', () => {
     assert.equal(report.dataGapTrades, 50);
   });
 });
+
+describe('replay: implied volatility at entry (research only)', () => {
+  /** The standard session with an implied volatility on every option bar. `undefined` leaves the bars without one. */
+  function sessionWithIv(date: string, iv: number | undefined): ResearchSession {
+    const tag = (bars: readonly Candle[]) => bars.map((bar) => ({ ...bar, ...(iv === undefined ? {} : { iv }) }));
+    const base = session(date);
+    return {
+      ...base,
+      calls: Object.fromEntries(Object.entries(base.calls).map(([strike, bars]) => [strike, tag(bars)])),
+      puts: Object.fromEntries(Object.entries(base.puts).map(([strike, bars]) => [strike, tag(bars)])),
+    };
+  }
+  const sessionsAt = (count: number, iv: (index: number) => number | undefined) =>
+    Array.from({ length: count }, (_, index) => sessionWithIv(shiftDateKey(DAY, index), iv(index)));
+  const bucketsOf = (trades: readonly { readonly date: string; readonly context: { readonly ivBucket: string } }[]) =>
+    new Map(trades.map((trade) => [trade.date, trade.context.ivBucket]));
+  const cellOptions = { iterations: 100, seed: 19, minTrades: 1, splitFraction: 0.6, priorRuns: 0, minHoldoutDays: 1 };
+
+  it('buckets each entry against the ATM IV of the prior sessions at the same minute, and needs ten of them', () => {
+    const buckets = bucketsOf(replayDataset(dataset(sessionsAt(13, (index) => 10 + index)), CONFIG, NO_COSTS).trades);
+    for (let index = 0; index < 10; index += 1) {
+      assert.equal(buckets.get(shiftDateKey(DAY, index)), 'UNKNOWN', `${index} prior session(s) is below the minimum`);
+    }
+    for (let index = 10; index < 13; index += 1) {
+      assert.equal(buckets.get(shiftDateKey(DAY, index)), 'HIGH', 'an IV above every prior session');
+    }
+  });
+
+  it('puts an IV below its history in the LOW bucket', () => {
+    const buckets = bucketsOf(replayDataset(dataset(sessionsAt(13, (index) => 30 - index)), CONFIG, NO_COSTS).trades);
+    assert.equal(buckets.get(shiftDateKey(DAY, 12)), 'LOW');
+  });
+
+  it('never reads a later session: a spike on a future day leaves an earlier entry unchanged', () => {
+    const quiet = bucketsOf(replayDataset(dataset(sessionsAt(13, (index) => (index === 12 ? 10 : 10 + index))), CONFIG, NO_COSTS).trades);
+    const spiked = bucketsOf(replayDataset(dataset(sessionsAt(13, (index) => (index === 12 ? 999 : 10 + index))), CONFIG, NO_COSTS).trades);
+    assert.equal(spiked.get(shiftDateKey(DAY, 10)), quiet.get(shiftDateKey(DAY, 10)), 'day 10 uses only days 0 to 9');
+    assert.notEqual(spiked.get(shiftDateKey(DAY, 12)), quiet.get(shiftDateKey(DAY, 12)), "the entry's own IV still counts");
+  });
+
+  it('is metadata only: the same trades with and without implied volatility on the bars', () => {
+    const withIv = replayDataset(dataset(sessionsAt(13, (index) => 10 + index)), CONFIG, NO_COSTS).trades;
+    const withoutIv = replayDataset(dataset(sessionsAt(13, () => undefined)), CONFIG, NO_COSTS).trades;
+    const withoutContext = (trades: readonly { readonly context: unknown }[]) => trades.map((trade) => JSON.stringify({ ...trade, context: null }));
+    assert.deepEqual(withoutContext(withIv), withoutContext(withoutIv));
+    assert.ok(withoutIv.every((trade) => trade.context.ivBucket === 'UNKNOWN'));
+  });
+
+  it('splits cells by the IV bucket only when asked', () => {
+    const trades = replayDataset(dataset(sessionsAt(13, (index) => 10 + index)), CONFIG, NO_COSTS).trades;
+    const dates = trades.map((trade) => trade.date);
+    const off = contextCells({ trades, dates }, new Map(), cellOptions);
+    const on = contextCells({ trades, dates }, new Map(), { ...cellOptions, includeIv: true });
+    assert.ok(!off.cells.some((cell) => cell.key.includes('ivBucket=')));
+    assert.ok(on.cells.some((cell) => cell.key.includes('ivBucket=HIGH')));
+  });
+});
+

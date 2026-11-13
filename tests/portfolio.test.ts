@@ -40,6 +40,7 @@ function trade(underlying: string, direction: Direction, entryMinute: number, ex
       volatility: 'UNKNOWN',
       structureAlignment: 'UNKNOWN',
       expiryBucket: 'UNKNOWN',
+      ivBucket: 'UNKNOWN',
       chainBias: 'UNKNOWN',
     },
   };

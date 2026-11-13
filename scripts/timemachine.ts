@@ -402,7 +402,7 @@ async function priorVariants(): Promise<number> {
   return priorVariantCount(await readLedgerFile(LEDGER_PATH));
 }
 
-/** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
+/** Per-strategy, per-context cells for `run --cells`: `--vix <file>` adds the VIX tercile per day, `--iv` the entry's ATM IV bucket. */
 async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): Promise<CellReport> {
   const dates = dataset.sessions.map((session) => session.date);
   const vixPath = argument('--vix');
@@ -413,6 +413,7 @@ async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): 
     minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
     splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
     minHoldoutDays: DEFAULT_TIME_MACHINE_OPTIONS.minHoldoutDays,
+    includeIv: flag('--iv'),
     priorRuns: await priorVariants(),
   });
 }
