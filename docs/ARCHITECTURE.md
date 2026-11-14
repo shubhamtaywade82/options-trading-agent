@@ -11,14 +11,14 @@ modes the design is built around. The README covers operation and configuration.
 | Auth | `src/dhan/auth.ts`, `src/dhan/client.ts` | OTP login (PIN + TOTP) or a static token, never both. One token manager serves REST and both WebSocket feeds. Renewal is single-flight. |
 | Time | `src/time/ist.ts`, `calendar.ts` | All session logic on IST minutes. Epoch conversion is explicit (`DHAN_EPOCH_IST_SHIFTED`). |
 | Market data | `src/dhan/marketData.ts`, `instrumentMaster.ts`, `feed.ts` | Charts, expiries, option chain (account-wide 3 s throttle), scrip master (exact symbol lookup, fail-closed), WS feed with receipt-time freshness. |
-| Signal | `src/market/*`, `src/strategy/orbSupertrend.ts` | Bar aggregation from ticks; closed-bar indicators; ORB + SuperTrend signal. |
+| Signal | `src/market/*`, `src/strategy/*` | Bar aggregation from ticks; closed-bar indicators; five live signal families (ORB breakout, SuperTrend flip, EMA cross, momentum break, trend continuation) behind the posture. The previous-day break is research-only. |
 | Contract | `src/options/*` | Expiry, strike and quote selection; bracket geometry; whole-lot sizing. |
 | Gate | `src/risk/*` | Pure pre-trade gate returning all violations; day book with kill switch and cooldown. |
 | Advice | `src/llm/advisor.ts` | Ollama structured output, veto only, fail-closed. |
-| Venue | `src/execution/paper.ts`, `src/dhan/liveExecution.ts` | Same `ExecutionPort` contract. Paper simulates; live places super orders. |
+| Venue | `src/runtime/createRuntime.ts`, `src/execution/*`, `src/dhan/liveExecution.ts`, `src/dhan/sandboxGateway.ts` | Same `ExecutionPort` contract, with four paths chosen at start: Postgres paper (the default), paper_exchange and Dhan sandbox through the gateway port, and live super orders. |
 | Orchestration | `src/runtime/*` | Serial per-underlying agent; orchestrator with routing, clock, breach handling, shutdown. |
 | Audit | `src/ops/*` | JSONL journal, one file per IST day (serialised writes), IST console logger, bounded in-memory log for the cockpit, journal summary. |
-| Cockpit | `src/ui/*`, `src/runtime/views.ts` | Read-only snapshot (`Orchestrator.snapshot`) rendered by a pure renderer and an Ink app. Three operator actions (close, entry block, stop), each behind a second press. |
+| Cockpit | `src/ui/*`, `src/runtime/views.ts` | Read-only snapshot (`Orchestrator.snapshot`) rendered by a pure renderer and an Ink app. Every key that changes trading or the session needs a second press; the key table is `src/ui/keymap.ts`. |
 
 ## 2. Trade lifecycle (per underlying)
 
@@ -31,7 +31,9 @@ stateDiagram-v2
     ENTRY_PENDING --> POSITION_OPEN: ENTRY_FILLED
     ENTRY_PENDING --> IDLE: ENTRY_REJECTED
     ENTRY_PENDING --> HALTED: ENTRY_UNCONFIRMED
+    ENTRY_PENDING --> HALTED: HALT
     POSITION_OPEN --> RISK_MANAGEMENT_ACTIVE: PROTECTION_ARMED
+    POSITION_OPEN --> EXIT_PENDING: EXIT_SUBMITTED
     POSITION_OPEN --> POSITION_CLOSED: PROTECTIVE_EXIT_FILLED
     RISK_MANAGEMENT_ACTIVE --> EXIT_PENDING: EXIT_SUBMITTED
     RISK_MANAGEMENT_ACTIVE --> POSITION_CLOSED: PROTECTIVE_EXIT_FILLED
@@ -52,7 +54,7 @@ The table in `src/domain/fsm.ts` is the source of truth. Any (state, event) pair
 `IllegalTransitionError`, and the state is left unchanged. `fsm.test.ts` checks that every row
 targets a declared state and that HALT is never legal in HALTED.
 
-Two states the diagram does not show are legal and matter in operation:
+Two things happen while HALTED without a state change, and they matter in operation:
 
 - **Late fills while HALTED.** An entry that was unconfirmed and then fills at the broker is
   recorded as a late fill for risk accounting. The FSM stays HALTED, so the operator sees it.

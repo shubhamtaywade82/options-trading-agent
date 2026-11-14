@@ -1,6 +1,6 @@
 # Trailing stops: research and implementation specification
 
-Status: Phases 1–4 implemented on branch `feat/trailing-stop-research` (2026-11-03): indicators, trail engine, fixed-entry
+Status: Phases 1–4 merged to main (merge commit `453a0c0`, from branch `feat/trailing-stop-research`, 2026-11-03): indicators, trail engine, fixed-entry
 study, statistics and CLI (`npm run trail-study`). Live wiring (Phase 6) is not started. Results: §12. Written against
 `main` at `32874ca`.
 
