@@ -8,6 +8,16 @@ type FeedClient = Pick<DhanClient, 'ws'>;
 
 export type DhanMarketFeedMode = 'ticker' | 'quote' | 'full';
 
+export type FeedConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
+
+export interface FeedDiagnostics {
+  readonly status: FeedConnectionStatus;
+  readonly subscribedCount: number;
+  readonly totalTicks: number;
+  readonly lastTickAt?: number | undefined;
+  readonly disconnectReason?: number | string | undefined;
+}
+
 export interface DhanFeedOptions {
   readonly istShiftedTimestamps: boolean;
   /** Dhan WS RequestCode for subscriptions. Use ticker or quote for index spots (IDX_I). */
@@ -60,6 +70,35 @@ export function asPriceEvent(value: unknown): PriceEvent | undefined {
   return candidate as PriceEvent;
 }
 
+/** Parses Dhan responseCode 1 (INDEX_PACKET), which the SDK switch omits. */
+export function parseIndexPacket(packet: Buffer): PriceEvent | undefined {
+  if (packet.length < 16 || packet.readUInt8(0) !== 1) {
+    return undefined;
+  }
+  const securityId = String(packet.readInt32LE(4));
+  const ltp = packet.readFloatLE(8);
+  const ltt = packet.readInt32LE(12);
+  if (!Number.isFinite(ltp) || ltp <= 0) {
+    return undefined;
+  }
+  return { type: 'ticker', exchangeSegment: 'IDX_I', securityId, ltp, ltt };
+}
+
+/** Slices a multi-packet buffer using the 2-byte little-endian message length at offset 1. */
+export function splitPackets(buffer: Buffer): Buffer[] {
+  const packets: Buffer[] = [];
+  let offset = 0;
+  while (offset + 3 <= buffer.length) {
+    const len = buffer.readInt16LE(offset + 1);
+    if (len <= 0 || offset + len > buffer.length) {
+      break;
+    }
+    packets.push(buffer.subarray(offset, offset + len));
+    offset += len;
+  }
+  return packets;
+}
+
 /**
  * Live LTP feed over the Dhan market socket. Ticks are keyed by the composite
  * `exchangeSegment:securityId`. Staleness runs from the older of local receipt
@@ -79,6 +118,10 @@ export class DhanFeed {
   private warnedFutureLtt = false;
   private warnedLateLtt = false;
   private terminalCode: number | undefined;
+  private connectionStatus: FeedConnectionStatus = 'disconnected';
+  private totalTicks = 0;
+  private lastTickAt: number | undefined;
+  private lastDisconnectReason: number | string | undefined;
 
   constructor(
     private readonly client: FeedClient,
@@ -94,15 +137,17 @@ export class DhanFeed {
       return;
     }
     this.started = true;
+    this.connectionStatus = 'connecting';
     if (this.options.marketFeedMode !== undefined) {
       (this.client.ws.market as unknown as { mode?: DhanMarketFeedMode }).mode = this.options.marketFeedMode;
     }
     const { market, orders } = this.client.ws;
+    this.hookMarketSocket(market);
+    this.bindLifecycle(market);
     market.on('tick', (value: unknown) => this.handlePacket(value));
     // The SDK re-emits a socket's connection errors as `error` events. With no listener, Node throws and the process
     // dies, so every socket this feed opens gets one before it connects.
     market.on('error', (error: unknown) => this.reportSocketError('market feed', error));
-    market.on('disconnect', (event: unknown) => this.handleDisconnect(event));
     if (this.options.connectOrderUpdates === true) {
       orders.on('error', (error: unknown) => this.reportSocketError('order update', error));
       await this.client.ws.connect();
@@ -122,8 +167,64 @@ export class DhanFeed {
       return;
     }
     this.terminalCode = code;
+    // The socket is halted for good, so the status says so even though a close event follows.
+    this.connectionStatus = 'disconnected';
     this.options.logger?.error(`market feed ended by the server with code ${code}; entries stay refused until the feed is restarted`, { code });
     this.options.onTerminalDisconnect?.(code);
+  }
+
+  private hookMarketSocket(market: FeedClient['ws']['market']): void {
+    // Dhan server sends binary heartbeats and ignores JSON ping. BaseWS kills the socket after 40s waiting for JSON pong.
+    const raw = market as unknown as { startHeartbeat?: () => void; onMessage?: (data: unknown) => void };
+    if (typeof raw.startHeartbeat === 'function') {
+      raw.startHeartbeat = () => {};
+    }
+    if (typeof raw.onMessage === 'function') {
+      const orig = raw.onMessage.bind(market);
+      raw.onMessage = (data: unknown) => {
+        if (Buffer.isBuffer(data)) {
+          for (const packet of splitPackets(data)) {
+            const indexEvent = parseIndexPacket(packet);
+            if (indexEvent !== undefined) {
+              this.handlePacket(indexEvent);
+            }
+          }
+        }
+        orig(data);
+      };
+    }
+  }
+
+  private bindLifecycle(market: FeedClient['ws']['market']): void {
+    const on = (event: string, fn: (...args: unknown[]) => void): void => {
+      if (typeof market.on === 'function') {
+        market.on(event, fn);
+      }
+    };
+    on('open', () => {
+      this.connectionStatus = 'connected';
+      this.options.logger?.info('feed socket connected', { subscriptions: this.subscriptions.size });
+    });
+    on('close', () => {
+      // A close after a terminal reason is not a reconnect: the socket was halted for good.
+      if (this.terminalCode !== undefined) {
+        this.connectionStatus = 'disconnected';
+        this.options.logger?.warn('feed socket closed after a terminal reason; not reconnecting', { code: this.terminalCode });
+        return;
+      }
+      this.connectionStatus = 'reconnecting';
+      this.options.logger?.warn('feed socket closed; reconnecting');
+    });
+    on('disconnect', (event: unknown) => {
+      const reasonCode = (event as { reasonCode?: number } | undefined)?.reasonCode;
+      this.lastDisconnectReason = reasonCode;
+      this.options.logger?.warn('feed server disconnect frame', { reasonCode });
+      this.handleDisconnect(event);
+    });
+    on('reconnect_failed', (event: unknown) => {
+      this.connectionStatus = 'disconnected';
+      this.options.logger?.error('feed reconnection failed', (event as Record<string, unknown>) ?? {});
+    });
   }
 
   /**
@@ -140,20 +241,14 @@ export class DhanFeed {
 
   subscribe(refs: readonly InstrumentRef[]): void {
     const fresh = refs.filter((ref) => !this.subscriptions.has(instrumentKey(ref)));
-    if (fresh.length === 0) {
-      return;
-    }
-    for (const ref of fresh) {
-      this.subscriptions.set(instrumentKey(ref), ref);
-    }
+    if (fresh.length === 0) return;
+    for (const ref of fresh) this.subscriptions.set(instrumentKey(ref), ref);
     this.client.ws.market.subscribe(fresh.map((ref) => ({ exchangeSegment: ref.exchangeSegment, securityId: ref.securityId })));
   }
 
   unsubscribe(refs: readonly InstrumentRef[]): void {
     const held = refs.filter((ref) => this.subscriptions.has(instrumentKey(ref)));
-    if (held.length === 0) {
-      return;
-    }
+    if (held.length === 0) return;
     for (const ref of held) {
       this.subscriptions.delete(instrumentKey(ref));
       this.lastReceived.delete(instrumentKey(ref));
@@ -174,8 +269,19 @@ export class DhanFeed {
     return received === undefined ? undefined : nowMs - received;
   }
 
+  status(): FeedDiagnostics {
+    return {
+      status: this.connectionStatus,
+      subscribedCount: this.subscriptions.size,
+      totalTicks: this.totalTicks,
+      lastTickAt: this.lastTickAt,
+      disconnectReason: this.lastDisconnectReason,
+    };
+  }
+
   stop(): void {
     this.started = false;
+    this.connectionStatus = 'disconnected';
     this.client.ws.disconnect();
     this.listeners.clear();
   }
@@ -190,6 +296,8 @@ export class DhanFeed {
     if (!this.subscriptions.has(key)) {
       return;
     }
+    this.totalTicks += 1;
+    this.lastTickAt = receivedAt;
     const ltt = dhanEpochSecondsToMs(event.ltt, this.options.istShiftedTimestamps);
     // A delayed packet must not look fresh, so age runs from the older of receipt and exchange time. A future LTT
     // (wrong convention, reported below) falls back to receipt time.

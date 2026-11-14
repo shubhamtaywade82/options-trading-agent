@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { Instrument } from '@nemesis-oss/dhanhq-sdk';
-import { asPriceEvent, DhanFeed } from '../src/dhan/feed.js';
+import { asPriceEvent, DhanFeed, parseIndexPacket } from '../src/dhan/feed.js';
 import { InstrumentMaster, normalizeExpiry, toOptionContract } from '../src/dhan/instrumentMaster.js';
 import { DhanMarketData, intradayIntervalFor, mapChartColumns, OPTION_CHAIN_MIN_INTERVAL_MS } from '../src/dhan/marketData.js';
 import { istEpoch } from './support/fixtures.js';
@@ -210,31 +210,31 @@ describe('feed', () => {
     assert.equal(asPriceEvent(null), undefined);
   });
 
-  it('delivers ticks only for subscribed composite keys, with receipt-time freshness', async () => {
-    let handler: ((value: unknown) => void) | undefined;
-    const subscribed: unknown[] = [];
-    const client = {
+  function mockFeedClient(listeners: Map<string, (...args: unknown[]) => void>, subscribed: unknown[] = []) {
+    return {
       ws: {
         market: {
-          on: (event: string, listener: (value: unknown) => void) => {
-            if (event === 'tick') {
-              handler = listener;
-            }
-          },
+          on: (event: string, fn: (...args: unknown[]) => void) => listeners.set(event, fn),
           connect: async () => undefined,
-          subscribe: (instruments: unknown[]) => subscribed.push(...instruments),
+          subscribe: (items: unknown[]) => subscribed.push(...items),
           unsubscribe: () => undefined,
         },
         connect: async () => undefined,
         disconnect: () => undefined,
       },
     };
+  }
+
+  it('delivers ticks only for subscribed composite keys, with receipt-time freshness', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const subscribed: unknown[] = [];
     let now = 5_000;
-    const feed = new DhanFeed(client as never, { istShiftedTimestamps: false, now: () => now });
+    const feed = new DhanFeed(mockFeedClient(listeners, subscribed) as never, { istShiftedTimestamps: false, now: () => now });
     const ticks: unknown[] = [];
     feed.onTick((tick) => ticks.push(tick));
     await feed.start();
     feed.subscribe([{ exchangeSegment: 'NSE_FNO', securityId: '48001' }]);
+    const handler = listeners.get('tick') as ((value: unknown) => void) | undefined;
     handler?.({ type: 'ticker', exchangeSegment: 'NSE_FNO', securityId: '48001', ltp: 101, ltt: 1_700_000_000 });
     handler?.({ type: 'ticker', exchangeSegment: 'NSE_FNO', securityId: '99999', ltp: 5, ltt: 1_700_000_000 });
     assert.equal(ticks.length, 1);
@@ -246,68 +246,73 @@ describe('feed', () => {
   });
 
   it('should age a tick by its exchange time when the packet arrives late', async () => {
-    let handler: ((value: unknown) => void) | undefined;
-    const client = {
-      ws: {
-        market: {
-          on: (event: string, listener: (value: unknown) => void) => {
-            if (event === 'tick') {
-              handler = listener;
-            }
-          },
-          connect: async () => undefined,
-          subscribe: () => undefined,
-          unsubscribe: () => undefined,
-        },
-        connect: async () => undefined,
-        disconnect: () => undefined,
-      },
-    };
+    const listeners = new Map<string, (...args: unknown[]) => void>();
     const now = 1_700_000_100_000;
-    const feed = new DhanFeed(client as never, { istShiftedTimestamps: false, now: () => now });
+    const feed = new DhanFeed(mockFeedClient(listeners) as never, { istShiftedTimestamps: false, now: () => now });
     await feed.start();
     feed.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
-    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_500, ltt: 1_700_000_000 });
-    assert.equal(feed.ageMs({ exchangeSegment: 'IDX_I', securityId: '13' }), 100_000, 'a packet received now with a 100 s old trade is 100 s stale');
+    (listeners.get('tick') as ((v: unknown) => void) | undefined)?.({
+      type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_500, ltt: 1_700_000_000,
+    });
+    assert.equal(feed.ageMs({ exchangeSegment: 'IDX_I', securityId: '13' }), 100_000);
   });
 
   it('should convert IST-stamped LTT to UTC, and report a tick stamped in the future once', async () => {
-    let handler: ((value: unknown) => void) | undefined;
+    const listeners = new Map<string, (...args: unknown[]) => void>();
     const errors: string[] = [];
-    const client = {
-      ws: {
-        market: {
-          on: (event: string, listener: (value: unknown) => void) => {
-            if (event === 'tick') {
-              handler = listener;
-            }
-          },
-          connect: async () => undefined,
-          subscribe: () => undefined,
-          unsubscribe: () => undefined,
-        },
-        connect: async () => undefined,
-        disconnect: () => undefined,
-      },
-    };
     const nowMs = 1_700_000_000_000;
     const logger = { info: () => undefined, warn: () => undefined, error: (message: string) => errors.push(message), debug: () => undefined };
     const ticks: { ltt: number }[] = [];
-    const shifted = new DhanFeed(client as never, { istShiftedTimestamps: true, now: () => nowMs, logger: logger as never });
+    const shifted = new DhanFeed(mockFeedClient(listeners) as never, { istShiftedTimestamps: true, now: () => nowMs, logger: logger as never });
     shifted.onTick((tick) => ticks.push(tick));
     await shifted.start();
     shifted.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
-    // Dhan's measured packet: the trade at nowMs, stamped 19800 s ahead.
-    handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_450, ltt: nowMs / 1000 + 19_800 });
+    (listeners.get('tick') as ((v: unknown) => void) | undefined)?.({
+      type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_450, ltt: nowMs / 1000 + 19_800,
+    });
     assert.equal(ticks[0]?.ltt, nowMs);
     assert.deepEqual(errors, []);
 
-    const unshifted = new DhanFeed(client as never, { istShiftedTimestamps: false, now: () => nowMs, logger: logger as never });
+    const unshiftedListeners = new Map<string, (...args: unknown[]) => void>();
+    const unshifted = new DhanFeed(mockFeedClient(unshiftedListeners) as never, { istShiftedTimestamps: false, now: () => nowMs, logger: logger as never });
     await unshifted.start();
     unshifted.subscribe([{ exchangeSegment: 'IDX_I', securityId: '13' }]);
+    const handler = unshiftedListeners.get('tick') as ((v: unknown) => void) | undefined;
     handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_450, ltt: nowMs / 1000 + 19_800 });
     handler?.({ type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: 22_451, ltt: nowMs / 1000 + 19_801 });
     assert.equal(errors.length, 1);
     assert.match(errors[0] ?? '', /DHAN_FEED_IST_SHIFTED/);
+  });
+
+  it('parses Dhan Response Code 1 index packet from binary buffer', () => {
+    const buf = Buffer.alloc(16);
+    buf.writeUInt8(1, 0);
+    buf.writeInt16LE(16, 1);
+    buf.writeUInt8(0, 3);
+    buf.writeInt32LE(13, 4);
+    buf.writeFloatLE(24500.5, 8);
+    buf.writeInt32LE(1700000000, 12);
+    const event = parseIndexPacket(buf);
+    assert.deepEqual(event, {
+      type: 'ticker', exchangeSegment: 'IDX_I', securityId: '13', ltp: Math.fround(24500.5), ltt: 1700000000,
+    });
+    assert.equal(parseIndexPacket(Buffer.alloc(15)), undefined);
+    assert.equal(parseIndexPacket(Buffer.from([2, ...new Array(15).fill(0)])), undefined);
+  });
+
+  it('tracks feed lifecycle status and tick count', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const feed = new DhanFeed(mockFeedClient(listeners) as never, { istShiftedTimestamps: false });
+    assert.equal(feed.status().status, 'disconnected');
+    await feed.start();
+    assert.equal(feed.status().status, 'connecting');
+    listeners.get('open')?.();
+    assert.equal(feed.status().status, 'connected');
+    listeners.get('close')?.();
+    assert.equal(feed.status().status, 'reconnecting');
+    listeners.get('disconnect')?.({ reasonCode: 805 });
+    assert.equal(feed.status().disconnectReason, 805);
+    listeners.get('reconnect_failed')?.();
+    assert.equal(feed.status().status, 'disconnected');
   });
 });

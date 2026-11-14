@@ -74,4 +74,30 @@ describe('DhanFeed terminal disconnects', () => {
     market.emit('disconnect', { type: 'disconnect' });
     assert.equal(instance.terminalDisconnectCode(), undefined);
   });
+
+  it('reports the feed as disconnected after a terminal reason, even when the socket then closes', async () => {
+    const { instance, market, log } = feed();
+    await instance.start();
+    market.emit('disconnect', frame(806));
+    market.emit('close');
+    assert.equal(instance.status().status, 'disconnected');
+    assert.equal(log.errors.length, 1);
+  });
+
+  it('reports disconnected when the close arrives before the terminal frame', async () => {
+    const { instance, market } = feed();
+    await instance.start();
+    market.emit('close');
+    market.emit('disconnect', frame(807));
+    assert.equal(instance.status().status, 'disconnected');
+    assert.equal(instance.terminalDisconnectCode(), 807);
+  });
+
+  it('keeps reconnecting after a transient reason', async () => {
+    const { instance, market } = feed();
+    await instance.start();
+    market.emit('disconnect', frame(800));
+    market.emit('close');
+    assert.equal(instance.status().status, 'reconnecting');
+  });
 });

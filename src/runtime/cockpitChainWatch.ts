@@ -145,7 +145,9 @@ export class CockpitChainWatch {
       const expiries = await this.market.listExpiries(spec.spot);
       const expiry = pickExpiry(expiries, today, this.config.contract.minDaysToExpiry, this.config.contract.maxDaysToExpiry);
       if (expiry === undefined) {
-        this.error = `no expiry ≥ ${this.config.contract.minDaysToExpiry} day(s) out`;
+        this.error = expiries.length === 0
+          ? `${symbol} (${spec.optionSegment}) option chain not supported by Dhan API`
+          : `no expiry ≥ ${this.config.contract.minDaysToExpiry} day(s) out`;
         this.cache = undefined;
         return;
       }

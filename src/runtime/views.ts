@@ -72,6 +72,14 @@ export interface IndicatorView {
   readonly orbFormed: boolean;
 }
 
+export interface FeedStatusView {
+  readonly status: 'connected' | 'connecting' | 'disconnected' | 'reconnecting';
+  readonly subscribedCount: number;
+  readonly totalTicks: number;
+  readonly lastTickAt?: number | undefined;
+  readonly disconnectReason?: number | string | undefined;
+}
+
 export interface ChainWatchLegView {
   readonly bid: number | undefined;
   readonly ask: number | undefined;
@@ -171,6 +179,8 @@ export interface CockpitSnapshot {
   readonly chainWatch: ChainWatchView | undefined;
   /** Active session posture and enabled strategies. */
   readonly strategy?: StrategySessionView;
+  /** Live WebSocket feed status and metrics. */
+  readonly feed?: FeedStatusView | undefined;
 }
 
 export interface StrategyChoiceView {
