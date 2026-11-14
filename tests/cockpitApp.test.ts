@@ -5,6 +5,7 @@ import { createElement } from 'react';
 import { render, type Instance } from 'ink';
 import type { Runtime } from '../src/runtime/createRuntime.js';
 import App, { isConfirmation } from '../src/ui/App.js';
+import { COCKPIT_KEYS } from '../src/ui/keymap.js';
 import { feedStatusText } from '../src/ui/cockpit.js';
 import { fakeRuntime } from './support/fakeRuntime.js';
 
@@ -112,21 +113,33 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
     });
   });
 
-  it('arms immediate quit on the first ctrl+c and stops on the second', async () => {
+  it('moves the selection with the arrow keys without asking for a second press', async () => {
+    const { runtime, stop } = fakeRuntime();
+    stops.push(stop);
+    await withTerminal(runtime, {}, async ({ stdout, press }) => {
+      press('\u001B[B');
+      await wait(40);
+      assert.doesNotMatch(stdout.text, /again within 5s/);
+    });
+  });
+
+  it('needs a second ctrl+c to stop, and then stops gracefully like s', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);
     await withTerminal(runtime, {}, async ({ stdout, press }) => {
       press('\u0003');
       await wait(40);
-      assert.match(stdout.text, /Ctrl\+C again within 2s/i);
+      assert.match(stdout.text, /press s or Ctrl\+C again within 5s to stop/);
       assert.equal(runtime.orchestrator.snapshot().phase, 'RUNNING', 'a single press must not stop the agent');
+
       press('\u0003');
       await wait(80);
+      assert.match(stdout.text, /stopping: flattening open positions before exit/);
       assert.equal(runtime.orchestrator.snapshot().phase, 'STOPPED');
     });
   });
 
-  it('switches posture on p and toggles strategies on 1 and 2 live in the session', async () => {
+  it('needs a second press before it cycles the posture or toggles a strategy family', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);
     await withTerminal(runtime, {}, async ({ stdout, press }) => {
@@ -134,28 +147,45 @@ describe('operator cockpit (Ink app, fake terminal)', () => {
 
       press('p');
       await wait(40);
-      assert.match(stdout.text, /confirmed/i);
+      assert.match(stdout.text, /press p again within 5s to cycle the strategy posture/);
+      assert.equal(runtime.orchestrator.snapshot().strategy?.posture, 'aligned', 'one press must not change the posture');
+      press('p');
+      await wait(40);
       assert.equal(runtime.orchestrator.snapshot().strategy?.posture, 'confirmed');
 
       press('1');
       await wait(40);
+      assert.match(stdout.text, /press 1 again within 5s to toggle Range break/);
+      assert.equal(runtime.orchestrator.snapshot().strategy?.strategies.find((s) => s.id === 'range')?.on, true, 'one press must not toggle the family');
+      press('1');
+      await wait(40);
       assert.match(stdout.text, /Range break off/i);
       assert.equal(runtime.orchestrator.snapshot().strategy?.strategies.find((s) => s.id === 'range')?.on, false);
-
-      press('2');
-      await wait(40);
-      assert.match(stdout.text, /Trend flip off/i);
-      assert.equal(runtime.orchestrator.snapshot().strategy?.strategies.find((s) => s.id === 'trend')?.on, false);
     });
   });
 
-  it('triggers a test trade on t keypress for the selected underlying', async () => {
+  it('starts a test trade only on the second t press', async () => {
     const { runtime, stop } = fakeRuntime();
     stops.push(stop);
     await withTerminal(runtime, {}, async ({ stdout, press }) => {
       press('t');
       await wait(40);
+      assert.match(stdout.text, /press t again within 5s to start a test trade on NIFTY/);
+      assert.doesNotMatch(stdout.text, /no spot tick received yet/);
+
+      press('t');
+      await wait(40);
       assert.match(stdout.text, /no spot tick received yet/i);
+    });
+  });
+
+  it('prints the key line from the same table the README and the footer are built from', async () => {
+    const { runtime, stop } = fakeRuntime();
+    stops.push(stop);
+    await withTerminal(runtime, {}, async ({ stdout, press }) => {
+      press('?');
+      await wait(40);
+      assert.ok(stdout.text.includes(COCKPIT_KEYS.map((key) => key.help).join(' · ')), 'the key line lists every key');
     });
   });
 
