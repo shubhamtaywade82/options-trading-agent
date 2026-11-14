@@ -18,6 +18,8 @@ export interface CellOptions {
   readonly priorRuns: number;
   /** Independent sessions the holdout must span before a cell can be EDGE_SUPPORTED. */
   readonly minHoldoutDays: number;
+  /** Adds the entry's implied-volatility bucket as a dimension. Off by default, so existing cell runs are unchanged. */
+  readonly includeIv?: boolean;
 }
 
 export interface Cell {
@@ -58,7 +60,7 @@ export function applyCostStressToCells(base: CellReport, stresses: readonly { re
   return { ...base, cells };
 }
 
-function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string> {
+function cellValues(trade: ReplayTrade, dayTags: DayTags, includeIv: boolean): Record<string, string> {
   const { regime, trendAlignment, timeBucket, expiryDay, volatility, structureAlignment, expiryBucket } = trade.context;
   // chainBias is not a dimension: it is UNKNOWN on every trade, so a cell on it would only add to the divisor.
   return {
@@ -69,14 +71,15 @@ function cellValues(trade: ReplayTrade, dayTags: DayTags): Record<string, string
     volatility,
     structureAlignment,
     expiryBucket,
+    ...(includeIv ? { ivBucket: trade.context.ivBucket } : {}),
     ...dayTags.get(trade.date),
   };
 }
 
-function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags): Map<string, ReplayTrade[]> {
+function groupCells(trades: readonly ReplayTrade[], dayTags: DayTags, includeIv: boolean): Map<string, ReplayTrade[]> {
   const groups = new Map<string, ReplayTrade[]>();
   for (const trade of trades) {
-    for (const [dimension, value] of Object.entries(cellValues(trade, dayTags))) {
+    for (const [dimension, value] of Object.entries(cellValues(trade, dayTags, includeIv))) {
       const key = `${trade.strategy} | ${dimension}=${value}`;
       groups.set(key, [...(groups.get(key) ?? []), trade]);
     }
@@ -122,26 +125,62 @@ function judgeCell(key: string, trades: readonly ReplayTrade[], dates: readonly 
  */
 export function contextCells(result: Pick<ReplayResult, 'trades' | 'dates'>, dayTags: DayTags, options: CellOptions): CellReport {
   const priced = result.trades.filter((trade) => trade.exitReason !== 'DATA_GAP');
-  const groups = [...groupCells(priced, dayTags)].sort(([a], [b]) => a.localeCompare(b));
+  const groups = [...groupCells(priced, dayTags, options.includeIv === true)].sort(([a], [b]) => a.localeCompare(b));
   const testsCounted = Math.max(1, groups.length) * (options.priorRuns + 1);
   const threshold = FAMILY_ALPHA / testsCounted;
   const cells = groups.map(([key, trades]) => judgeCell(key, trades, result.dates, options, threshold));
   return { cells, testsCounted, threshold };
 }
 
-/** LOW / MID / HIGH by each date's first VIX bar open, ranked across the given dates. Dates without VIX get no tag. */
+/** Earlier sessions of opening VIX a day is ranked against, and the least history that gives it a tag. Fixed before use. */
+export const VIX_LOOKBACK_SESSIONS = 252;
+export const VIX_MIN_HISTORY = 60;
+
+/**
+ * LOW / MID / HIGH by each date's opening VIX (its first bar's open), ranked against the opening VIX of the earlier
+ * sessions. Only earlier sessions are used, so the tag is known before the day's entries. A date with fewer than
+ * VIX_MIN_HISTORY earlier sessions, or with no VIX, gets no tag. Before 2026-11-13 this ranked every date against all the
+ * dates in the dataset, which used later days; cell reports printed before that change are not valid evidence.
+ */
 export function vixTerciles(vixBars: readonly Candle[], dates: readonly string[]): Map<string, { vix: string }> {
-  const wanted = new Set(dates);
   const opens = new Map<string, number>();
   for (const bar of [...vixBars].sort((a, b) => a.time - b.time)) {
     const date = istParts(bar.time).date;
-    if (wanted.has(date) && !opens.has(date)) {
+    if (!opens.has(date)) {
       opens.set(date, bar.open);
     }
   }
-  const ranked = [...opens].sort(([, a], [, b]) => a - b);
-  const labels = ['LOW', 'MID', 'HIGH'];
-  return new Map(ranked.map(([date], index) => [date, { vix: labels[Math.floor((3 * index) / ranked.length)] ?? 'HIGH' }]));
+  const sessions = [...opens].sort(([a], [b]) => a.localeCompare(b));
+  const tags = new Map<string, { vix: string }>();
+  for (const date of dates) {
+    const today = opens.get(date);
+    if (today === undefined) {
+      continue;
+    }
+    const history = sessions
+      .filter(([session]) => session < date)
+      .slice(-VIX_LOOKBACK_SESSIONS)
+      .map(([, open]) => open);
+    const label = trailingTercile(history, today);
+    if (label !== undefined) {
+      tags.set(date, { vix: label });
+    }
+  }
+  return tags;
+}
+
+/** Mid-rank tercile of `current` within `history`, or undefined without VIX_MIN_HISTORY observations. */
+function trailingTercile(history: readonly number[], current: number): 'LOW' | 'MID' | 'HIGH' | undefined {
+  if (history.length < VIX_MIN_HISTORY) {
+    return undefined;
+  }
+  const below = history.filter((value) => value < current).length;
+  const tied = history.filter((value) => value === current).length;
+  const rank = (below + tied / 2) / history.length;
+  if (rank < 1 / 3) {
+    return 'LOW';
+  }
+  return rank >= 2 / 3 ? 'HIGH' : 'MID';
 }
 
 export function formatCells(report: CellReport): string {

@@ -47,9 +47,9 @@ import { STRATEGY_CATALOG, type StrategyId } from '../src/strategy/session.js';
 import { summarize } from '../src/research/stats.js';
 import { applyCostStress, DEFAULT_TIME_MACHINE_OPTIONS, formatReport, runTimeMachine, type CostStressRun, type TimeMachineReport } from '../src/research/timeMachine.js';
 import { shiftDateKey } from '../src/time/ist.js';
+import { requestBlocks, ROLLING_EXPIRY_CODES, ROLLING_MAX_SPAN_DAYS, rollingRequest, type RollingInterval } from '../src/research/rollingFetch.js';
 
 /** Dhan's intraday chart window is 90 days and the rolling-option one 180; 30-day windows stay well inside both. */
-const WINDOW_DAYS = 30;
 /**
  * Every replay is another test on the same days; the best of k variants is optimistic by about a factor of k.
  * This log keeps k countable per dataset.
@@ -106,18 +106,6 @@ function numberArgument(name: string, fallback: number, check: (value: number) =
   return value;
 }
 
-function windows(fromDate: string, toDate: string, windowDays: number): { from: string; to: string }[] {
-  const out: { from: string; to: string }[] = [];
-  let from = fromDate;
-  while (from <= toDate) {
-    const end = shiftDateKey(from, windowDays - 1);
-    const to = end < toDate ? end : toDate;
-    // Windows overlap by one day so an exclusive toDate never drops a session; bars are de-duplicated by time.
-    out.push({ from, to: to === toDate ? to : shiftDateKey(to, 1) });
-    from = shiftDateKey(to, 1);
-  }
-  return out;
-}
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -157,8 +145,9 @@ async function fetchDataset(): Promise<void> {
   }
   const tickSize = numberArgument('--tick-size', 0.05, (value) => value > 0);
   const barMinutes = numberArgument('--interval', 5, (value) => [1, 5, 15, 25, 60].includes(value));
+  const intervalText = String(barMinutes) as RollingInterval;
   const offsets = numberArgument('--offsets', 10, (value) => Number.isInteger(value) && value >= 0 && value <= 10);
-  const expiryCode = numberArgument('--expiry-code', 1, (value) => Number.isInteger(value) && value >= 1 && value <= 3);
+  const expiryCode = numberArgument('--expiry-code', 1, (value) => ROLLING_EXPIRY_CODES.includes(value)) as 0 | 1 | 2;
   const expiryFlag = (argument('--expiry-flag') ?? 'WEEK').toUpperCase();
   if (expiryFlag !== 'WEEK' && expiryFlag !== 'MONTH') {
     throw new Error('--expiry-flag must be WEEK or MONTH');
@@ -184,9 +173,9 @@ async function fetchDataset(): Promise<void> {
   const dumped = new Set<OptionType>();
   // Dhan began refusing 1-minute rolling-option requests that span more than one session (HTTP 400, seen
   // 2026-11-03; 30-day windows worked on 2026-10-26). `--window-days 1` fetches one session per request.
-  const defaultWindowDays = barMinutes === 1 ? 1 : WINDOW_DAYS;
-  const windowDays = numberArgument('--window-days', defaultWindowDays, (value) => Number.isInteger(value) && value >= 1 && value <= WINDOW_DAYS);
-  for (const window of windows(fromDate, toDate, windowDays)) {
+  const defaultWindowDays = barMinutes === 1 ? 1 : ROLLING_MAX_SPAN_DAYS;
+  const windowDays = numberArgument('--window-days', defaultWindowDays, (value) => Number.isInteger(value) && value >= 1 && value <= ROLLING_MAX_SPAN_DAYS);
+  for (const window of requestBlocks(fromDate, toDate, windowDays)) {
     console.error(`${underlying} ${window.from}..${window.to}: spot bars`);
     spot.push(...(await withRetry(`spot ${window.from}`, () => market.intradayCandles(spotRef, barMinutes, window.from, window.to))));
     for (const optionType of ['CE', 'PE'] as const) {
@@ -194,19 +183,19 @@ async function fetchDataset(): Promise<void> {
         const strike = offset === 0 ? 'ATM' : offset > 0 ? `ATM+${offset}` : `ATM${offset}`;
         await sleep(spacingMs);
         const raw = await withRetry(`${optionType} ${strike} ${window.from}`, () =>
-          client.expiredOptionsData.fetch({
-            securityId: spotRef.securityId,
-            exchangeSegment: optionSegment,
-            instrument: 'OPTIDX',
-            expiryFlag,
-            expiryCode,
-            strike,
-            drvOptionType: optionType === 'CE' ? 'CALL' : 'PUT',
-            interval: String(barMinutes),
-            requiredData: ['open', 'high', 'low', 'close', 'volume', 'strike', 'iv', 'oi'],
-            fromDate: window.from,
-            toDate: window.to,
-          }),
+          client.expiredOptionsData.fetch(
+            rollingRequest({
+              securityId: spotRef.securityId,
+              exchangeSegment: optionSegment,
+              expiryFlag,
+              expiryCode,
+              strike,
+              drvOptionType: optionType === 'CE' ? 'CALL' : 'PUT',
+              interval: intervalText,
+              requiredData: ['open', 'high', 'low', 'close', 'volume', 'strike', 'iv', 'oi'],
+              block: window,
+            }),
+          ),
         );
         if (flag('--dump-raw') && !dumped.has(optionType)) {
           dumped.add(optionType);
@@ -320,6 +309,9 @@ async function runReplay(): Promise<void> {
     trades: report.overall.trades,
     meanR: report.overall.meanR,
     verdict: report.verdict,
+    // Rejected signals are part of the record, not only the printed report: a run that drops most of its signals is different evidence.
+    signals: report.signals,
+    drops: report.drops,
     ...(cells === undefined
       ? {}
       : { cells: { tests: cells.testsCounted, edge: cells.cells.filter((cell) => cell.verdict === 'EDGE_SUPPORTED').map((cell) => cell.key) } }),
@@ -346,6 +338,8 @@ async function runReplay(): Promise<void> {
       verdict: report.verdict,
       meanR: report.overall.meanR,
       trades: report.overall.trades,
+      signals: report.signals,
+      rejections: report.drops,
       holdoutTrades: report.outOfSample.trades,
       holdoutInterval95: report.bootstrap?.meanRCi95 ?? null,
       costStress: stresses.map((stress) => ({ label: stress.label, verdict: stress.report.verdict })),
@@ -416,7 +410,7 @@ async function priorVariants(): Promise<number> {
   return priorVariantCount(await readLedgerFile(LEDGER_PATH));
 }
 
-/** Per-strategy, per-context cells for `run --cells`, with `--vix <file>` adding the VIX tercile as a dimension. */
+/** Per-strategy, per-context cells for `run --cells`: `--vix <file>` adds the VIX tercile per day, `--iv` the entry's ATM IV bucket. */
 async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): Promise<CellReport> {
   const dates = dataset.sessions.map((session) => session.date);
   const vixPath = argument('--vix');
@@ -427,6 +421,7 @@ async function cellReport(report: TimeMachineReport, dataset: ResearchDataset): 
     minTrades: DEFAULT_TIME_MACHINE_OPTIONS.minTrades,
     splitFraction: DEFAULT_TIME_MACHINE_OPTIONS.splitFraction,
     minHoldoutDays: DEFAULT_TIME_MACHINE_OPTIONS.minHoldoutDays,
+    includeIv: flag('--iv'),
     priorRuns: await priorVariants(),
   });
 }

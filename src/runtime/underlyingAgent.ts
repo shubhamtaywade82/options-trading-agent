@@ -715,6 +715,10 @@ export class UnderlyingAgent {
     if (this.haltReason !== undefined) {
       return `halted: ${this.haltReason}`;
     }
+    const feedCode = this.deps.feed.terminalDisconnectCode?.();
+    if (feedCode !== undefined) {
+      return `market feed ended by the server with code ${feedCode}; entries stay refused until the feed is restarted`;
+    }
     return this.deps.book.snapshot().killSwitchReason ?? (this.deps.gate ?? OPEN_GATE).entryBlock();
   }
 

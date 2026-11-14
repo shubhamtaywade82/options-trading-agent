@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import type { Runtime } from '../runtime/createRuntime.js';
-import { operatorInterrupt } from '../runtime/operatorInterrupt.js';
+import { STRATEGY_CATALOG } from '../strategy/session.js';
+import { COCKPIT_KEYS, STRATEGY_KEYS } from './keymap.js';
 import { COCKPIT_MIN_COLS, COCKPIT_MIN_ROWS, renderOptionsCockpit, resizeNotice } from './cockpit.js';
 
 /** Destructive or outward actions need a second press within this window. */
@@ -9,7 +10,7 @@ export const CONFIRM_WINDOW_MS = 5000;
 const DEFAULT_COLS = 160;
 const DEFAULT_ROWS = 50;
 
-type Action = 'close' | 'block' | 'stop' | 'reset_drawdown' | 'toggle_brake';
+type Action = 'close' | 'block' | 'stop' | 'reset_drawdown' | 'toggle_brake' | 'posture' | 'strategy' | 'test_trade';
 interface Pending {
   readonly action: Action;
   readonly symbol: string | undefined;
@@ -31,18 +32,26 @@ function confirmPrompt(pending: Pending): string {
     case 'block':
       return 'press k again within 5s to toggle the entry block';
     case 'stop':
-      return 'press s again within 5s to stop: open positions are flattened first';
+      return 'press s or Ctrl+C again within 5s to stop: open positions are flattened first';
     case 'reset_drawdown':
       return 'press r again within 5s to confirm reset of daily drawdown threshold';
     case 'toggle_brake':
       return 'press d again within 5s to toggle daily loss brake';
+    case 'posture':
+      return 'press p again within 5s to cycle the strategy posture';
+    case 'strategy': {
+      const family = STRATEGY_CATALOG.find((strategy) => strategy.id === STRATEGY_KEYS[pending.symbol ?? '']);
+      return `press ${pending.symbol ?? ''} again within 5s to toggle ${family?.label ?? 'the strategy family'}`;
+    }
+    case 'test_trade':
+      return `press t again within 5s to start a test trade on ${pending.symbol ?? ''}`;
   }
 }
 
 /**
- * Operator cockpit. It shows the state the orchestrator reports and offers three actions. Each
- * action needs a second press, so one stray key cannot trade. Ctrl+C is a graceful stop, not an
- * unmount, because `c` is also the close key.
+ * Operator cockpit. It shows the state the orchestrator reports. Every key that changes trading or the
+ * session needs a second press, so one stray key cannot trade (the key table is ./keymap.ts). Ctrl+C is the
+ * same stop as `s`, and it does not unmount the app, because `c` is also the close key.
  */
 export default function App({ runtime }: { runtime: Runtime }) {
   const { orchestrator, records } = runtime;
@@ -96,12 +105,6 @@ export default function App({ runtime }: { runtime: Runtime }) {
     exit();
   };
 
-  const quitImmediately = async (): Promise<void> => {
-    setNotice('quitting immediately…');
-    await orchestrator.stop('immediate');
-    exit();
-  };
-
   const execute = (action: Action, symbol: string | undefined): void => {
     if (action === 'close' && symbol !== undefined) {
       setNotice(orchestrator.requestManualExit(symbol));
@@ -113,6 +116,15 @@ export default function App({ runtime }: { runtime: Runtime }) {
       setNotice(orchestrator.resetDailyDrawdown());
     } else if (action === 'toggle_brake') {
       setNotice(orchestrator.toggleDailyLossBrake());
+    } else if (action === 'posture') {
+      setNotice(orchestrator.cyclePosture());
+    } else if (action === 'strategy' && symbol !== undefined) {
+      const id = STRATEGY_KEYS[symbol];
+      if (id !== undefined) {
+        setNotice(orchestrator.toggleStrategy(id));
+      }
+    } else if (action === 'test_trade' && symbol !== undefined) {
+      setNotice(orchestrator.triggerTestTrade(symbol));
     }
   };
 
@@ -130,11 +142,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
-      if (operatorInterrupt() === 'armed') {
-        setNotice('Ctrl+C again within 2s to quit immediately (paper: lease released)');
-        return;
-      }
-      void quitImmediately();
+      request('stop', undefined);
       return;
     }
     if (key.upArrow) {
@@ -158,27 +166,11 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === 'p') {
-      setNotice(orchestrator.cyclePosture());
+      request('posture', undefined);
       return;
     }
-    if (input === '1') {
-      setNotice(orchestrator.toggleStrategy('range'));
-      return;
-    }
-    if (input === '2') {
-      setNotice(orchestrator.toggleStrategy('trend'));
-      return;
-    }
-    if (input === '3') {
-      setNotice(orchestrator.toggleStrategy('ema_cross'));
-      return;
-    }
-    if (input === '4') {
-      setNotice(orchestrator.toggleStrategy('momentum'));
-      return;
-    }
-    if (input === '5') {
-      setNotice(orchestrator.toggleStrategy('continuation'));
+    if (Object.prototype.hasOwnProperty.call(STRATEGY_KEYS, input)) {
+      request('strategy', input);
       return;
     }
     if (input === 't') {
@@ -186,7 +178,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
         setNotice('no underlying selected');
         return;
       }
-      setNotice(orchestrator.triggerTestTrade(selectedSymbol));
+      request('test_trade', selectedSymbol);
       return;
     }
     if (input === 'c') {
@@ -238,7 +230,7 @@ export default function App({ runtime }: { runtime: Runtime }) {
       return;
     }
     if (input === '?') {
-      setNotice('↑↓ select · ←→ chain · [] pos · p posture · 1-5 strat · t test · c close · k block · s stop · r reset dd · d brake');
+      setNotice(COCKPIT_KEYS.map((key) => key.help).join(' · '));
     }
   });
 

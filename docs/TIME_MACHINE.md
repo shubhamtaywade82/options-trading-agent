@@ -94,7 +94,8 @@ What is **not** replayed. The report prints this list with every run:
 - The chain-bias vote in the context gate. It is replayed as `NEUTRAL`, which makes the gate stricter, not looser.
 - `MAX_SPREAD_PCT`, `MIN_OPEN_INTEREST` and `MIN_VOLUME`. Bars carry no quotes. The default half-spread is
   `MAX_SPREAD_PCT / 2`, the widest spread the live gate accepts, so the default cost model is the worst accepted case.
-- Expiry choice. The dataset holds one contract per session (`--expiry-flag`, `--expiry-code`). A session whose contract is
+- Request blocks. Dhan's `toDate` is non-inclusive. Each block of at most 30 sessions is requested with the day after its last session as `toDate`, and `autoAdjustDates` is off. Before 2026-11-10 the final session of each range was not requested, so datasets fetched earlier may lack it. Their windows are Spent, so they describe the market and cannot confirm anything.
+- Expiry codes are 0, 1 and 2 (SDK 2.1.0 refuses 3). Expiry choice. The dataset holds one contract per session (`--expiry-flag`, `--expiry-code`). A session whose contract is
   outside `MIN_DAYS_TO_EXPIRY`/`MAX_DAYS_TO_EXPIRY` takes no entry (`EXPIRY_OUT_OF_RANGE`). Where live would pick a later
   expiry instead, the replay cannot. A session with no expiry on record is not limited, and the report says so. BANKNIFTY is
   monthly: fetch it with `--expiry-flag MONTH`, or its sessions get no expiry.
@@ -134,7 +135,9 @@ above) can be counted.
 ## Data source: Dhan `/charts/rollingoption`
 
 `client.expiredOptionsData.fetch` in `@nemesis-oss/dhanhq-sdk` 2.0.1 posts to `/charts/rollingoption`. The response
-layout below was written against the 1.3.0-era SDK. It is re-verified on 2.0.1 by OTA-314, and no recording exists yet.
+layout below was written against the 1.3.0-era SDK. SDK 2.1.0 documents the same `data.ce` / `data.pe` parallel arrays with
+numeric timestamps, which the parser accepts, but 2.1.0 is not on npm yet, so that is read from its source, not run. The
+layout is re-verified on the pinned SDK by OTA-314, and no recording exists yet.
 Facts verified from the SDK source:
 
 - Strikes are **relative to ATM at each bar** (`ATM`, `ATM+1`, `ATM-2`, …). The request takes the underlying's
@@ -211,7 +214,17 @@ These items cannot be verified from this environment (no broker credentials):
 ## Context cells (`run --cells`)
 
 `run --cells [--vix data/research/INDIAVIX-….json]` splits each strategy's priced trades by one context dimension
-at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX).
+at a time (regime, day-trend alignment, time bucket, expiry day, optional VIX tercile from each day's opening VIX, ranked against the trailing 252 sessions and tagged only after 60 of them).
+`--vix` was ranked against every date in the dataset until 2026-11-13, which used later days. Cell reports printed before that change are
+not valid evidence. No ledger record cites a `--vix` run (checked 2026-11-13).
+
+`--iv` adds the entry's implied-volatility bucket. The ATM IV at the signal bar is ranked, mid-rank with ties at half weight,
+against the ATM IV of the 20 prior sessions at the same minute: `LOW` below a third, `HIGH` from two thirds, `MID` between.
+`UNKNOWN` when fewer than 10 prior observations exist or the bars carry no IV. The constants are in
+`src/research/ivContext.ts` and pinned by `tests/ivContext.test.ts`. The bucket never changes a trade. The cut is discovery
+only: a pattern suggests a hypothesis, which then needs a pre-registration and a frozen window nobody has looked at.
+Each run's ledger record also carries the signal count and the rejections by reason (`signals`, `rejections`). Accounting: a run records one variant in the ledger, with its cell count in `cells`. The divisor for a run is its cells times
+the records so far, so the cells of earlier runs are not in it. Changing that is a rule change, reviewed on its own.
 A cell is `EDGE_SUPPORTED` only when P(mean net R ≤ 0), on its holdout days, is below 0.025 ÷ (cells × variants evaluated
 across the research program), its holdout mean is positive, and it holds under both cost stresses. Fewer than 30 holdout
 trades or fewer than 30 holdout sessions is `INSUFFICIENT_EVIDENCE`. The variant count is every record in the research ledger, `docs/research/experiments.jsonl` (OTA-313, OTA-315).

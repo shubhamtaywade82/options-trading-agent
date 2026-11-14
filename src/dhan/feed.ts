@@ -30,7 +30,16 @@ export interface DhanFeedOptions {
    * never use it, and the Dhan sandbox serves no WebSocket, so it stays closed there. Defaults to false.
    */
   readonly connectOrderUpdates?: boolean;
+  /** Called once, with the reason code, when the server ends the market feed for good. */
+  readonly onTerminalDisconnect?: ((code: number) => void) | undefined;
 }
+
+/**
+ * Server disconnect reasons that reconnecting cannot clear: no Data API plan, bad token or client id, the instrument or
+ * connection cap, an expired token (SDK 2.1.0 `FEED_TERMINAL_DISCONNECT_CODES`). The SDK stops the market socket for these
+ * and emits no error, so the feed must record the stop itself or it goes silent.
+ */
+export const TERMINAL_FEED_DISCONNECT_CODES: readonly number[] = [804, 805, 806, 807, 808, 809, 810];
 
 interface PriceEvent {
   readonly type: 'ticker' | 'quote' | 'full';
@@ -108,6 +117,7 @@ export class DhanFeed {
   private started = false;
   private warnedFutureLtt = false;
   private warnedLateLtt = false;
+  private terminalCode: number | undefined;
   private connectionStatus: FeedConnectionStatus = 'disconnected';
   private totalTicks = 0;
   private lastTickAt: number | undefined;
@@ -146,6 +156,23 @@ export class DhanFeed {
     await market.connect();
   }
 
+  /** The reason code that ended the market feed for good, or undefined while the feed is recoverable. */
+  terminalDisconnectCode(): number | undefined {
+    return this.terminalCode;
+  }
+
+  private handleDisconnect(event: unknown): void {
+    const code = (event as { reasonCode?: unknown } | null | undefined)?.reasonCode;
+    if (typeof code !== 'number' || !TERMINAL_FEED_DISCONNECT_CODES.includes(code) || this.terminalCode !== undefined) {
+      return;
+    }
+    this.terminalCode = code;
+    // The socket is halted for good, so the status says so even though a close event follows.
+    this.connectionStatus = 'disconnected';
+    this.options.logger?.error(`market feed ended by the server with code ${code}; entries stay refused until the feed is restarted`, { code });
+    this.options.onTerminalDisconnect?.(code);
+  }
+
   private hookMarketSocket(market: FeedClient['ws']['market']): void {
     // Dhan server sends binary heartbeats and ignores JSON ping. BaseWS kills the socket after 40s waiting for JSON pong.
     const raw = market as unknown as { startHeartbeat?: () => void; onMessage?: (data: unknown) => void };
@@ -179,6 +206,12 @@ export class DhanFeed {
       this.options.logger?.info('feed socket connected', { subscriptions: this.subscriptions.size });
     });
     on('close', () => {
+      // A close after a terminal reason is not a reconnect: the socket was halted for good.
+      if (this.terminalCode !== undefined) {
+        this.connectionStatus = 'disconnected';
+        this.options.logger?.warn('feed socket closed after a terminal reason; not reconnecting', { code: this.terminalCode });
+        return;
+      }
       this.connectionStatus = 'reconnecting';
       this.options.logger?.warn('feed socket closed; reconnecting');
     });
@@ -186,6 +219,7 @@ export class DhanFeed {
       const reasonCode = (event as { reasonCode?: number } | undefined)?.reasonCode;
       this.lastDisconnectReason = reasonCode;
       this.options.logger?.warn('feed server disconnect frame', { reasonCode });
+      this.handleDisconnect(event);
     });
     on('reconnect_failed', (event: unknown) => {
       this.connectionStatus = 'disconnected';

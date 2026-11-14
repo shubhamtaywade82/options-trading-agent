@@ -5,6 +5,7 @@ import type { AgentView, CockpitSnapshot, FeedStatusView, PositionView } from '.
 import { formatMinuteOfDay, isMarketSessionOpen, IST_OFFSET_MS, istParts } from '../time/ist.js';
 import { CHAIN_PANEL_ROWS, chainWatchLines } from './chainWatchPanel.js';
 import { bad, callSide, emphasis, freshness, info, infoBold, label, muted, ok, putSide, range, selectedName, warn } from './palette.js';
+import { COCKPIT_KEYS } from './keymap.js';
 
 /**
  * Pure renderer for the operator cockpit. It turns a read-only snapshot into lines of text.
@@ -600,7 +601,7 @@ function logBox(logs: readonly LogRecord[], rows: number, width: number): string
 }
 
 function footer(options: CockpitOptions): string[] {
-  const keys = dim(' ↑↓ select   ←→ chain   [] pos   p posture   1/2 strat   t test   c/k/s confirm   r reset dd   d brake   Ctrl+C×2 quit');
+  const keys = dim(` ${COCKPIT_KEYS.filter((key) => key.display !== '?').map((key) => key.help).join('   ')}`);
   const notice = options.notice === undefined ? '' : ` ${options.notice}`;
   return [fit(keys, options.width), fit(chalk.cyan(notice), options.width)];
 }

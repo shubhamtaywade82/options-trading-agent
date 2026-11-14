@@ -34,6 +34,8 @@ export interface MarketPort {
 
 /** Feed-side view for the agent: LTP freshness and option subscription lifecycle. */
 export interface FeedPort {
+  /** The reason code that ended the market feed for good, or undefined while it is recoverable. */
+  terminalDisconnectCode?(): number | undefined;
   ageMs(ref: InstrumentRef): number | undefined;
   subscribe(refs: readonly InstrumentRef[]): void;
   unsubscribe(refs: readonly InstrumentRef[]): void;

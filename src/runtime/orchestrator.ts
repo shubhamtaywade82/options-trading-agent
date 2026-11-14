@@ -492,6 +492,7 @@ export class Orchestrator {
   private createAgent(spec: UnderlyingSpec): UnderlyingAgent {
     const feed: FeedPort = {
       ageMs: (ref) => this.services.feed.ageMs(ref),
+      terminalDisconnectCode: () => this.services.feed.terminalDisconnectCode?.(),
       subscribe: (refs) => {
         for (const ref of refs) {
           this.optionIndex.set(instrumentKey(ref), spec.symbol);

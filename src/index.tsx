@@ -11,8 +11,9 @@ import App from './ui/App.js';
  * Entry point. Configuration is validated before any socket opens.
  *
  * On an interactive terminal the operator cockpit runs. Set UI=off, or pipe the output, for plain
- * log lines (useful under a process supervisor). SIGINT twice within 2s quits immediately (paper
- * releases the lease for restart). SIGTERM runs a graceful stop.
+ * log lines (useful under a process supervisor). Without the cockpit, SIGINT twice within 2s quits
+ * immediately (paper releases the lease for restart) and SIGTERM runs a graceful stop. In the cockpit,
+ * Ctrl+C is the graceful stop key, the same as s.
  */
 async function main(): Promise<void> {
   const config = loadConfig(process.env);

@@ -12,6 +12,7 @@ import { StrategySession, type StrategyId, type StrategyPosture } from '../strat
 import { dayDifference, nominalMonthlyExpiry, nominalWeeklyExpiry } from '../time/calendar.js';
 import { istParts, NSE_SESSION_OPEN_MINUTE } from '../time/ist.js';
 import { legBars, sessionStrikes, type ResearchDataset, type ResearchSession } from './dataset.js';
+import { atmIvAt, atmIvByMinute, ivBucketFor, trailingIvHistory, type IvBucket, type IvHistory, type IvSessionMaps } from './ivContext.js';
 import {
   expiryBucket,
   structureAlignment,
@@ -111,6 +112,8 @@ export interface TradeContext {
   readonly structureAlignment: StructureAlignment;
   /** Sessions to expiry, or UNKNOWN where the session has no expiry on record. */
   readonly expiryBucket: ExpiryBucket;
+  /** ATM implied volatility at the signal, against the trailing sessions at the same minute. Research only: it never changes a trade. */
+  readonly ivBucket: IvBucket;
   /** Not replayed: there is no historical option chain. Always UNKNOWN, never a neutral stand-in. */
   readonly chainBias: 'UNKNOWN';
 }
@@ -127,6 +130,7 @@ function tradeContext(
   signalBarTime: number,
   session: ResearchSession,
   history: readonly Candle[],
+  ivBucket: IvBucket,
 ): TradeContext {
   const minute = istParts(signalBarTime).minuteOfDay;
   return {
@@ -137,6 +141,7 @@ function tradeContext(
     volatility: volatilityBucket(history),
     structureAlignment: structureAlignment(context.structure, direction),
     expiryBucket: expiryBucket(session.date, session.expiry),
+    ivBucket,
     chainBias: 'UNKNOWN',
   };
 }
@@ -323,12 +328,13 @@ export function replayDataset(
 
   const expiryOf = rollingExpiry(dataset);
   let undatedSessions = 0;
+  const atmIv: IvSessionMaps[] = dataset.sessions.map((session) => ({ CE: atmIvByMinute(session, 'CE'), PE: atmIvByMinute(session, 'PE') }));
   dataset.sessions.forEach((session, index) => {
     const warmup = dataset.sessions.slice(Math.max(0, index - config.warmupSessions), index).flatMap((day) => day.spot);
     const expiry = session.expiry ?? expiryOf?.(session.date);
     const dated = expiry === undefined ? session : { ...session, expiry };
     undatedSessions += expiry === undefined ? 1 : 0;
-    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, observer);
+    const outcome = replaySession(dated, warmup, dataset.optionSegment, config, costs, strategySession, params, drop, trailingIvHistory(atmIv, index), observer);
     signals += outcome.signals;
     trades.push(...outcome.trades);
   });
@@ -349,6 +355,7 @@ function replaySession(
   strategySession: StrategySession,
   params: OrbSupertrendParams,
   drop: (code: string) => void,
+  ivHistory: IvHistory,
   observer: EntryObserver | undefined,
 ): { trades: ReplayTrade[]; signals: number } {
   const barMs = config.barMinutes * 60_000;
@@ -653,13 +660,14 @@ function replaySession(
       drop('NO_OPTION_DATA');
       continue;
     }
+    const ivBucket = ivBucketFor(ivHistory[optionType], istParts(signal.barTime).minuteOfDay, atmIvAt(session, optionType, signal.barTime, signal.spot));
     pending = {
       strategy: signal.strategy ?? 'unknown',
       direction: signal.direction,
       optionType,
       strike: targetEntryStrike(atm, session.strikeStep, signal.direction, config.strikeOffsetSteps),
       signalBarTime: signal.barTime,
-      context: tradeContext(context, signal.direction, signal.barTime, session, history),
+      context: tradeContext(context, signal.direction, signal.barTime, session, history, ivBucket),
     };
   }
 
