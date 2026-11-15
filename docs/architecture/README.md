@@ -41,7 +41,7 @@ Archify skill (see [Regenerate a page](#regenerate-a-page)).
 | --- | --- |
 | [Trade lifecycle](10-trade-lifecycle.html) ([source](source/10-trade-lifecycle.json)) | The normal path of the per-side state machine, with every exit and the protective close. |
 | [Client-side protection](10a-client-side-protection.html) ([source](source/10a-client-side-protection.json)) | Paper and sandbox stops that fire only on option ticks: the silence watch, entries refused, and the STALE_DATA exit after the grace period. |
-| [Halt and recovery](10b-halt-and-recovery.html) ([source](source/10b-halt-and-recovery.json)) | Every HALT, both UNCONFIRMED triggers, and RESET as defined in the table. Together with the lifecycle, this covers all 24 rows of `TRANSITIONS`. |
+| [Halt and recovery](10b-halt-and-recovery.html) ([source](source/10b-halt-and-recovery.json)) | Every HALT, both UNCONFIRMED triggers, and RESET as defined in the table. Together with the lifecycle, this covers every row of `TRANSITIONS`. |
 | [Broker P&L exit](10c-broker-pnl-exit.html) ([source](source/10c-broker-pnl-exit.json)) | The opt-in live rail: arming at start, a refused arm retried per entry, and an unknown outcome that is never resent. |
 | [Daily-loss breach](10d-daily-loss-breach.html) ([source](source/10d-daily-loss-breach.json)) | The breach latch, the entries blocked, the DAILY_LOSS flatten, and the broker kill switch once every agent is flat. |
 | [Operator controls](10e-operator-controls.html) ([source](source/10e-operator-controls.json)) | Each cockpit key, which ones need a second press, and the orchestrator call each one makes. |
@@ -54,7 +54,7 @@ Archify skill (see [Regenerate a page](#regenerate-a-page)).
 
 | Diagram | What it shows |
 | --- | --- |
-| [Persistence schema](14-persistence-schema.html) ([source](source/14-persistence-schema.json)) | Migrations 001 to 006: every table and column, the keys, and the foreign keys. The view `v_closed_trades` is not drawn. |
+| [Persistence schema](14-persistence-schema.html) ([source](source/14-persistence-schema.json)) | Every table and column the migrations create, the keys, and the foreign keys. The runner's `schema_migrations` table and the view `v_closed_trades` are not drawn. |
 | [Journal events](14a-journal-events.html) ([source](source/14a-journal-events.json)) | Every event kind the runtime writes, grouped by purpose, with the line that writes it. |
 | [Domain model](15-domain-model.html) ([source](source/15-domain-model.json)) | The order, event and position types, the execution port and its implementations, and the agent and orchestrator. |
 
@@ -80,5 +80,5 @@ ARCHIFY_UPDATE_CHECK_DISABLED=1 node <archify>/archify/bin/archify.mjs finalize 
 Use the type from each source (`architecture`, `dataflow`, `lifecycle`, `sequence`, `erd`, `class`, `tree`, `workflow`).
 `--out-dir` keeps the receipts out of the repository (`.archify/` is gitignored). The command validates the source,
 checks each evidence reference against the pinned commit, renders the page, and runs a browser check. The `.delivery.json`
-beside each page is tracked. Before regenerating, set each source's `meta.repository.revision` to the commit you pin:
+beside each page is gitignored, because it records absolute paths from the machine that made it. Before regenerating, set each source's `meta.repository.revision` to the commit you pin:
 the checker only confirms that a cited line exists in that file at that commit, so a stale pin lets wrong citations pass.
