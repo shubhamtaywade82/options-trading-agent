@@ -174,7 +174,7 @@ repository's permission and hook configuration, and research records must not le
 
 **Decision.** `scripts/graphify.sh` runs the pinned `graphifyy` 0.9.104 through `uvx`, sets `GRAPHIFY_BACKEND=none`, and allows
 only `extract --code-only`, `update`, `cluster-only`, `query`, `path`, `explain`, `god-nodes` and `affected`. Code is parsed
-locally with tree-sitter. The output is `graphify-out/`, which is gitignored. The repository never runs `graphify install`,
+locally with tree-sitter. The output is `graphify-out/`. The directory is gitignored, except six snapshot files that PR #9 committed. The repository never runs `graphify install`,
 `graphify <platform> install` or `graphify hook install`, because those write `.claude/settings.json`, CLAUDE.md sections and git
 hooks. Those choices belong to the operator. The graph is a navigation aid. Compiler-accurate definitions and references still
 come from `ts-language-mcp`, and an inferred edge is checked at its cited `file:line` before anyone relies on it.

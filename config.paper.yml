@@ -99,10 +99,10 @@ exits:
   trailing_jump_pct: 8         # Step up stop loss by 8% as price advances (locks in profit tighter)
   breakeven_at_rr: 0.8         # Move SL to entry breakeven at 0.8R profit (+40% on premium with the 50% stop)
 
-# Paper Trading Venue Settings
+# Paper Trading Venue Settings. The venue is not set here: PAPER_BACKEND in .env chooses postgres (the default) or
+# exchange (paper_exchange), and npm run dev:paper follows it. slippage_bps applies to the postgres venue only.
 paper:
-  backend: postgres            # postgres (local PostgreSQL ledger) or exchange
-  slippage_bps: 25             # 25 bps realistic spread/slippage simulation
+  slippage_bps: 25             # 25 bps realistic spread/slippage simulation (postgres venue)
 
 # Session Window & Timings (IST)
 timing:

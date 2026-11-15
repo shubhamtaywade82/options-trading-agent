@@ -28,7 +28,7 @@ the trading machinery is built and tested offline, and no strategy has yet shown
 npm ci                       # installs @nemesis-oss/dhanhq-sdk 2.0.1 from npm (exact pin, from the lockfile)
 cp .env.example .env         # fill DHAN_CLIENT_ID, DHAN_PIN and DHAN_TOTP_SECRET (see Dhan authentication)
 npm run typecheck && npm test
-npm run dev:paper            # paper venue, live market data, simulated fills
+npm run dev:paper            # live market data; PAPER_BACKEND in .env picks the venue (postgres by default)
 ```
 
 There are three modes. Market data is always the live Dhan feed in every mode.
@@ -45,7 +45,7 @@ Each mode holds its own trading lease, keyed `mode:clientId`, so a paper run nev
 
 ### Running paper against paper_exchange
 
-`PAPER_BACKEND=exchange` sends paper orders to a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server, which keeps the account, margin and ledger. Set `PAPER_EXCHANGE_URL` (https, or http on loopback), `PAPER_EXCHANGE_API_KEY` and optionally `PAPER_EXCHANGE_ACCOUNT_ID`.
+`PAPER_BACKEND=exchange` sends paper orders to a running [paper_exchange](https://github.com/shubhamtaywade82/paper_exchange) server, which keeps the account, margin and ledger. Set `PAPER_EXCHANGE_URL` (https, or http on loopback), `PAPER_EXCHANGE_API_KEY` and optionally `PAPER_EXCHANGE_ACCOUNT_ID`. `npm run dev:paper` follows the same setting: `config.paper.yml` does not set the venue, so `PAPER_BACKEND=exchange` in `.env` is enough.
 
 The account must be INR. The server's reset endpoint creates USD accounts, so after a reset set the currency to INR on the server. The agent refuses to start otherwise.
 
@@ -350,7 +350,7 @@ ledger. Nothing here starts on its own, except the weekday cron that runs `scrip
 
 | Script | What it does | Needs | Safety |
 | --- | --- | --- | --- |
-| `dev:paper` | Paper agent on live market data with simulated fills. Loads `config.paper.yml`. | Dhan, PostgreSQL | writes the paper ledger |
+| `dev:paper` | Paper agent on live market data with simulated fills. Loads `config.paper.yml`; the venue comes from `PAPER_BACKEND` in `.env`. | Dhan, PostgreSQL (and paper_exchange for the exchange venue) | the paper ledger (postgres venue), or paper_exchange orders (exchange venue) |
 | `dev:sandbox` | Agent on the Dhan sandbox account. | Dhan, sandbox credentials, PostgreSQL, Redis | orders go to the sandbox |
 | `dev:live` | Agent on the production account. | Dhan, PostgreSQL, Redis, `LIVE_TRADING_ACK` | real orders |
 | `dev`, `start` | Agent with the settings in `.env`. `start` runs the built code. | as the mode in `.env` | as the mode |
@@ -434,7 +434,7 @@ code-intelligence server.
 - It is a development dependency only. `npm ci --omit=dev` installs none of it, and nothing in `src/` or `scripts/` imports it.
 
 - **Codebase graph** (`scripts/graphify.sh`, pinned `graphifyy` 0.9.104 through `uvx`, [ADR-013](docs/DECISIONS.md)). It builds
-  `graphify-out/` (gitignored) from the code, offline: `scripts/graphify.sh extract . --code-only`, then `query`, `path`,
+  `graphify-out/` from the code, offline (the directory is gitignored, except six snapshot files that PR #9 committed): `scripts/graphify.sh extract . --code-only`, then `query`, `path`,
   `explain`, `god-nodes` or `affected`. It needs `uv`. The wrapper refuses LLM, global-graph, git-hook and assistant-install
   commands.
 

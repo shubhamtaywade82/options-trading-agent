@@ -75,6 +75,6 @@ From `docs/ROADMAP.md` ("Standing rules") and `docs/research/`.
   `scripts/graphify.sh update .`. Requires `uv`. No LLM and no network source is used.
 - Read: `scripts/graphify.sh query "<question>"`, `path A B`, `explain X`, `god-nodes`, `affected X`. An edge is `EXTRACTED`
   (stated in the source) or `INFERRED`. Check an inferred edge at its `file:line` before relying on it.
-- The graph lives in `graphify-out/`, which is gitignored. `GRAPH_REPORT.md` records the commit it was built from.
+- The graph lives in `graphify-out/`. The directory is gitignored, except six snapshot files that PR #9 committed (`git ls-files graphify-out`). `update` rewrites those six, so keep them out of feature commits unless refreshing the snapshot is the point. `GRAPH_REPORT.md` records the commit it was built from.
 - Do not run `graphify install`, `graphify <platform> install` or `graphify hook install` in this repository. They write
   `.claude/settings.json`, CLAUDE.md sections and git hooks (ADR-013). Those need the operator's explicit decision.

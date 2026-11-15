@@ -262,6 +262,12 @@ describe('loadConfig posture and YAML loading', () => {
     assert.equal(config.chainAnalysis.enabled, true);
     assert.equal(config.chainAnalysis.minHeadroomPts, 15);
   });
+
+  it('lets PAPER_BACKEND pick the venue under the paper profile, so dev:paper follows .env', () => {
+    const exchange = { ...BASE, MODE: 'paper', PAPER_BACKEND: 'exchange', PAPER_EXCHANGE_URL: 'https://paper.example.test', PAPER_EXCHANGE_API_KEY: 'k' };
+    assert.equal(loadConfig(exchange, 'config.paper.yml').paper.backend, 'exchange', 'config.paper.yml must not override the venue chosen in .env');
+    assert.equal(loadConfig({ ...BASE, MODE: 'paper' }, 'config.paper.yml').paper.backend, 'postgres', 'the venue defaults to postgres when .env does not choose one');
+  });
 });
 
 describe('YAML keys the agent does not read', () => {
