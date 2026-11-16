@@ -82,3 +82,21 @@ Use the type from each source (`architecture`, `dataflow`, `lifecycle`, `sequenc
 checks each evidence reference against the pinned commit, renders the page, and runs a browser check. The `.delivery.json`
 beside each page is gitignored, because it records absolute paths from the machine that made it. Before regenerating, set each source's `meta.repository.revision` to the commit you pin:
 the checker only confirms that a cited line exists in that file at that commit, so a stale pin lets wrong citations pass.
+
+## Maintaining this set
+
+The diagram set is kept only on the branch `archify/architecture-diagrams`. Do not merge the branch into `main`. Keep it
+current by rebasing it onto `main`:
+
+1. `git fetch origin && git rebase origin/main`.
+2. Set each source's `meta.repository.revision` to the new `origin/main` commit. Regenerate every page with the Archify
+   build named below, then run `npm run check`. The checker confirms only that a cited line exists at the pin, so re-read
+   each card and label claim against the code at that commit.
+3. Commit, then push with `git push --force-with-lease origin archify/architecture-diagrams`. Never force-push `main`.
+
+The current pins are `79e951f`, which is not on `main`. Step 2 replaces them.
+
+**Archify build.** The pages were rendered with Archify (`tt-a1i/archify`, a separate repository) at commit `11b0d60` on
+its `main` branch, labelled 3.2.0. That tree differs from the `v3.2.0` release tag: it adds notice blocks to pages and
+exports, and its license field reads Apache-2.0 where the tag reads MIT. The release renders the same diagram content
+without the notice blocks (checked on page 00). Record the Archify commit whenever you regenerate with a different one.
