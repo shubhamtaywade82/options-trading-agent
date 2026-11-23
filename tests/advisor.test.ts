@@ -102,6 +102,9 @@ describe('OllamaTradeAdvisor retry behaviour (Ollama Cloud deployments)', () => 
       chatWithSchema: async (request: Record<string, unknown>, schema: { parse: (value: unknown) => unknown }) => {
         captured.request = request;
         const behaviour = behaviours[Math.min(call, behaviours.length - 1)];
+        if (behaviour === undefined) {
+          throw new Error(`scripted client ran out of behaviours (call ${call + 1})`);
+        }
         call += 1;
         return schema.parse(await behaviour());
       },
