@@ -63,7 +63,7 @@ function noulReply(noul: number): { status: number; body: string } {
     status: 200,
     body: JSON.stringify({
       model: 'clef',
-      answers: { proceed: { type: 'noul', noul } },
+      answers: { decision: { type: 'noul', noul } },
       usage: { input_tokens: 612, output_tokens: 0 },
     }),
   };
@@ -85,7 +85,7 @@ describe('OllamaDecisionAdvisor over the real HTTP path', () => {
     const sent = JSON.parse(lastRequest.body) as { model: string; keep_alive?: unknown; questions: Record<string, unknown> };
     assert.equal(sent.model, 'clef');
     assert.equal(sent.keep_alive, undefined);
-    assert.equal(Object.keys(sent.questions).join(), 'proceed');
+    assert.equal(Object.keys(sent.questions).join(), 'decision');
   });
 
   it('fails closed to SKIP with the server explanation when the cloud refuses the model (402)', async () => {
@@ -94,7 +94,7 @@ describe('OllamaDecisionAdvisor over the real HTTP path', () => {
     const verdict = await advisor.review(SNAPSHOT);
     assert.equal(verdict.decision, 'SKIP');
     assert.equal(verdict.source, 'fail_closed');
-    assert.match(verdict.reason, /HTTP 402: The cloud model isn't included in the Free plan/);
+    assert.match(verdict.reason, /OllamaPaymentRequiredError: The cloud model isn't included in the Free plan/);
   });
 
   it('fails closed to SKIP when the server answers 500', async () => {
@@ -103,6 +103,6 @@ describe('OllamaDecisionAdvisor over the real HTTP path', () => {
     const verdict = await advisor.review(SNAPSHOT);
     assert.equal(verdict.decision, 'SKIP');
     assert.equal(verdict.source, 'fail_closed');
-    assert.match(verdict.reason, /HTTP 500: scoring failed/);
+    assert.match(verdict.reason, /OllamaServerError: scoring failed/);
   });
 });

@@ -277,7 +277,11 @@ OLLAMA_API_KEY=...
 OLLAMA_DECISION_MODEL=clef
 ```
 
-- Veto-only and fail-closed are unchanged, and the retry settings above apply. The journal's
+- Veto-only and fail-closed are unchanged, and the retry settings above apply. The advisor calls
+  System One through `@nemesis-oss/ollama-sdk`'s `client.decision.noul()` helper (needs SDK ≥ 1.26:
+  earlier pins marked the operation local-only and refused cloud hosts), which validates the reply
+  shape and maps HTTP failures onto typed errors; this advisor classifies and retries them with the
+  same policy as the chat advisor. The journal's
   `advisor_verdict` event carries `source: "decision"`, and its reason holds the probability, the
   threshold and the input-token count. The chat advisor's reason was the model's own explanation;
   a probability is all this advisor has.

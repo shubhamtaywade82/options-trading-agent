@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import type { EntrySnapshot } from '../src/llm/advisor.js';
-import { DECISION_QUESTIONS, OllamaDecisionAdvisor, parseRetryAfterMs } from '../src/llm/decisionAdvisor.js';
+import { DECISION_INSTRUCTIONS, OllamaDecisionAdvisor } from '../src/llm/decisionAdvisor.js';
 
 const SNAPSHOT: EntrySnapshot = {
   underlying: 'NIFTY',
@@ -42,7 +42,7 @@ function noulReply(noul: number, inputTokens = 612): Step {
     status: 200,
     body: JSON.stringify({
       model: 'clef',
-      answers: { proceed: { type: 'noul', noul } },
+      answers: { decision: { type: 'noul', noul } },
       usage: { input_tokens: inputTokens, output_tokens: 0 },
     }),
   };
@@ -56,12 +56,14 @@ function refused(status: number, error: string, headers?: Record<string, string>
 function scriptedFetch(steps: readonly Step[], captured: Captured): typeof fetch {
   let call = 0;
   return async (input, init) => {
-    const headers = new Headers(init?.headers);
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const rawBody = init?.body ?? (input instanceof Request ? await input.text() : '');
     captured.sent.push({
-      url: String(input),
-      method: init?.method,
+      url,
+      method: init?.method ?? (input instanceof Request ? input.method : undefined),
       authorization: headers.get('authorization') ?? undefined,
-      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      body: JSON.parse(String(rawBody)) as Record<string, unknown>,
     });
     const step = steps[Math.min(call, steps.length - 1)];
     if (step === undefined) {
@@ -101,7 +103,9 @@ describe('OllamaDecisionAdvisor', () => {
     assert.equal(request?.authorization, 'Bearer test-key');
     assert.equal(request?.body['model'], 'clef');
     assert.deepEqual(request?.body['state'], SNAPSHOT);
-    assert.deepEqual(request?.body['questions'], DECISION_QUESTIONS);
+    const questions = request?.body['questions'] as { decision: { type: string; instructions: string } } | undefined;
+    assert.equal(questions?.decision.type, 'noul');
+    assert.equal(questions?.decision.instructions, DECISION_INSTRUCTIONS);
     // Cloud: keep_alive omitted entirely (serverless — nothing to keep warm).
     assert.equal(request?.body['keep_alive'], undefined);
     assert.equal(captured.sent.length, 1);
@@ -134,7 +138,7 @@ describe('OllamaDecisionAdvisor', () => {
       assert.equal(verdict.confidence, 1);
       assert.equal(verdict.source, 'fail_closed');
       assert.ok(
-        verdict.reason.includes(`DecisionModelError: HTTP ${status}: ${error}`),
+        verdict.reason.includes(error),
         `reason should carry the server's own explanation, got: ${verdict.reason}`,
       );
       assert.equal(captured.sent.length, 1, 'a final answer is not retried');
@@ -155,7 +159,7 @@ describe('OllamaDecisionAdvisor', () => {
     const verdict = await cloudAdvisor([refused(503, 'model loading')], captured).review(SNAPSHOT);
     assert.equal(verdict.decision, 'SKIP');
     assert.equal(verdict.source, 'fail_closed');
-    assert.match(verdict.reason, /HTTP 503: model loading/);
+    assert.match(verdict.reason, /model loading/);
     assert.equal(captured.sent.length, 3);
   });
 
@@ -165,7 +169,8 @@ describe('OllamaDecisionAdvisor', () => {
     const verdict = await cloudAdvisor([{ error: timedOut }], captured).review(SNAPSHOT);
     assert.equal(verdict.decision, 'SKIP');
     assert.equal(verdict.source, 'fail_closed');
-    assert.match(verdict.reason, /TimeoutError/);
+    // The SDK wraps an aborted fetch in OllamaGenericClientError; the wording still says the timeout.
+    assert.match(verdict.reason, /aborted due to timeout/);
     assert.equal(captured.sent.length, 1);
   });
 
@@ -179,10 +184,10 @@ describe('OllamaDecisionAdvisor', () => {
 
   it('fails closed when the reply is not a noul answer', async () => {
     for (const body of [
-      '{"model":"clef","answers":{"proceed":{"type":"choice","choice":"ENTER"}},"usage":{"input_tokens":1,"output_tokens":0}}',
+      '{"model":"clef","answers":{"decision":{"type":"choice","choice":"ENTER"}},"usage":{"input_tokens":1,"output_tokens":0}}',
       '{"model":"clef","answers":{}}',
-      '{"model":"clef","answers":{"proceed":{"type":"noul","noul":1.5}}}',
-      '{"model":"clef","answers":{"proceed":{"type":"noul","noul":true}}}',
+      '{"model":"clef","answers":{"decision":{"type":"noul","noul":1.5}}}',
+      '{"model":"clef","answers":{"decision":{"type":"noul","noul":true}}}',
       'ENTER',
     ]) {
       const captured: Captured = { sent: [] };
@@ -205,21 +210,5 @@ describe('OllamaDecisionAdvisor', () => {
     assert.equal(request?.url, 'http://127.0.0.1:11434/v1/systemone', 'a trailing slash on the host is not doubled');
     assert.equal(request?.authorization, undefined);
     assert.equal(request?.body['keep_alive'], '30m');
-  });
-});
-
-describe('parseRetryAfterMs', () => {
-  it('reads delay seconds and HTTP dates, and rejects what it cannot use', () => {
-    assert.equal(parseRetryAfterMs('1'), 1_000);
-    assert.equal(parseRetryAfterMs('0.01'), 10);
-    assert.equal(parseRetryAfterMs(null), undefined);
-    assert.equal(parseRetryAfterMs(''), undefined);
-    assert.equal(parseRetryAfterMs('soon'), undefined);
-    assert.equal(parseRetryAfterMs('0'), undefined, 'zero means the wait is capped away');
-    // An HTTP date has whole-second precision, so aim at the next whole second plus one.
-    const target = (Math.floor(Date.now() / 1_000) + 2) * 1_000;
-    const untilTarget = parseRetryAfterMs(new Date(target).toUTCString()) ?? 0;
-    assert.ok(untilTarget > 1_000 && untilTarget <= 2_000, `HTTP date gave ${untilTarget}`);
-    assert.equal(parseRetryAfterMs(new Date(Date.now() - 5_000).toUTCString()), undefined, 'a date in the past is no wait');
   });
 });

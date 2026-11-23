@@ -94,7 +94,7 @@ export function describeAdvisorError(error: unknown): string {
 export type AdvisorChatClient = Pick<OllamaClient, 'chatWithSchema'>;
 
 /** Transient failures worth another attempt: 429, 503/overloaded, 5xx and proxy blips, instant network errors. */
-function isTransient(error: unknown): boolean {
+export function isTransient(error: unknown): boolean {
   return (
     error instanceof OllamaRateLimitError ||
     error instanceof OllamaOverloadedError ||
@@ -105,7 +105,7 @@ function isTransient(error: unknown): boolean {
 }
 
 /** Exponential backoff with jitter; a server 429 Retry-After hint wins when present (capped). */
-function retryDelayMs(error: unknown, attempt: number, baseMs: number): number {
+export function retryDelayMs(error: unknown, attempt: number, baseMs: number): number {
   if (error instanceof OllamaRateLimitError) {
     const hint = cappedRetryAfterMs(error.retryAfterMs);
     if (hint !== undefined) {
