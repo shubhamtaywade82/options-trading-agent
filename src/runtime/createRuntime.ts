@@ -34,6 +34,8 @@ import { istParts, shiftDateKey } from '../time/ist.js';
 import type { MarketPort } from './ports.js';
 import { Orchestrator } from './orchestrator.js';
 import { createSharedChainContextReader } from '../options/sharedChainContext.js';
+import { startAgentSnapshot } from './agentSnapshot.js';
+import { IntentIntake } from './intentIntake.js';
 import { ledgerAndLeaseGate } from './tradingGate.js';
 
 export interface Runtime {
@@ -238,7 +240,54 @@ async function compose(
     closeSession: (reason) => session.close(reason, events.unconfirmedEvents()),
   });
   startChainRecorder(config, specs, market, logger, now);
+  startRailsBridge(config, { orchestrator, events, logger, now, redis: session.redis, runId: session.runId, journalLines: lines });
   return { orchestrator, logger, records };
+}
+
+interface RailsBridgeDeps {
+  readonly orchestrator: Orchestrator;
+  readonly events: EventLog;
+  readonly logger: Logger;
+  readonly now: () => number;
+  readonly redis: PersistenceSession['redis'];
+  readonly runId: string;
+  readonly journalLines: readonly string[];
+}
+
+/** ADR-015: the link to algo_scalper_api. Both halves are off unless configured, and neither can stop trading. */
+function startRailsBridge(config: AgentConfig, deps: RailsBridgeDeps): void {
+  const { intake, snapshotEnabled } = config.railsBridge;
+  if (intake !== undefined) {
+    new IntentIntake({
+      config: intake,
+      mode: config.mode,
+      target: deps.orchestrator,
+      journal: deps.events,
+      logger: deps.logger,
+      seenIntentIds: intentIdsReceived(deps.journalLines),
+      now: deps.now,
+    }).start();
+    deps.logger.info('Rails intent intake started', { url: intake.url, pollMs: intake.pollMs });
+  }
+  if (snapshotEnabled && deps.redis !== undefined) {
+    startAgentSnapshot({ redis: deps.redis, snapshot: () => deps.orchestrator.snapshot(), runId: deps.runId, logger: deps.logger, now: deps.now });
+  }
+}
+
+/** Intent ids this trading day already received, so a restart never runs one again. */
+function intentIdsReceived(lines: readonly string[]): string[] {
+  const ids: string[] = [];
+  for (const line of lines) {
+    try {
+      const event = JSON.parse(line) as { type?: unknown; intent_id?: unknown };
+      if (event.type === 'intent_received' && typeof event.intent_id === 'string') {
+        ids.push(event.intent_id);
+      }
+    } catch {
+      // restoreDayBook already refused to start on a malformed line.
+    }
+  }
+  return ids;
 }
 
 const CHAIN_RECORD_CHECK_MS = 30_000;
