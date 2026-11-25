@@ -240,7 +240,8 @@ async function compose(
     closeSession: (reason) => session.close(reason, events.unconfirmedEvents()),
   });
   startChainRecorder(config, specs, market, logger, now);
-  startRailsBridge(config, { orchestrator, events, logger, now, redis: session.redis, runId: session.runId, journalLines: lines });
+  const leaseHeld = (): boolean => session.lease === undefined || session.lease.holds();
+  startRailsBridge(config, { orchestrator, events, logger, now, redis: session.redis, runId: session.runId, journalLines: lines, leaseHeld });
   return { orchestrator, logger, records };
 }
 
@@ -252,6 +253,7 @@ interface RailsBridgeDeps {
   readonly redis: PersistenceSession['redis'];
   readonly runId: string;
   readonly journalLines: readonly string[];
+  readonly leaseHeld: () => boolean;
 }
 
 /** ADR-015: the link to algo_scalper_api. Both halves are off unless configured, and neither can stop trading. */
@@ -265,12 +267,13 @@ function startRailsBridge(config: AgentConfig, deps: RailsBridgeDeps): void {
       journal: deps.events,
       logger: deps.logger,
       seenIntentIds: intentIdsReceived(deps.journalLines),
+      leaseHeld: deps.leaseHeld,
       now: deps.now,
     }).start();
     deps.logger.info('Rails intent intake started', { url: intake.url, pollMs: intake.pollMs });
   }
   if (snapshotEnabled && deps.redis !== undefined) {
-    startAgentSnapshot({ redis: deps.redis, snapshot: () => deps.orchestrator.snapshot(), runId: deps.runId, logger: deps.logger, now: deps.now });
+    startAgentSnapshot({ redis: deps.redis, snapshot: () => deps.orchestrator.snapshot(), runId: deps.runId, logger: deps.logger, leaseHeld: deps.leaseHeld, now: deps.now });
   }
 }
 

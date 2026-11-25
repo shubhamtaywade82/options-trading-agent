@@ -59,6 +59,18 @@ describe('agent-snapshot/1', () => {
     assert.equal(snapshot.feed_age_ms, null);
   });
 
+  it('should publish the entry window so Rails stops forwarding outside it', () => {
+    const view = { ...cockpit([agent('NIFTY')]), entryStartMinute: 570, entryEndMinute: 840 } as CockpitSnapshot;
+
+    assert.deepEqual(buildAgentSnapshot(view, 'run-1', NOW).entry_window, { start_minute: 570, end_minute: 840 });
+  });
+
+  it('should report a lost trading lease as an engaged kill switch', () => {
+    const snapshot = buildAgentSnapshot(cockpit([agent('NIFTY')]), 'run-1', NOW, { leaseHeld: false });
+
+    assert.deepEqual(snapshot.kill_switch, { engaged: true, reason: 'TRADING_LEASE_LOST' });
+  });
+
   it('should publish with a TTL and keep running when Redis fails', async () => {
     const writes: unknown[][] = [];
     let fail = true;

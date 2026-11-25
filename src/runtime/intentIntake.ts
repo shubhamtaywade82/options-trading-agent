@@ -61,6 +61,11 @@ export interface IntentIntakeOptions {
   readonly logger: Logger;
   /** Intent ids already received today, replayed from the journal, so a restart never runs one twice. */
   readonly seenIntentIds: Iterable<string>;
+  /**
+   * False once this run has lost the trading lease. It then cannot record or trade an intent, so it must not take
+   * one: polling stops and the intents stay pending in Rails for a run that holds the lease. Defaults to held.
+   */
+  readonly leaseHeld?: () => boolean;
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
 }
@@ -97,6 +102,10 @@ export class IntentIntake {
 
   /** One poll. Never throws: Rails being down only means no new intents. */
   async pollOnce(): Promise<void> {
+    if (this.options.leaseHeld?.() === false) {
+      this.notePollError('this run does not hold the trading lease');
+      return;
+    }
     let envelope: z.infer<typeof intentEnvelopeSchema>;
     try {
       envelope = intentEnvelopeSchema.parse(await this.getJson(`/api/trade_intents?after=${encodeURIComponent(this.cursor)}&mode=${this.options.mode}`));

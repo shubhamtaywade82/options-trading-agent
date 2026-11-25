@@ -232,7 +232,12 @@ intent gets exactly one `intent-outcome/1` POST, with the entry correlation id w
 strategy as `rails:<slug>`. With `AGENT_SNAPSHOT_ENABLED=true` (needs `REDIS_URL`) the agent writes `agent-snapshot/1` to
 Redis `trading:agent:snapshot` every 2 s with a 10 s TTL, for the Rails dashboard only.
 
-**Consequences.** Rails down means no intents, so no new entries; open positions are unaffected. The agent's own strategies
+**Consequences.** Rails down means no intents, so no new entries; open positions are unaffected. A run that has lost the trading lease
+stops polling, so it never takes an intent it cannot record, and its snapshot reports `TRADING_LEASE_LOST` as an engaged
+kill switch. In paper only, a run that lost its lease tries to take it back every `LEASE_TTL_MS` (`Lease.reacquireAfterLoss`);
+acquisition still waits for expiry plus the margin, a new epoch fences older writes, and a run that took over keeps it. Live
+keeps a lost lease lost for a human to review. The snapshot also carries the agent's `entry_window`, so Rails stops forwarding
+outside it. The agent's own strategies
 keep running; the first signal on a slot wins. The intake is refused in live mode, at config load and again in
 `Orchestrator.submitExternalSignal`, until a separate promotion. Contracts are vendored from the Rails repo and must not drift.
 

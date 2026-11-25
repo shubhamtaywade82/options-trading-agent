@@ -31,7 +31,7 @@ interface Rig {
   readonly headers: Record<string, string>[];
 }
 
-function rig(responses: unknown[], options: { result?: ExternalSignalResult; seen?: string[]; durableFails?: boolean } = {}): Rig {
+function rig(responses: unknown[], options: { result?: ExternalSignalResult; seen?: string[]; durableFails?: boolean; leaseHeld?: () => boolean } = {}): Rig {
   const submitted: Rig['submitted'] = [];
   const posted: Rig['posted'] = [];
   const durable: Rig['durable'] = [];
@@ -67,6 +67,7 @@ function rig(responses: unknown[], options: { result?: ExternalSignalResult; see
     },
     logger: SILENT,
     seenIntentIds: options.seen ?? [],
+    ...(options.leaseHeld === undefined ? {} : { leaseHeld: options.leaseHeld }),
     fetch: fetchFake as typeof fetch,
     now: () => NOW,
   });
@@ -195,6 +196,19 @@ describe('Rails intent intake (ADR-015)', () => {
       [r.posted[0]?.['outcome'], r.posted[0]?.['code'], r.posted[0]?.['detail'], r.posted[0]?.['correlation_id']],
       ['dropped', 'SLOT_BUSY', 'NIFTY CE side is RISK_MANAGEMENT_ACTIVE', `intent:${FIXTURE_INTENT.intent_id}`],
     );
+  });
+
+  it('should leave intents in Rails while this run does not hold the trading lease', async () => {
+    let held = false;
+    const r = rig([envelope([intent()])], { leaseHeld: () => held });
+
+    await r.intake.pollOnce();
+    assert.equal(r.urls.length, 0, 'no poll, so a run that can trade still gets the intent');
+
+    held = true;
+    await r.intake.pollOnce();
+    await flush();
+    assert.equal(r.submitted.length, 1);
   });
 
   it('should survive Rails being unreachable', async () => {

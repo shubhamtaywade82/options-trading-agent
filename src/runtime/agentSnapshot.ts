@@ -31,6 +31,7 @@ export const agentSnapshotSchema = z.object({
   feed_age_ms: z.number().int().nullable(),
   kill_switch: z.object({ engaged: z.boolean(), reason: z.string().nullable().optional() }).strict(),
   day_pnl: z.object({ currency: z.literal('INR'), realized_inr: z.number(), unrealized_inr: z.number() }).strict(),
+  entry_window: z.object({ start_minute: z.number().int(), end_minute: z.number().int() }).strict().optional(),
   underlyings: z.array(z.object({
     underlying: z.string(),
     state: z.enum(['IDLE', 'SIGNAL_DETECTED', 'ENTRY_PENDING', 'POSITION_OPEN', 'RISK_MANAGEMENT_ACTIVE', 'EXIT_PENDING', 'POSITION_CLOSED', 'HALTED']),
@@ -66,8 +67,9 @@ function feedAgeMs(views: readonly AgentView[]): number | null {
   return ages.length === 0 ? null : Math.round(Math.min(...ages));
 }
 
-export function buildAgentSnapshot(cockpit: CockpitSnapshot, runId: string, nowMs: number): AgentSnapshot {
-  const reason = cockpit.day.killSwitchReason;
+/** A run that lost the trading lease can no longer enter, so the dashboard shows it as a kill switch. */
+export function buildAgentSnapshot(cockpit: CockpitSnapshot, runId: string, nowMs: number, run: { leaseHeld: boolean } = { leaseHeld: true }): AgentSnapshot {
+  const reason = cockpit.day.killSwitchReason ?? (run.leaseHeld ? undefined : 'TRADING_LEASE_LOST');
   return {
     schema: 'agent-snapshot/1',
     version: SNAPSHOT_VERSION,
@@ -77,6 +79,10 @@ export function buildAgentSnapshot(cockpit: CockpitSnapshot, runId: string, nowM
     feed_age_ms: feedAgeMs(cockpit.underlyings),
     kill_switch: { engaged: reason !== undefined, reason: reason ?? null },
     day_pnl: { currency: 'INR', realized_inr: cockpit.day.realizedPnlInr, unrealized_inr: cockpit.day.unrealizedPnlInr },
+    // Rails reads it to stop forwarding signals the agent would refuse as ENTRY_WINDOW_CLOSED.
+    ...(cockpit.entryStartMinute === undefined || cockpit.entryEndMinute === undefined
+      ? {}
+      : { entry_window: { start_minute: cockpit.entryStartMinute, end_minute: cockpit.entryEndMinute } }),
     underlyings: cockpit.underlyings.flatMap(underlyingEntries),
   };
 }
@@ -86,6 +92,7 @@ export interface AgentSnapshotOptions {
   readonly snapshot: () => CockpitSnapshot;
   readonly runId: string;
   readonly logger: Logger;
+  readonly leaseHeld?: () => boolean;
   readonly intervalMs?: number;
   readonly now?: () => number;
 }
@@ -96,7 +103,8 @@ export function startAgentSnapshot(options: AgentSnapshotOptions): () => void {
   let failing = false;
   let inFlight = false;
   const publish = async (): Promise<void> => {
-    const json = JSON.stringify(buildAgentSnapshot(options.snapshot(), options.runId, now()));
+    const leaseHeld = options.leaseHeld?.() ?? true;
+    const json = JSON.stringify(buildAgentSnapshot(options.snapshot(), options.runId, now(), { leaseHeld }));
     await options.redis.set(AGENT_SNAPSHOT_KEY, json, 'EX', TTL_SECONDS);
     if (failing) {
       failing = false;
